@@ -101,9 +101,20 @@ async fn by_index(
     path: &str,
 ) -> Result<Option<ObjectId>> {
     let mut top = g.get(cs).await?.generation;
+    let mut checked = HashSet::new();
     loop {
         let hist = meta.path_history(repo, path, top, CANDIDATE_BATCH).await?;
-        for e in &hist {
+        // 结果按 (代数降序, 路径) 排列，上限限制的是路径行而不是提交：满页时最后一行所在的那一代
+        // 可能还没读完（同代的旁支提交可能占满整页），只处理更高的代，下一页从这一代重新读
+        let full = hist.len() == CANDIDATE_BATCH;
+        let floor = match hist.last() {
+            Some(last) if full => last.generation,
+            _ => 0,
+        };
+        for e in hist.iter().take_while(|e| e.generation > floor) {
+            if !checked.insert(e.cs) {
+                continue;
+            }
             match on_first_parent_chain(g, cs, e.cs).await {
                 Ok(Some(true)) => return Ok(Some(e.cs)),
                 Ok(Some(false)) => {}
@@ -113,9 +124,11 @@ async fn by_index(
                 Err(e) => return Err(e),
             }
         }
-        match hist.last() {
-            Some(last) if hist.len() == CANDIDATE_BATCH && last.generation > 1 => top = last.generation - 1,
-            // 条目存在却没有任何改动记录：索引缺行（建立索引之前的数据）
+        match hist.first() {
+            // 还有更低的代没读，且这一页推进了（不全是同一代）
+            Some(first) if full && first.generation > floor => top = floor,
+            // 不满页且没找到：条目存在却没有改动记录（建立索引之前的数据）；
+            // 或者同一代的行超过一页：都交给第一父提交链扫描
             _ => return Ok(None),
         }
     }
@@ -405,6 +418,37 @@ mod tests {
         let stray = ObjectId::hash(scion_object::ObjectKind::Changeset, b"stray");
         let err = last_commits(&b.store, &b.store, REPO, stray, "", &names(&["x"]), false).await;
         assert_eq!(err, Err(QueryError::NotFound(stray)));
+    }
+
+    /// 旁支提交与第一父提交同代，并且在目录下改动了更多排序靠前的路径：索引的一页可能全是旁支。
+    #[tokio::test]
+    async fn same_generation_side_rows_do_not_hide_the_first_parent() {
+        let mut b = Builder::new().await;
+        let a = b.commit(&[], &["d/old", "x"]).await;
+        let main1 = b.commit(&[a], &["d/zzz"]).await; // 代数 2
+        // 旁支 s（代数 2）改动 70 个排在 d/zzz 之前的路径
+        let many: Vec<String> = (0..70).map(|i| format!("d/a{i:02}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        b.commit(&[a], &refs).await;
+        let tip = b.commit(&[main1], &["x"]).await;
+        // 同一代超过一页：交给扫描，结果仍是 main1
+        assert_eq!(run(&b, tip, "", &["d"], false).await, vec![Some(main1)]);
+        assert_eq!(run(&b, tip, "", &["d"], true).await, vec![Some(main1)]);
+
+        // 同代的行不满一页，但被更高一代的旁支行挤到下一页：从这一代重新读
+        let mut b = Builder::new().await;
+        let a = b.commit(&[], &["d/old", "x"]).await;
+        let main1 = b.commit(&[a], &["d/zzz"]).await;
+        let sixty: Vec<String> = (0..60).map(|i| format!("d/a{i:02}")).collect();
+        let s = b
+            .commit(&[a], &sixty.iter().map(String::as_str).collect::<Vec<_>>())
+            .await;
+        let ten: Vec<String> = (0..10).map(|i| format!("d/b{i:02}")).collect();
+        b.commit(&[s], &ten.iter().map(String::as_str).collect::<Vec<_>>())
+            .await; // 代数 3
+        let tip = b.commit(&[main1], &["x"]).await; // 代数 3
+        let mut g = Graph::new(&b.store, REPO);
+        assert_eq!(by_index(&b.store, &mut g, REPO, tip, "d").await, Ok(Some(main1)));
     }
 
     #[tokio::test]

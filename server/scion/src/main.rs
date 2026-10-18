@@ -31,6 +31,8 @@ enum LogFormat {
     Json,
 }
 
+// 只在启动时解析一次，变体大小不影响性能
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     /// 运行 L3 服务端。
@@ -208,7 +210,65 @@ struct ServerArgs {
     #[command(flatten)]
     obs: ObsArgs,
     #[command(flatten)]
+    events: EventArgs,
+    #[command(flatten)]
     storage: StorageArgs,
+}
+
+/// ref 变化的推送（docs/guide/events.md）。
+#[derive(Debug, Clone, clap::Args)]
+struct EventArgs {
+    /// 把 ref 变化 POST 到这个地址（JSON，至少送达一次）。
+    #[arg(long, value_name = "URL", env = "SCION_EVENT_WEBHOOK")]
+    event_webhook: Option<String>,
+    /// webhook 的签名密钥：X-Scion-Signature-256 为请求体的 HMAC-SHA256。
+    #[arg(
+        long,
+        value_name = "SECRET",
+        env = "SCION_EVENT_WEBHOOK_SECRET",
+        hide_env_values = true
+    )]
+    event_webhook_secret: Option<String>,
+    /// 把 ref 变化发布到 NATS JetStream（需要有覆盖 <前缀>.ref.> 的 stream）。
+    #[arg(long, value_name = "URL", env = "SCION_EVENT_NATS")]
+    event_nats: Option<String>,
+    /// NATS subject 前缀：subject 为 <前缀>.ref.created|updated|deleted。
+    #[arg(
+        long,
+        value_name = "PREFIX",
+        default_value = "scion",
+        env = "SCION_EVENT_NATS_SUBJECT"
+    )]
+    event_nats_subject: String,
+    /// 事件在元数据库中保留多久（ListRefEvents 与推送都受它限制）。
+    #[arg(long, value_name = "DURATION", default_value = "7d", value_parser = parse_duration,
+        env = "SCION_EVENT_RETENTION")]
+    event_retention: std::time::Duration,
+}
+
+impl EventArgs {
+    fn config(&self) -> anyhow::Result<scion_api::events::EventsConfig> {
+        let webhook = match &self.event_webhook {
+            Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
+                Some(scion_api::events::WebhookConfig {
+                    url: url.clone(),
+                    secret: self.event_webhook_secret.clone().filter(|s| !s.is_empty()),
+                    timeout: std::time::Duration::from_secs(10),
+                })
+            }
+            Some(url) => anyhow::bail!("--event-webhook must be an http:// or https:// URL, got {url:?}"),
+            None => None,
+        };
+        let nats = self.event_nats.as_ref().map(|url| scion_api::events::NatsConfig {
+            url: url.clone(),
+            subject_prefix: self.event_nats_subject.clone(),
+        });
+        Ok(scion_api::events::EventsConfig {
+            webhook,
+            nats,
+            retention: self.event_retention,
+        })
+    }
 }
 
 /// 指标与追踪（`scion server` 和 `scion cache` 共用）。
@@ -501,6 +561,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             ref_poll_interval: args.ref_poll_interval,
             purge_grace: args.purge_grace,
             repo_delete_grace: args.repo_delete_grace,
+            events: args.events.config()?,
             ..ServerConfig::default()
         }),
         meta,
@@ -1030,6 +1091,11 @@ mod tests {
         assert_eq!(app.config.max_request_timeout, None, "0s means client deadlines only");
         assert_eq!(app.config.cluster_secret, None);
         assert_eq!(app.config.repo_delete_grace, std::time::Duration::from_secs(24 * 3600));
+        assert_eq!(
+            app.config.events.retention,
+            std::time::Duration::from_secs(7 * 24 * 3600)
+        );
+        assert!(app.config.events.webhook.is_none() && app.config.events.nats.is_none());
         let (app, _) = build_app(
             &args(&["--advertise-url", "http://10.0.0.5:7080", "--cluster-secret", "s3cret"]),
             no_env,
@@ -1045,6 +1111,40 @@ mod tests {
         build_app(&args(&["--advertise-url", "http://10.0.0.5:7080"]), no_env)
             .await
             .expect("cluster without a secret only warns");
+    }
+
+    #[tokio::test]
+    async fn event_flags() {
+        let (app, _) = build_app(
+            &args(&[
+                "--event-webhook",
+                "https://hooks.example.com/scion",
+                "--event-webhook-secret",
+                "s3cret",
+                "--event-nats",
+                "nats://nats:4222",
+                "--event-nats-subject",
+                "csghub.scion",
+                "--event-retention",
+                "1d",
+            ]),
+            no_env,
+        )
+        .await
+        .expect("events");
+        let e = &app.config.events;
+        let w = e.webhook.as_ref().expect("webhook");
+        assert_eq!(
+            (w.url.as_str(), w.secret.as_deref()),
+            ("https://hooks.example.com/scion", Some("s3cret"))
+        );
+        let n = e.nats.as_ref().expect("nats");
+        assert_eq!(
+            (n.url.as_str(), n.subject_prefix.as_str()),
+            ("nats://nats:4222", "csghub.scion")
+        );
+        assert_eq!(e.retention, std::time::Duration::from_secs(86_400));
+        assert!(build_app(&args(&["--event-webhook", "ftp://x"]), no_env).await.is_err());
     }
 
     #[tokio::test]

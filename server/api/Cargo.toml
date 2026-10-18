@@ -7,6 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-nats = { version = "0.46", default-features = false, features = ["jetstream", "ring", "server_2_10"] }
+async-trait.workspace = true
+hmac = "0.12"
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
 scion-obs.workspace = true
 bytes.workspace = true
 scion-object.workspace = true

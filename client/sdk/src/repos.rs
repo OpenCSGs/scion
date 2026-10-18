@@ -4,7 +4,8 @@ use bytes::Bytes;
 use scion_object::ObjectId;
 use scion_proto::v1::{
     self, CreateRefRequest, CreateRepoRequest, DeleteRefRequest, DeleteRepoRequest, ForkRepoRequest, GetRepoRequest,
-    ListReposRequest, RestoreRepoRequest, UpdateRefRequest, UpdateRepoRequest, ref_service_client::RefServiceClient,
+    ListRefEventsRequest, ListReposRequest, RestoreRepoRequest, UpdateRefRequest, UpdateRepoRequest,
+    event_service_client::EventServiceClient, ref_service_client::RefServiceClient,
     repo_service_client::RepoServiceClient,
 };
 
@@ -47,6 +48,38 @@ pub struct RepoPage {
     pub repos: Vec<RepoInfo>,
     /// 下一页的游标；`None` 表示没有更多。
     pub next_page_token: Option<String>,
+}
+
+/// 一次 ref 变化（[`Client::list_ref_events`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefEventInfo {
+    pub seq: u64,
+    pub repo: String,
+    pub name: String,
+    /// `None` 表示 ref 是新建的。
+    pub old: Option<ObjectId>,
+    /// `None` 表示 ref 被删除。
+    pub new: Option<ObjectId>,
+    pub version: u64,
+    pub created_at_ms: i64,
+}
+
+/// [`Client::list_ref_events`] 的一页。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefEventPage {
+    pub events: Vec<RefEventInfo>,
+    /// 下一次的 `after_seq`。
+    pub next_seq: u64,
+    /// 部分事件已被清理，需要重新同步全部 ref。
+    pub truncated: bool,
+}
+
+fn opt_id(raw: &[u8]) -> Result<Option<ObjectId>> {
+    if raw.is_empty() {
+        Ok(None)
+    } else {
+        id_from(raw, "changeset id").map(Some)
+    }
 }
 
 /// 新仓库的属性。
@@ -177,6 +210,39 @@ impl Client {
         ref_of(resp.into_inner().r#ref)
     }
 
+    /// 读取 `after_seq` 之后的 ref 变化；`repo` 为 `None` 时为全部仓库（需要系统管理员）。
+    pub async fn list_ref_events(&self, after_seq: u64, limit: u32, repo: Option<&str>) -> Result<RefEventPage> {
+        let req = ListRefEventsRequest {
+            after_seq,
+            limit,
+            repo: repo.unwrap_or_default().to_owned(),
+        };
+        let resp = EventServiceClient::new(self.channel.clone())
+            .list_ref_events(self.request(req)?)
+            .await?
+            .into_inner();
+        let events = resp
+            .events
+            .into_iter()
+            .map(|e| {
+                Ok(RefEventInfo {
+                    old: opt_id(&e.old_changeset_id)?,
+                    new: opt_id(&e.new_changeset_id)?,
+                    seq: e.seq,
+                    repo: e.repo,
+                    name: e.r#ref,
+                    version: e.version,
+                    created_at_ms: e.created_at_ms,
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(RefEventPage {
+            events,
+            next_seq: resp.next_seq,
+            truncated: resp.truncated,
+        })
+    }
+
     /// 删除 ref（不能删除默认分支）。
     pub async fn delete_ref(&self, name: &str, expected_version: Option<u64>) -> Result<()> {
         let req = DeleteRefRequest {
@@ -225,5 +291,7 @@ mod tests {
             version: 1,
         };
         assert!(ref_of(Some(bad)).is_err());
+        assert_eq!(opt_id(&[]).expect("empty"), None);
+        assert!(opt_id(b"bad").is_err());
     }
 }

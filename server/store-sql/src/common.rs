@@ -220,6 +220,24 @@ pub fn list_limit(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
+/// `ref_events` 的列（顺序与 [`RefEventRow`] 一致）。
+pub const REF_EVENT_COLUMNS: &str = "seq, repo, ref, old_target, new_target, version, created_at_ms";
+
+pub type RefEventRow = (i64, String, String, Option<Vec<u8>>, Option<Vec<u8>>, i64, i64);
+
+pub fn ref_event_from_row(r: RefEventRow) -> Result<scion_store::RefEvent> {
+    let (seq, repo, name, old, new, version, created_at_ms) = r;
+    Ok(scion_store::RefEvent {
+        seq: version_from_db(seq)?,
+        repo,
+        name,
+        old_target: old.as_deref().map(id_from_db).transpose()?,
+        new_target: new.as_deref().map(id_from_db).transpose()?,
+        version: version_from_db(version)?,
+        created_at_ms,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

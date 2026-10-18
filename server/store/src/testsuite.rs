@@ -1250,3 +1250,82 @@ pub async fn repo_admin<S: MetaStore + ?Sized>(s: &S) {
     // fork 不受来源清除的影响
     assert_eq!(s.missing_objects("adm/fork", &[blob]).await, Ok(vec![]));
 }
+
+/// ref 变化的事件流：与 ref 修改同一事务写入，按 seq 递增；失败的 CAS 不产生事件；fork 为每个 ref 产生创建事件。
+pub async fn ref_events<S: MetaStore + ?Sized>(s: &S) {
+    use crate::RefEvent;
+    let start = s.ref_event_bounds().await.expect("bounds").1;
+    s.create_repo("ev/a").await.expect("create");
+    s.create_repo("ev/b").await.expect("create");
+    let (x, y) = (cs(101), cs(102));
+    s.cas_ref("ev/a", "main", RefExpect::Absent, x)
+        .await
+        .expect("create main");
+    s.cas_ref("ev/b", "main", RefExpect::Absent, y)
+        .await
+        .expect("create b main");
+    s.land_commit("ev/a", "main", RefExpect::Version(1), y, &[], &[])
+        .await
+        .expect("advance");
+    assert!(
+        s.cas_ref("ev/a", "main", RefExpect::Version(1), x).await.is_err(),
+        "stale CAS"
+    );
+    s.delete_ref("ev/a", "main", None).await.expect("delete");
+
+    let all = s.list_ref_events(start, 100, None).await.expect("list");
+    let brief = |e: &RefEvent| (e.repo.clone(), e.name.clone(), e.old_target, e.new_target, e.version);
+    assert_eq!(
+        all.iter().map(brief).collect::<Vec<_>>(),
+        [
+            ("ev/a".to_string(), "main".to_string(), None, Some(x), 1),
+            ("ev/b".to_string(), "main".to_string(), None, Some(y), 1),
+            ("ev/a".to_string(), "main".to_string(), Some(x), Some(y), 2),
+            ("ev/a".to_string(), "main".to_string(), Some(y), None, 2),
+        ]
+    );
+    assert!(all.windows(2).all(|w| w[1].seq == w[0].seq + 1), "consecutive seqs");
+    assert!(all.iter().all(|e| e.created_at_ms > 0));
+    // 分页与按仓库过滤
+    let first = s.list_ref_events(start, 1, None).await.expect("page");
+    assert_eq!(first.len(), 1);
+    let rest = s.list_ref_events(first[0].seq, 100, None).await.expect("rest");
+    assert_eq!(rest.len(), 3);
+    let only_b = s.list_ref_events(start, 100, Some("ev/b")).await.expect("repo");
+    assert_eq!(
+        only_b.iter().map(brief).collect::<Vec<_>>(),
+        [all[1].clone()].iter().map(brief).collect::<Vec<_>>()
+    );
+    let (lo, hi) = s.ref_event_bounds().await.expect("bounds");
+    assert!(lo.is_some_and(|lo| lo <= all[0].seq) && hi == all[3].seq);
+
+    // 重新创建删除过的 ref：旧值为空
+    s.cas_ref("ev/a", "main", RefExpect::Absent, x).await.expect("recreate");
+    // fork：每个 ref 一个创建事件
+    s.fork_repo("ev/b", "ev/fork", 1).await.expect("fork");
+    let tail = s.list_ref_events(hi, 100, None).await.expect("tail");
+    assert_eq!(
+        tail.iter().map(brief).collect::<Vec<_>>(),
+        [
+            ("ev/a".to_string(), "main".to_string(), None, Some(x), 1),
+            ("ev/fork".to_string(), "main".to_string(), None, Some(y), 1),
+        ]
+    );
+
+    // 清理：按时间删除
+    assert_eq!(s.prune_ref_events(0).await, Ok(0));
+    assert!(s.prune_ref_events(i64::MAX).await.expect("prune") >= 6);
+    assert_eq!(
+        s.ref_event_bounds().await,
+        Ok((None, tail[1].seq)),
+        "counter survives pruning"
+    );
+    assert_eq!(s.list_ref_events(0, 100, None).await, Ok(vec![]));
+    // 清理后序号继续递增
+    s.cas_ref("ev/b", "main", RefExpect::Version(1), x)
+        .await
+        .expect("advance b");
+    let after = s.list_ref_events(0, 100, None).await.expect("after prune");
+    assert_eq!(after.len(), 1);
+    assert!(after[0].seq > tail[1].seq);
+}

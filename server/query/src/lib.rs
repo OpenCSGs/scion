@@ -157,6 +157,45 @@ async fn is_ancestor_in(g: &mut Graph<'_>, ancestor: ObjectId, descendant: Objec
     Ok(false)
 }
 
+/// 一次 ref 变化引入的提交：从 `new` 可达、从 `old` 不可达的提交，按代数从新到旧，最多 `limit` 个。
+/// 返回 (提交, 是否被截断)。`old` 为空（新建的 ref）时返回 `new` 的历史。
+pub async fn new_commits(
+    meta: &dyn MetaStore,
+    repo: &str,
+    old: Option<ObjectId>,
+    new: ObjectId,
+    limit: usize,
+) -> Result<(Vec<ChangesetRecord>, bool)> {
+    let mut g = Graph::new(meta, repo);
+    let old_gen = match old {
+        Some(o) => Some((o, g.get(o).await?.generation)),
+        None => None,
+    };
+    let mut queue: BinaryHeap<(u64, ObjectId)> = BinaryHeap::new();
+    let mut queued = HashSet::from([new]);
+    queue.push((g.get(new).await?.generation, new));
+    let mut out = Vec::new();
+    while let Some((generation, id)) = queue.pop() {
+        if let Some((o, og)) = old_gen {
+            // 代数不大于 old 的提交才可能是 old 的祖先
+            if id == o || (generation <= og && is_ancestor_in(&mut g, id, o).await?) {
+                continue;
+            }
+        }
+        if out.len() == limit {
+            return Ok((out, true));
+        }
+        let rec = g.get(id).await?.clone();
+        for p in &rec.parents {
+            if queued.insert(*p) {
+                queue.push((g.get(*p).await?.generation, *p));
+            }
+        }
+        out.push(rec);
+    }
+    Ok((out, false))
+}
+
 const PARENT1: u8 = 1;
 const PARENT2: u8 = 2;
 const STALE: u8 = 4;
@@ -464,6 +503,43 @@ mod tests {
         let m = b.commit(&[c, e], &[]).await;
         let n = b.commit(&[m], &["src/n.rs"]).await;
         (b, [a, bb, c, d, e, m, n])
+    }
+
+    #[tokio::test]
+    async fn new_commits_between_two_tips() {
+        let (b, [a, bb, c, d, e, m, n]) = diamond().await;
+        let s = &b.store;
+        let ids = |v: (Vec<ChangesetRecord>, bool)| (v.0.into_iter().map(|r| r.id).collect::<Vec<_>>(), v.1);
+        assert_eq!(
+            ids(new_commits(s, REPO, Some(c), n, 10).await.expect("ok")),
+            (vec![n, m, e, d], false)
+        );
+        assert_eq!(
+            ids(new_commits(s, REPO, Some(m), n, 10).await.expect("ok")),
+            (vec![n], false)
+        );
+        assert_eq!(
+            ids(new_commits(s, REPO, Some(n), n, 10).await.expect("ok")),
+            (vec![], false)
+        );
+        // 回退（新提交是旧提交的祖先）：没有新提交
+        assert_eq!(
+            ids(new_commits(s, REPO, Some(n), bb, 10).await.expect("ok")),
+            (vec![], false)
+        );
+        // 分叉：只返回新分支上独有的提交
+        let (got, _) = ids(new_commits(s, REPO, Some(c), e, 10).await.expect("ok"));
+        assert_eq!(got, [e, d]);
+        // 新建的 ref：全部历史；超过上限时截断
+        let (all, truncated) = ids(new_commits(s, REPO, None, n, 100).await.expect("ok"));
+        assert_eq!((all.len(), truncated), (7, false));
+        assert_eq!(all.last(), Some(&a));
+        assert_eq!(
+            ids(new_commits(s, REPO, None, n, 2).await.expect("ok")),
+            (vec![n, m], true)
+        );
+        let ghost = ObjectId::hash(scion_object::ObjectKind::Changeset, b"ghost");
+        assert!(new_commits(s, REPO, Some(ghost), n, 10).await.is_err());
     }
 
     #[tokio::test]

@@ -13,6 +13,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "scion/v1/auth.proto",
         "scion/v1/admin.proto",
         "scion/v1/repo.proto",
+        "scion/v1/event.proto",
     ];
     let fds = protox::compile(files, [&root])?;
     // 全部 RPC 的路径（`/scion.v1.ObjectService/GetObjects`），供指标只给已知方法建时间序列

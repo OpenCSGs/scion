@@ -15,7 +15,7 @@ use scion_object::ObjectId;
 
 use crate::{
     ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange, PathHistoryEntry,
-    Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord,
+    Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord,
 };
 
 /// 提交记录在缓存中的最长保留时间。
@@ -295,6 +295,18 @@ impl MetaStore for CachedMeta {
         self.inner.fork_repo(source, target, now_ms).await
     }
 
+    async fn list_ref_events(&self, after_seq: u64, limit: usize, repo: Option<&str>) -> Result<Vec<RefEvent>> {
+        self.inner.list_ref_events(after_seq, limit, repo).await
+    }
+
+    async fn ref_event_bounds(&self) -> Result<(Option<u64>, u64)> {
+        self.inner.ref_event_bounds().await
+    }
+
+    async fn prune_ref_events(&self, before_ms: i64) -> Result<u64> {
+        self.inner.prune_ref_events(before_ms).await
+    }
+
     async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
         self.inner.delete_ref(repo, name, expect).await
     }
@@ -378,6 +390,7 @@ mod tests {
         testsuite::tokens_and_settings(&cached()).await;
         testsuite::redactions(&cached()).await;
         testsuite::repo_admin(&cached()).await;
+        testsuite::ref_events(&cached()).await;
     }
 
     #[tokio::test]

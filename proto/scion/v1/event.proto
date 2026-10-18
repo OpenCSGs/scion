@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package scion.v1;
+
+// ref 变化的事件流（docs/guide/events.md）。事件与 ref 的修改在同一个事务里写入，seq 全局递增且与提交顺序一致：
+// 消费方记下处理到的 seq，下次从它之后读取，不会漏掉变化。服务端也可以把同样的事件推送到 webhook 或 NATS。
+service EventService {
+  // 读取 after_seq 之后的 ref 变化。指定 repo 时需要该仓库的 read 权限，不指定时需要系统管理员。
+  rpc ListRefEvents(ListRefEventsRequest) returns (ListRefEventsResponse);
+}
+
+message ListRefEventsRequest {
+  uint64 after_seq = 1;
+  // 默认 100，最大 1000。
+  uint32 limit = 2;
+  // 为空时返回全部仓库的变化。
+  string repo = 3;
+}
+
+message RefChangeEvent {
+  uint64 seq = 1;
+  string repo = 2;
+  string ref = 3;
+  // 变化前的提交；为空表示 ref 是新建的。
+  bytes old_changeset_id = 4;
+  // 变化后的提交；为空表示 ref 被删除。
+  bytes new_changeset_id = 5;
+  // 变化后的版本（删除时为被删除的版本）。
+  uint64 version = 6;
+  int64 created_at_ms = 7;
+}
+
+message ListRefEventsResponse {
+  repeated RefChangeEvent events = 1;
+  // 下一次的 after_seq（没有新事件时等于请求的 after_seq）。
+  uint64 next_seq = 2;
+  // after_seq 之后的部分事件已按保留期清理（服务端 --event-retention），消费方需要重新同步全部 ref。
+  bool truncated = 3;
+}

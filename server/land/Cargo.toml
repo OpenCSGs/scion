@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+scion-obs.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 scion-merge.workspace = true

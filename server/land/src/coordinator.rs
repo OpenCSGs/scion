@@ -228,9 +228,13 @@ impl Coordinator {
             fingerprint,
             reply: tx,
         };
+        let started = std::time::Instant::now();
         self.enqueue(key, job)?;
-        rx.await
-            .map_err(|_| LandError::Unavailable("land coordinator stopped".into()))?
+        let out = rx
+            .await
+            .map_err(|_| LandError::Unavailable("land coordinator stopped".into()))?;
+        scion_obs::metrics().land_finished(started.elapsed());
+        out
     }
 
     /// 查询请求结果，语义与 [`crate::Lander::status`] 相同。
@@ -454,6 +458,7 @@ async fn process(shared: &Shared, repo: &str, batch: Vec<Job>) {
             }
         }
         if let Err(e) = writer.persist(repo, batch.built()).await {
+            scion_obs::metrics().land_batch("failed", planned.len());
             return fail_all(planned.into_iter().map(|(j, _)| j).collect(), e);
         }
         match meta
@@ -462,19 +467,23 @@ async fn process(shared: &Shared, repo: &str, batch: Vec<Job>) {
         {
             Ok(state) => {
                 tracing::debug!(repo, reference = %reference, batch = planned.len(), version = state.version, "batch landed");
+                scion_obs::metrics().land_batch("landed", planned.len());
                 reply_all(planned, state);
                 return;
             }
             Err(scion_store::Error::RefVersionMismatch { .. }) => {
                 tracing::debug!(repo, reference = %reference, attempt, "ref moved under the coordinator; redoing batch");
+                scion_obs::metrics().land_batch("retried", planned.len());
                 pending = planned.into_iter().map(|(j, _)| j).collect();
                 tokio::time::sleep(crate::land::backoff(attempt)).await;
             }
             Err(e) => {
+                scion_obs::metrics().land_batch("failed", planned.len());
                 return fail_all(planned.into_iter().map(|(j, _)| j).collect(), e.into());
             }
         }
     }
+    scion_obs::metrics().land_batch("failed", pending.len());
     fail_all(pending, LandError::Contention);
 }
 

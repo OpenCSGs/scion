@@ -9,7 +9,7 @@ pub(crate) mod support;
 mod write;
 
 pub use auth::{AdminSvc, AuthSvc};
-pub use land::{FORWARDED_HEADER, LandSvc};
+pub use land::{FORWARDED_HEADER, LandSvc, trusted_forward};
 pub use object::ObjectSvc;
 pub use query::QuerySvc;
 pub use refs::RefSvc;

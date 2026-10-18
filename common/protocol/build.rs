@@ -14,6 +14,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "scion/v1/admin.proto",
     ];
     let fds = protox::compile(files, [&root])?;
+    // 全部 RPC 的路径（`/scion.v1.ObjectService/GetObjects`），供指标只给已知方法建时间序列
+    let mut methods = Vec::new();
+    for f in &fds.file {
+        let package = f.package.clone().unwrap_or_default();
+        for s in &f.service {
+            for m in &s.method {
+                methods.push(format!(
+                    "/{package}.{}/{}",
+                    s.name.clone().unwrap_or_default(),
+                    m.name.clone().unwrap_or_default()
+                ));
+            }
+        }
+    }
+    methods.sort();
+    let list: String = methods.iter().map(|m| format!("    {m:?},\n")).collect();
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("methods.rs");
+    std::fs::write(out, format!("&[\n{list}]\n"))?;
     tonic_prost_build::configure().bytes(".").compile_fds(fds)?;
     println!("cargo:rerun-if-changed={}", root.display());
     Ok(())

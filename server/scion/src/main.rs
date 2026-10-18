@@ -161,6 +161,10 @@ struct ServerArgs {
     /// 对象存储时，每个 ref 的合入由持有租约的节点处理，其它节点转发给它。
     #[arg(long, value_name = "URL", env = "SCION_ADVERTISE_URL", conflicts_with = "lite")]
     advertise_url: Option<String>,
+    /// 集群共享密钥（各节点相同）：节点间转发合入时带上，收到的节点据此跳过重复的限流计数。
+    /// 不设置时转发的合入在两个节点上各计一次。
+    #[arg(long, value_name = "SECRET", env = "SCION_CLUSTER_SECRET", hide_env_values = true)]
+    cluster_secret: Option<String>,
     /// 全局在途请求上限，超过时立即拒绝（客户端可重试）。
     #[arg(
         long,
@@ -172,6 +176,16 @@ struct ServerArgs {
     /// 按仓库的写入速率限制：每秒 RATE 次，可选突发 BURST（默认等于 2×RATE），如 200 或 200/1000。
     #[arg(long, value_name = "RATE[/BURST]", value_parser = parse_write_rate, env = "SCION_REPO_WRITE_RATE")]
     repo_write_rate: Option<scion_api::WriteRate>,
+    /// 按调用者（认证过的主体，匿名时为来源 IP）的请求速率限制，所有 RPC 各算一次：RATE[/BURST]。
+    #[arg(long, value_name = "RATE[/BURST]", value_parser = parse_write_rate, env = "SCION_TENANT_RATE")]
+    tenant_rate: Option<scion_api::WriteRate>,
+    /// 每个调用者的在途请求上限。
+    #[arg(long, value_name = "N", env = "SCION_TENANT_CONCURRENCY")]
+    tenant_concurrency: Option<usize>,
+    /// 请求处理时间上限（与客户端 deadline 取较小者，超时返回 DEADLINE_EXCEEDED）；0s 只按客户端的 deadline。
+    #[arg(long, value_name = "DURATION", default_value = "60s", value_parser = parse_duration,
+        env = "SCION_MAX_REQUEST_TIMEOUT")]
+    max_request_timeout: std::time::Duration,
     /// 推荐给客户端的只读端点（区域缓存 `scion cache` 的地址），可附带区域名：URL 或 URL@REGION。
     /// 可重复指定，客户端从中选择读取对象的地址。
     #[arg(long = "read-endpoint", value_name = "URL[@REGION]", value_parser = parse_read_endpoint,
@@ -188,7 +202,21 @@ struct ServerArgs {
     #[command(flatten)]
     auth: authcmd::AuthArgs,
     #[command(flatten)]
+    obs: ObsArgs,
+    #[command(flatten)]
     storage: StorageArgs,
+}
+
+/// 指标与追踪（`scion server` 和 `scion cache` 共用）。
+#[derive(Debug, Clone, Default, clap::Args)]
+struct ObsArgs {
+    /// Prometheus 指标的 HTTP 监听地址（GET /metrics），如 0.0.0.0:9464；不指定时不提供。
+    #[arg(long, value_name = "ADDR", env = "SCION_METRICS_LISTEN")]
+    metrics_listen: Option<SocketAddr>,
+    /// OTLP gRPC 地址（如 http://otel-collector:4317），把 trace 导出到 OpenTelemetry collector。
+    /// 也可以只设置标准环境变量 OTEL_EXPORTER_OTLP_ENDPOINT。
+    #[arg(long, value_name = "URL", env = "SCION_OTLP_ENDPOINT")]
+    otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
@@ -246,6 +274,8 @@ struct CacheArgs {
     /// 预热时使用的令牌（服务端要求认证时需要），建议用环境变量传入。
     #[arg(long, value_name = "TOKEN", env = "SCION_CACHE_WARM_TOKEN", hide_env_values = true)]
     warm_token: Option<String>,
+    #[command(flatten)]
+    obs: ObsArgs,
 }
 
 /// 字节数：纯数字，或带 K/M/G/T（KiB/MiB/…，均按 1024 进位）后缀。
@@ -364,19 +394,33 @@ fn parse_write_rate(s: &str) -> Result<scion_api::WriteRate, String> {
     })
 }
 
-fn init_tracing(format: LogFormat) {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("SCION_LOG")
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    // 写日志失败（例如日志采集进程重启导致管道断开）时直接丢弃这条日志。默认行为是改用 eprintln!
-    // 报告，而 stderr 已坏时 eprintln! 会 panic，导致正在处理的请求失败。
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .log_internal_errors(false);
-    match format {
-        LogFormat::Text => builder.init(),
-        LogFormat::Json => builder.json().init(),
-    }
+/// 初始化日志与追踪（`service` 为 OpenTelemetry 的 service.name）。返回的 guard 在退出时导出剩余的 span。
+fn init_tracing(format: LogFormat, service: &str, obs: &ObsArgs) -> anyhow::Result<scion_obs::trace::TraceGuard> {
+    scion_obs::trace::init(&scion_obs::trace::TraceConfig {
+        service_name: service.to_owned(),
+        otlp_endpoint: obs.otlp_endpoint.clone(),
+        json: format == LogFormat::Json,
+        filter_env: "SCION_LOG".to_owned(),
+    })
+    .map_err(|e| anyhow::anyhow!("initializing tracing: {e}"))
+}
+
+/// 启动 `/metrics`（指定了 `--metrics-listen` 时），随进程退出。
+async fn start_metrics(obs: &ObsArgs) -> anyhow::Result<Option<SocketAddr>> {
+    let Some(addr) = obs.metrics_listen else {
+        return Ok(None);
+    };
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind metrics listener {addr}"))?;
+    let local = listener.local_addr()?;
+    tokio::spawn(async move {
+        if let Err(e) = scion_obs::http::serve_metrics(listener, std::future::pending()).await {
+            tracing::error!(error = %e, "metrics endpoint stopped");
+        }
+    });
+    tracing::info!(addr = %local, "metrics listening");
+    Ok(Some(local))
 }
 
 fn version_text() -> String {
@@ -401,6 +445,16 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
         Some(url) => anyhow::bail!("--advertise-url must be an http:// or https:// URL, got {url:?}"),
         None => None,
     };
+    if cluster.is_some() && args.cluster_secret.as_deref().is_none_or(str::is_empty) {
+        tracing::warn!(
+            "cluster mode without --cluster-secret: forwarded lands count against rate limits on both nodes"
+        );
+    }
+    if let Some(s) = &args.cluster_secret {
+        if tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(s.as_str()).is_err() {
+            anyhow::bail!("--cluster-secret must be printable ASCII");
+        }
+    }
     let auth = args.auth.guard_config()?;
     let (meta_spec, blob_spec) = args.storage.specs()?;
     let (meta, blobs) = storage::open(&meta_spec, &blob_spec, env).await?;
@@ -430,6 +484,10 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             cluster,
             max_concurrent_requests: args.max_concurrent_requests,
             repo_write_rate: args.repo_write_rate,
+            tenant_rate: args.tenant_rate,
+            cluster_secret: args.cluster_secret.clone().filter(|s| !s.is_empty()),
+            max_concurrent_per_tenant: args.tenant_concurrency,
+            max_request_timeout: Some(args.max_request_timeout).filter(|d| !d.is_zero()),
             read_endpoints: args.read_endpoints.clone(),
             auth,
             ref_poll_interval: args.ref_poll_interval,
@@ -507,6 +565,7 @@ async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
     if backends.contains("meta=mem") || backends.contains("blobs=mem") {
         tracing::warn!("in-memory storage in use; data is lost on exit");
     }
+    start_metrics(&args.obs).await?;
     let shutdown = shutdown_signal();
     // 集成测试按这一行解析实际监听地址，修改时同步 tests/
     tracing::info!(%addr, repos = ?args.repos, %backends, "scion server listening");
@@ -522,6 +581,7 @@ async fn run_cache(args: CacheArgs) -> anyhow::Result<()> {
         .with_context(|| format!("bind {}", args.listen))?;
     let addr = listener.local_addr()?;
     let (node, info, channels) = scion_cache::build(&config).await?;
+    start_metrics(&args.obs).await?;
     let shutdown = shutdown_signal();
     // 集成测试按这一行解析实际监听地址
     tracing::info!(%addr, upstreams = ?config.upstreams, peers = ?config.peers,
@@ -540,11 +600,11 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Server(args) => {
-            init_tracing(cli.log_format);
+            let _trace = init_tracing(cli.log_format, "scion-server", &args.obs)?;
             run_server(args).await
         }
         Command::Cache(args) => {
-            init_tracing(cli.log_format);
+            let _trace = init_tracing(cli.log_format, "scion-cache", &args.obs)?;
             run_cache(args).await
         }
         Command::Admin(AdminCmd::Reindex(args)) => {
@@ -934,6 +994,83 @@ mod tests {
             (app.config.max_concurrent_requests, app.config.repo_write_rate),
             (10_000, None)
         );
+        assert_eq!(app.config.tenant_rate, None);
+        assert_eq!(app.config.max_concurrent_per_tenant, None);
+        assert_eq!(app.config.max_request_timeout, Some(std::time::Duration::from_secs(60)));
+        let (app, _) = build_app(
+            &args(&[
+                "--tenant-rate",
+                "50",
+                "--tenant-concurrency",
+                "8",
+                "--max-request-timeout",
+                "0s",
+            ]),
+            no_env,
+        )
+        .await
+        .expect("tenant limits");
+        assert_eq!(
+            app.config.tenant_rate,
+            Some(scion_api::WriteRate {
+                per_second: 50,
+                burst: 100
+            })
+        );
+        assert_eq!(app.config.max_concurrent_per_tenant, Some(8));
+        assert_eq!(app.config.max_request_timeout, None, "0s means client deadlines only");
+        assert_eq!(app.config.cluster_secret, None);
+        let (app, _) = build_app(
+            &args(&["--advertise-url", "http://10.0.0.5:7080", "--cluster-secret", "s3cret"]),
+            no_env,
+        )
+        .await
+        .expect("cluster");
+        assert_eq!(app.config.cluster_secret.as_deref(), Some("s3cret"));
+        assert!(
+            build_app(&args(&["--cluster-secret", "bad\nsecret"]), no_env)
+                .await
+                .is_err()
+        );
+        build_app(&args(&["--advertise-url", "http://10.0.0.5:7080"]), no_env)
+            .await
+            .expect("cluster without a secret only warns");
+    }
+
+    #[tokio::test]
+    async fn observability_flags() {
+        let cli = Cli::try_parse_from([
+            "scion",
+            "server",
+            "--metrics-listen",
+            "127.0.0.1:0",
+            "--otlp-endpoint",
+            "http://collector:4317",
+        ])
+        .expect("parse");
+        let Command::Server(a) = cli.command else {
+            panic!("server");
+        };
+        assert_eq!(a.obs.otlp_endpoint.as_deref(), Some("http://collector:4317"));
+        let bound = start_metrics(&a.obs).await.expect("metrics").expect("bound");
+        assert_ne!(bound.port(), 0);
+        assert_eq!(start_metrics(&ObsArgs::default()).await.expect("off"), None);
+        let busy = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let taken = ObsArgs {
+            metrics_listen: Some(busy.local_addr().expect("addr")),
+            ..ObsArgs::default()
+        };
+        assert!(start_metrics(&taken).await.is_err(), "address in use");
+        let cli = Cli::try_parse_from([
+            "scion",
+            "cache",
+            "--upstream",
+            "http://u",
+            "--metrics-listen",
+            "0.0.0.0:9464",
+        ])
+        .expect("parse");
+        assert!(matches!(cli.command, Command::Cache(ref c) if c.obs.metrics_listen.is_some()));
     }
 
     #[tokio::test]

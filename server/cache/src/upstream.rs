@@ -37,6 +37,23 @@ pub const CACHE_FORWARDED_HEADER: &str = "x-scion-cache-forwarded";
 pub struct RequestCtx {
     /// 调用者的 `authorization`，原样转给上游（缓存不持有凭证）。
     pub authorization: Option<MetadataValue<Ascii>>,
+    /// 调用者的 `traceparent`：本节点没有启用追踪时原样转发，trace 不会断开。
+    pub traceparent: Option<MetadataValue<Ascii>>,
+    /// 调用者的 deadline：回源沿用剩余的时间。
+    pub deadline: Option<scion_obs::deadline::Deadline>,
+}
+
+impl RequestCtx {
+    /// 给发往上游的请求带上调用者的身份、trace 上下文与剩余的 deadline。
+    pub fn apply<T>(&self, req: &mut tonic::Request<T>) {
+        if let Some(a) = &self.authorization {
+            req.metadata_mut().insert("authorization", a.clone());
+        }
+        scion_obs::trace::inject_or(req.metadata_mut(), self.traceparent.as_ref());
+        if let Some(d) = self.deadline {
+            req.set_timeout(d.remaining());
+        }
+    }
 }
 
 /// redaction 的一次变化（`ListRedactedObjects`）。
@@ -112,9 +129,7 @@ impl GrpcUpstream {
                 .collect(),
             accept_encodings: vec![Encoding::Identity as i32],
         });
-        if let Some(a) = &ctx.authorization {
-            req.metadata_mut().insert("authorization", a.clone());
-        }
+        ctx.apply(&mut req);
         if self.forwarded {
             req.metadata_mut()
                 .insert(CACHE_FORWARDED_HEADER, MetadataValue::from_static("1"));
@@ -177,9 +192,7 @@ impl Upstream for GrpcUpstream {
                 repo: repo.to_owned(),
                 ids: chunk.iter().map(|id| Bytes::copy_from_slice(&id.to_bytes())).collect(),
             });
-            if let Some(a) = &ctx.authorization {
-                req.metadata_mut().insert("authorization", a.clone());
-            }
+            ctx.apply(&mut req);
             let resp = ObjectServiceClient::new(self.channel.clone())
                 .has_objects(req)
                 .await?
@@ -201,9 +214,7 @@ impl Upstream for GrpcUpstream {
             r#ref: String::new(),
             path: String::new(),
         });
-        if let Some(a) = &ctx.authorization {
-            req.metadata_mut().insert("authorization", a.clone());
-        }
+        ctx.apply(&mut req);
         match AuthServiceClient::new(self.channel.clone()).check_access(req).await {
             Ok(r) => Ok(r.into_inner().allowed),
             // 没有 AuthService 的旧服务端：没有访问控制
@@ -218,9 +229,7 @@ impl Upstream for GrpcUpstream {
             after_seq,
             page_size: 0,
         });
-        if let Some(a) = &ctx.authorization {
-            req.metadata_mut().insert("authorization", a.clone());
-        }
+        ctx.apply(&mut req);
         match ObjectServiceClient::new(self.channel.clone())
             .list_redacted_objects(req)
             .await
@@ -500,6 +509,32 @@ pub(crate) mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
+
+    #[test]
+    fn request_ctx_forwards_identity_trace_and_deadline() {
+        let tp = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let ctx = RequestCtx {
+            authorization: Some(MetadataValue::from_static("Bearer t")),
+            traceparent: Some(MetadataValue::from_static(tp)),
+            deadline: Some(scion_obs::deadline::Deadline(
+                std::time::Instant::now() + std::time::Duration::from_secs(5),
+            )),
+        };
+        let mut req = tonic::Request::new(());
+        ctx.apply(&mut req);
+        let md = req.metadata();
+        assert_eq!(
+            md.get("authorization").map(|v| v.to_str().expect("ascii")),
+            Some("Bearer t")
+        );
+        assert_eq!(md.get("traceparent").map(|v| v.to_str().expect("ascii")), Some(tp));
+        let timeout = md.get("grpc-timeout").expect("timeout").to_str().expect("ascii");
+        let left = scion_obs::deadline::parse_grpc_timeout(timeout).expect("parse");
+        assert!(left <= std::time::Duration::from_secs(5) && left > std::time::Duration::from_secs(4));
+        let mut bare = tonic::Request::new(());
+        RequestCtx::default().apply(&mut bare);
+        assert!(bare.metadata().is_empty());
+    }
 
     /// 测试用上游：按脚本返回结果，可设置延迟。
     pub(crate) struct Fake {
@@ -818,6 +853,7 @@ pub(crate) mod tests {
         assert!(!p.can_read("secret", &RequestCtx::default()).await.expect("ok"));
         let invalid = RequestCtx {
             authorization: Some(MetadataValue::from_static("Bearer invalid")),
+            ..RequestCtx::default()
         };
         assert_eq!(
             p.can_read("open", &invalid).await.map_err(|e| e.code()),

@@ -647,6 +647,29 @@ SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architectur
 > - **purge**：`Purge` 安排在宽限期（`--purge-grace`，默认 24 小时）后删除，期间可以撤销。janitor 每轮执行到期的删除，只有对象索引中有该对象的每个仓库都已 redact 才删除字节，否则保持待删除并记录日志。判断“哪些仓库有这个对象”用 `object_repos`：按仓库逐个用主键探测，不为 `objects_index` 增加按 id 的二级索引（写入热路径上不值得多维护一个）。`BlobStore` 新增 `delete`。
 > - **运维命令**：`scion admin redact / unredact / purge / redactions`，直接读写存储；`AdminService` 提供同名的远程接口，权限为所涉及仓库的 admin，`all_repos` 和不限仓库的列表需要系统管理。`scion admin fsck` 校验 ref → 提交 → 目录树 → 文件的引用闭包、对象索引（含大小）与对象存储，`--verify` 读出并校验哈希。`scion admin lease ls` 列出租约。
 > - **限制**：检出包含被 redact 文件的版本会失败（没有占位文件）；blame 追溯到被 redact 的版本时返回 REDACTED；purge 之后重新上传的相同内容不会自动删除。`rederive` 和 `drain` 推迟。
+> **M5c 可观测性与限流实现说明**（2026-10-18）：
+> - **新 crate `scion-obs`**（服务端最底层，store 以上都可以用）：
+>   - 指标用 `prometheus-client`。进程内一份注册表，各层直接更新；区域缓存已有的统计在抓取时读取，不改成指标类型。`/metrics` 在独立端口（`--metrics-listen`），不经认证与限流；
+>   - 追踪用 `tracing-opentelemetry` 加 OTLP gRPC 导出，按标准环境变量配置。
+> - **中间件顺序**（从外到内）：追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务，与 §5.3 一致。
+>   - 过载丢弃放在认证之前：过载时不再花 CPU 验签；
+>   - 按租户限流要用认证出的身份，所以在认证之后。
+> - **指标的标签**：指标层在认证之外，路径由调用方任意给出。只给协议中的方法建时间序列，方法列表由 `scion-proto` 的 build.rs 从 proto 生成（`METHODS`）；其它路径归入 `unknown`。
+> - **指标的状态码**：可能在响应头里（只有 trailers 的错误响应），也可能在流结束时的 trailers 里，所以包装响应体，结束时才记录。流式 RPC 的延迟因此是整个流的时长。
+> - **按租户限流**：没有使用 `governor`，沿用已有的令牌桶。
+>   - 租户：认证过的主体；匿名请求按来源 IP。
+>   - 令牌桶和在途名额放在 moka 中，空闲 10 分钟淘汰、最多 100 万个 key：按 IP 计数时不会无限增长；空闲期间令牌早已补满，淘汰不改变限流结果。
+>   - 集群内转发的请求不再计（与按仓库的写入限流一致）。`x-scion-forwarded` 是普通 metadata，调用方也能带上，所以只有值等于集群共享密钥（`--cluster-secret`，常数时间比较）时才算本集群转发的；没有配置密钥时一律计数。按仓库的写入限流同样改为这个判断。带了这个头的请求仍然不再转发（避免环路），伪造只会让调用方自己的请求失败。
+> - **deadline**：
+>   - 取客户端 `grpc-timeout` 与 `--max-request-timeout`（默认 60 秒）中较小的一个，超时返回 DEADLINE_EXCEEDED；
+>   - 截止时间放进请求 extensions。转发给 leader 的合入和区域缓存的回源用剩余时间设置 `grpc-timeout`；区域缓存回源还会注入 `traceparent`；
+>   - tonic 自身也按 `grpc-timeout` 计时并先触发（返回 CANCELLED），所以服务端上限之外，本层主要负责传递和计数。
+> - **推迟**：
+>   - SDK 和 `scn` 自动注入 `traceparent`；
+>   - daemon 的 `/metrics`：客户端 crate 不能依赖服务端的 `scion-obs`；
+>   - 派生滞后指标：还没有 deriver；
+>   - 元数据库与 S3 调用的子 span。
+
 | **M5 生产化** | 4 周 | YugabyteDB 档与 `migrate-meta` 工具、ACL/OIDC/JWT、redaction、OTel、Helm、混沌测试、多区域 follower read、`conformance` 发布 | 全部 SLO 达标；单 AZ 故障演练通过 |
 
 ---

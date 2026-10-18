@@ -26,7 +26,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 pub use config::{Limits, ReadEndpoint, ServerConfig, WriteRate};
 pub use scion_auth;
 pub use scion_proto::PROTOCOL_VERSION;
-pub use service::{AdminSvc, AuthSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, ServerInfoSvc, WriteSvc};
+pub use service::{
+    AdminSvc, AuthSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, ServerInfoSvc, WriteSvc, trusted_forward,
+};
 
 /// 服务端依赖的全部状态。
 #[derive(Clone)]
@@ -212,9 +214,11 @@ pub async fn serve(
         None => scion_land::Coordinator::new(write_svc.writer().clone(), app.config.land),
     };
     let hub = watch::RefHub::new(app.meta.clone(), app.config.ref_poll_interval);
+    let cluster_secret: Option<Arc<str>> = app.config.cluster_secret.as_deref().map(Arc::from);
     let mut land_svc = LandSvc::new(coordinator.clone())
         .with_ref_hub(hub.clone())
-        .with_guard(guard.clone());
+        .with_guard(guard.clone())
+        .with_cluster_secret(cluster_secret.clone());
     if let Some(l) = limiter {
         land_svc = land_svc.with_rate_limit(l);
     }
@@ -231,9 +235,24 @@ pub async fn serve(
     let admin_svc =
         AdminServiceServer::new(AdminSvc::new(guard.clone()).with_redactor(redactor, app.config.purge_grace));
 
+    let tenant = limit::TenantLimitLayer::new(
+        app.config.tenant_rate.map(|r| (r.per_second, r.burst)),
+        app.config.max_concurrent_per_tenant,
+    )
+    .with_cluster_secret(cluster_secret);
+    // 从外到内：追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务（§5.3）
     let result = tonic::transport::Server::builder()
+        .layer(scion_obs::trace::TraceLayer)
+        .layer(scion_obs::grpc::MetricsLayer::new(
+            scion_proto::METHODS
+                .iter()
+                .chain(scion_obs::grpc::HEALTH_METHODS)
+                .copied(),
+        ))
         .layer(limit::ConcurrencyLimitLayer::new(app.config.max_concurrent_requests))
         .layer(auth::AuthLayer::new(guard))
+        .layer(tenant)
+        .layer(scion_obs::deadline::DeadlineLayer::new(app.config.max_request_timeout))
         .add_service(health_svc)
         .add_service(info)
         .add_service(objects)

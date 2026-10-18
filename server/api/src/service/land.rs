@@ -2,6 +2,10 @@
 //!
 //! 集群模式下每个 ref 由持有租约的节点（leader）处理：本节点不是 leader 时把请求原样转给它，
 //! 转发的请求带上 [`FORWARDED_HEADER`]，收到的节点不会再转发（避免环路），而是返回可重试的错误。
+//!
+//! 这个头是普通的 gRPC metadata，调用方也能带上。值为集群共享密钥（`--cluster-secret`）时才认定是
+//! 本集群节点转发的（[`trusted_forward`]），此时按仓库和按租户的限流已在第一个节点计过，不再计；
+//! 没有配置密钥时一律照常计数（集群内转发的合入会被计两次）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -28,6 +32,17 @@ use scion_store::RefState;
 /// 节点间转发的请求带上的元数据。
 pub const FORWARDED_HEADER: &str = "x-scion-forwarded";
 
+/// 请求是否由本集群的节点转发：[`FORWARDED_HEADER`] 的值等于集群共享密钥（常数时间比较）。
+/// 没有配置密钥时总是 false。
+pub fn trusted_forward(value: Option<&[u8]>, secret: Option<&str>) -> bool {
+    match (value, secret) {
+        (Some(v), Some(s)) if !s.is_empty() && v.len() == s.len() => {
+            v.iter().zip(s.as_bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
+        }
+        _ => false,
+    }
+}
+
 pub struct LandSvc {
     coordinator: Coordinator,
     /// 到其它节点的连接（按地址缓存）。
@@ -35,6 +50,8 @@ pub struct LandSvc {
     limiter: Option<Arc<RateLimiter>>,
     hub: Option<Arc<RefHub>>,
     guard: Arc<Guard>,
+    /// 集群共享密钥：转发时作为 [`FORWARDED_HEADER`] 的值，收到时据此认定是本集群转发的。
+    cluster_secret: Option<Arc<str>>,
 }
 
 impl LandSvc {
@@ -45,7 +62,13 @@ impl LandSvc {
             limiter: None,
             hub: None,
             guard: Guard::disabled(),
+            cluster_secret: None,
         }
+    }
+
+    pub fn with_cluster_secret(mut self, secret: Option<Arc<str>>) -> Self {
+        self.cluster_secret = secret.filter(|s| !s.is_empty());
+        self
     }
 
     pub fn with_guard(mut self, guard: Arc<Guard>) -> Self {
@@ -65,7 +88,7 @@ impl LandSvc {
         }
     }
 
-    /// 按仓库限制合入速率。转发来的请求已在第一个节点计过数，不再检查。
+    /// 按仓库限制合入速率。本集群转发来的请求（[`trusted_forward`]）已在第一个节点计过数，不再检查。
     pub fn with_rate_limit(mut self, limiter: Arc<RateLimiter>) -> Self {
         self.limiter = Some(limiter);
         self
@@ -90,12 +113,22 @@ impl LandSvc {
         leader: &str,
         req: LandRequest,
         auth: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
+        deadline: Option<scion_obs::deadline::Deadline>,
     ) -> Result<Response<LandResponse>, Status> {
         let mut fwd = Request::new(req);
-        fwd.metadata_mut()
-            .insert(FORWARDED_HEADER, tonic::metadata::MetadataValue::from_static("1"));
+        let marker = self
+            .cluster_secret
+            .as_deref()
+            .and_then(|s| tonic::metadata::MetadataValue::try_from(s).ok())
+            .unwrap_or_else(|| tonic::metadata::MetadataValue::from_static("1"));
+        fwd.metadata_mut().insert(FORWARDED_HEADER, marker);
         if let Some(a) = auth {
             fwd.metadata_mut().insert("authorization", a);
+        }
+        // leader 接续同一个 trace，并沿用本请求剩余的 deadline
+        scion_obs::trace::inject(fwd.metadata_mut());
+        if let Some(d) = deadline {
+            fwd.set_timeout(d.remaining());
         }
         tracing::debug!(leader, "forwarding land to the ref's leader");
         let resp = LandServiceClient::new(self.peer(leader)?).land(fwd).await?;
@@ -171,8 +204,14 @@ fn response(out: &LandOutcome) -> LandResponse {
 #[tonic::async_trait]
 impl LandService for LandSvc {
     async fn land(&self, request: Request<LandRequest>) -> Result<Response<LandResponse>, Status> {
+        // 带了转发头就不再转发（避免环路）；只有密钥正确时才跳过限流
         let forwarded = request.metadata().contains_key(FORWARDED_HEADER);
+        let trusted = trusted_forward(
+            request.metadata().get(FORWARDED_HEADER).map(|v| v.as_bytes()),
+            self.cluster_secret.as_deref(),
+        );
         let auth = request.metadata().get("authorization").cloned();
+        let deadline = request.extensions().get::<scion_obs::deadline::Deadline>().copied();
         let p = principal(&request);
         let req = request.into_inner();
         authorize(
@@ -182,7 +221,7 @@ impl LandService for LandSvc {
         )
         .await?;
         let cs_id = parse_id(&req.changeset_id)?;
-        if !forwarded {
+        if !trusted {
             RateLimiter::admit(self.limiter.as_deref(), &req.repo)?;
         }
         let request_id = Some(req.request_id.as_str()).filter(|id| !id.is_empty());
@@ -193,7 +232,7 @@ impl LandService for LandSvc {
             Ok(out) => out,
             // 别的节点是 leader：转给它（转发来的请求不再转发，由客户端重试）
             Err(LandError::NotLeader { leader }) if !forwarded => {
-                let resp = self.forward(&leader, req.clone(), auth).await?;
+                let resp = self.forward(&leader, req.clone(), auth, deadline).await?;
                 if let Ok(target) = ObjectId::from_bytes(&resp.get_ref().tip) {
                     let state = RefState {
                         target,
@@ -414,10 +453,22 @@ mod tests {
         assert_eq!((md["ref"].as_str(), md["tip"].clone()), ("main", b.to_string()));
     }
 
+    #[test]
+    fn forwarded_requests_are_trusted_only_with_the_cluster_secret() {
+        assert!(trusted_forward(Some(b"s3cret"), Some("s3cret")));
+        assert!(!trusted_forward(Some(b"s3creT"), Some("s3cret")));
+        assert!(!trusted_forward(Some(b"s3cre"), Some("s3cret")));
+        assert!(!trusted_forward(Some(b"1"), None), "no secret: never trusted");
+        assert!(!trusted_forward(Some(b""), Some("")));
+        assert!(!trusted_forward(None, Some("s3cret")));
+    }
+
     #[tokio::test]
     async fn lands_are_rate_limited_per_repo_except_forwarded() {
         let (_store, w) = svc().await;
-        let land = land_svc(&w).with_rate_limit(Arc::new(RateLimiter::new(1, 1)));
+        let land = land_svc(&w)
+            .with_rate_limit(Arc::new(RateLimiter::new(1, 1)))
+            .with_cluster_secret(Some(Arc::from("s3cret")));
         let a = commit(&w, &[], &[], "a").await;
         let b = commit(&w, &[a], &[("f", b"1")], "b").await;
         let call = |id: ObjectId| LandRequest {
@@ -432,9 +483,16 @@ mod tests {
             .await
             .expect_err("limited");
         assert_eq!(err.code(), Code::ResourceExhausted);
+        // 调用方自带的转发头不能绕过限流
+        let mut spoofed = Request::new(call(b));
+        spoofed
+            .metadata_mut()
+            .insert(FORWARDED_HEADER, tonic::metadata::MetadataValue::from_static("1"));
+        let err = LandService::land(&land, spoofed).await.expect_err("spoofed header");
+        assert_eq!(err.code(), Code::ResourceExhausted);
         let mut fwd = Request::new(call(b));
         fwd.metadata_mut()
-            .insert(FORWARDED_HEADER, tonic::metadata::MetadataValue::from_static("1"));
+            .insert(FORWARDED_HEADER, tonic::metadata::MetadataValue::from_static("s3cret"));
         LandService::land(&land, fwd)
             .await
             .expect("forwarded requests were counted on the first node");

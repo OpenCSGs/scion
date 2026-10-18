@@ -100,8 +100,10 @@ impl BlobStore for CachedBlobs {
 
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>> {
         if let Some(d) = self.cached(id) {
+            scion_obs::metrics().object_cache("l3", true);
             return Ok(Some(d));
         }
+        scion_obs::metrics().object_cache("l3", false);
         self.flight.run(*id, || self.load(*id)).await
     }
 

@@ -76,6 +76,7 @@ pub async fn warm_tree(
 ) -> Result<usize, tonic::Status> {
     let ctx = RequestCtx {
         authorization: opts.token.clone(),
+        ..RequestCtx::default()
     };
     let batch = opts.batch.max(1);
     let mut fetched = 0;

@@ -64,6 +64,16 @@ pub struct ServerConfig {
     pub max_concurrent_requests: usize,
     /// 按仓库的写入速率限制（上传、创建提交、合入各算一次）；`None` 不限制。
     pub repo_write_rate: Option<WriteRate>,
+    /// 按调用者（认证过的主体，匿名时为来源 IP）的请求速率限制，所有 RPC 各算一次；`None` 不限制。
+    pub tenant_rate: Option<WriteRate>,
+    /// 每个调用者的在途请求上限；`None` 不限制。
+    pub max_concurrent_per_tenant: Option<usize>,
+    /// 集群共享密钥：节点间转发合入时带上，收到的节点据此确认是本集群转发的，不再重复计入限流。
+    /// 未设置时转发的请求照常计数（调用方自带的转发头也绕不过限流）。
+    pub cluster_secret: Option<String>,
+    /// 请求处理时间上限：取它与客户端 deadline（`grpc-timeout`）中较小的一个，超时返回
+    /// DEADLINE_EXCEEDED。`None` 只按客户端的 deadline。流式响应只限制到开始返回为止。
+    pub max_request_timeout: Option<std::time::Duration>,
     /// WatchRefs 轮询元数据库的间隔，即集群中其它节点的合入通知到订阅者的最大延迟
     /// （本节点的合入立即通知）。只轮询有订阅者的仓库。
     pub ref_poll_interval: std::time::Duration,
@@ -98,6 +108,10 @@ impl Default for ServerConfig {
             cluster: None,
             max_concurrent_requests: 10_000,
             repo_write_rate: None,
+            tenant_rate: None,
+            max_concurrent_per_tenant: None,
+            cluster_secret: None,
+            max_request_timeout: Some(std::time::Duration::from_secs(60)),
             ref_poll_interval: std::time::Duration::from_secs(1),
             blob_cache: scion_store::BlobCacheConfig::default(),
             purge_grace: std::time::Duration::from_secs(24 * 3600),

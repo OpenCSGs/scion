@@ -16,6 +16,7 @@ A server-first source control system: history, merges and rebases are computed o
 - [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks
 - [Clusters and landing](docs/guide/cluster.md) (Chinese): land semantics (rebase, exactly once), multi-node mode with `--advertise-url`, failover and overload protection
 - [Caching](docs/guide/cache.md) (Chinese): the regional cache `scion cache` (sharding, hedging, warm-up) and the local daemon `scn daemon`
+- [Metrics and tracing](docs/guide/observability.md) (Chinese): Prometheus metrics, OpenTelemetry tracing, useful queries
 - [Authentication and access control](docs/guide/auth.md) (Chinese): tokens, ACL policy, OIDC login, external issuers, OPA-compatible authorization, starhub-server integration
 - [Redaction and data checks](docs/guide/redaction.md) (Chinese): removing leaked content (redact, purge), `scion admin fsck`, `scion admin lease ls`
 
@@ -40,7 +41,13 @@ A server-first source control system: history, merges and rebases are computed o
 - **Operations:** `scion admin fsck` checks refs, commits, trees and files against the object index and object store; `scion admin lease ls` lists leases.
 - **Sparse checkout:** `scn clone --sparse a/,b/` and `scn sparse add|rm|set|disable`. Subtrees outside the scope are never fetched; commits, lands and rebases leave them untouched on the server.
 
-Still to come in M5: observability, YugabyteDB, Helm and chaos testing.
+- **Observability and limits:**
+  - Prometheus metrics on `--metrics-listen`: per-RPC counts, codes and latency; land batches and latency; cache hit rates at L2 and L3; rejected requests;
+  - OpenTelemetry tracing over OTLP, continuing the caller's `traceparent` across land forwarding and cache fetches;
+  - per-caller rate and concurrency limits (`--tenant-rate`, `--tenant-concurrency`);
+  - deadlines: the smaller of the client's `grpc-timeout` and `--max-request-timeout`, passed on to the leader and to the servers.
+
+Still to come in M5: YugabyteDB, Helm and chaos testing.
 
 **M4 (cache layer) is complete**:
 - **Regional cache `scion cache` (L2):**
@@ -66,7 +73,7 @@ Earlier milestones:
 - M2 added history queries (p99 under 20 ms on 100k commits).
 - M1 added the write path, Lite mode, the `scn` working copy and git import.
 
-The remaining M5 work: OpenTelemetry and metrics, the YugabyteDB tier, Helm and release builds.
+The remaining M5 work: the YugabyteDB tier, Helm and release builds.
 
 ## Performance
 

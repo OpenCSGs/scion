@@ -11,6 +11,7 @@ name = "scion"
 path = "src/main.rs"
 
 [dependencies]
+scion-obs.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
@@ -25,7 +26,6 @@ scion-store-sql.workspace = true
 tokio.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

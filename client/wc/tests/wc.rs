@@ -599,3 +599,62 @@ async fn sparse_settings_on_an_empty_repository() {
     assert_eq!(wc.set_sparse(&c, sparse(&["src"])).await.expect("set"), (0, 0));
     assert_eq!(wc.state().sparse, Some(vec!["src".to_string()]));
 }
+
+/// 调整范围时，旧范围外的未跟踪文件按新范围判断，不覆盖内容不同的本地文件。
+#[tokio::test]
+async fn sparse_changes_judge_untracked_files_by_the_new_scope() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let seed = c
+        .changeset(None)
+        .put("a/x.txt", "x")
+        .put("c/z.txt", "z")
+        .put("c/w.txt", "w")
+        .create()
+        .await
+        .expect("seed");
+    c.land("main", &seed.id).await.expect("land");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, sparse(&["a"]))
+        .await
+        .expect("clone");
+
+    // 和服务端版本不同：拒绝，不覆盖，范围不变
+    write(&dir, "c/z.txt", "local edit");
+    let e = wc
+        .set_sparse(&c, sparse(&["a", "c"]))
+        .await
+        .expect_err("would overwrite");
+    assert!(
+        matches!(&e, Error::WouldOverwrite(p) if p == &["c/z.txt".to_string()]),
+        "{e}"
+    );
+    assert_eq!(read(&dir, "c/z.txt"), "local edit");
+    assert_eq!(wc.state().sparse, Some(vec!["a".to_string()]));
+    // 新范围也不包含的：仍是范围外
+    let e = wc.set_sparse(&c, sparse(&["a", "q"])).await.expect_err("still outside");
+    assert!(
+        matches!(&e, Error::OutsideSparse(p) if p == &["c/z.txt".to_string()]),
+        "{e}"
+    );
+
+    // 和服务端版本相同的直接接管；服务端没有的保留为新增文件
+    write(&dir, "c/z.txt", "z");
+    write(&dir, "c/new.txt", "n");
+    let added = wc.sparse().expect("sparse").add(&["c"]).expect("add");
+    assert_eq!(
+        wc.set_sparse(&c, added).await.expect("add c"),
+        (1, 0),
+        "only c/w.txt is written"
+    );
+    assert_eq!(read(&dir, "c/w.txt"), "w");
+    assert_eq!(wc.status().expect("status"), status(&["c/new.txt"], &[], &[]));
+    wc.commit(&c, "add new", None).await.expect("commit").expect("changes");
+    wc.land(&c).await.expect("land");
+    assert_eq!(c.read_file("main", "c/new.txt").await.expect("landed").as_ref(), b"n");
+
+    // 已跟踪的改动仍要求先提交
+    write(&dir, "a/x.txt", "edited");
+    assert!(matches!(wc.set_sparse(&c, Sparse::full()).await, Err(Error::Dirty)));
+}

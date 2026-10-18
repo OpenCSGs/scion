@@ -222,16 +222,43 @@ impl WorkingCopy {
 
     /// 改变稀疏检出的范围：检出新加入的目录，删除移出范围的文件。要求没有未提交的改动。
     /// 返回 (写入数, 删除数)。
+    ///
+    /// 旧范围外的未跟踪文件按新范围判断：新范围仍不包含的报 [`Error::OutsideSparse`]；新范围包含的，
+    /// 与当前快照中同一路径的版本相同则直接接管，不同则报 [`Error::WouldOverwrite`]（不覆盖本地文件），
+    /// 快照中没有的保留为新增文件。
     pub async fn set_sparse(&mut self, client: &Client, sparse: Sparse) -> Result<(usize, usize)> {
         let _lock = self.paths.lock()?;
-        if !self.changes()?.0.is_clean() {
+        let old = self.sparse()?;
+        let mut dirstate = self.paths.load_dirstate()?;
+        let (untracked, found): (BTreeMap<String, Found>, BTreeMap<String, Found>) = fsutil::scan(self.root())?
+            .into_iter()
+            .partition(|(p, _)| !old.includes_file(p) && !dirstate.files.contains_key(p));
+        let stray: Vec<String> = untracked.keys().filter(|p| !sparse.includes_file(p)).cloned().collect();
+        if !stray.is_empty() {
+            return Err(Error::OutsideSparse(stray));
+        }
+        if !self.changes_of(&dirstate, &found)?.0.is_clean() {
             return Err(Error::Dirty);
         }
         let mut counts = (0, 0);
         if let Some(current) = self.state.current()? {
             // 检出的是当前快照（有未合入的提交时为它），范围内外的文件版本一致，差异只有增删
             let target = flatten(client, client.root_tree(&current.to_string()).await?, &sparse).await?;
-            let mut dirstate = self.paths.load_dirstate()?;
+            let mut differ = Vec::new();
+            for (path, f) in &untracked {
+                let Some(t) = target.get(path) else { continue };
+                let content = fsutil::read_content(self.root(), path, f.mode)?;
+                if ObjectId::of_blob(&content) == t.id && f.mode == t.mode {
+                    dirstate
+                        .files
+                        .insert(path.clone(), record(t.mode, t.id, content.len() as u64, f.mtime_ns));
+                } else {
+                    differ.push(path.clone());
+                }
+            }
+            if !differ.is_empty() {
+                return Err(Error::WouldOverwrite(differ));
+            }
             let delta = diff(&snapshot(&dirstate)?, &target);
             counts = self.apply(client, &mut dirstate, &delta).await?;
             self.paths.save_dirstate(&mut dirstate)?;
@@ -254,9 +281,14 @@ impl WorkingCopy {
         if !outside.is_empty() {
             return Err(Error::OutsideSparse(outside));
         }
+        self.changes_of(&dirstate, &found)
+    }
+
+    /// 扫描结果相对 dirstate 的改动。
+    fn changes_of(&self, dirstate: &DirState, found: &BTreeMap<String, Found>) -> Result<(Status, Vec<Change>)> {
         let mut status = Status::default();
         let mut changes = Vec::new();
-        for (path, f) in &found {
+        for (path, f) in found {
             match dirstate.files.get(path) {
                 None => {
                     let content = fsutil::read_content(self.root(), path, f.mode)?;

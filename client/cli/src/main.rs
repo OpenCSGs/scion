@@ -47,7 +47,13 @@ enum Command {
         dir: Option<PathBuf>,
         #[arg(long = "ref", default_value = "main")]
         reference: String,
+        /// 稀疏检出：只检出这些目录（逗号分隔）和根目录下的文件。
+        #[arg(long, value_name = "DIRS", value_delimiter = ',')]
+        sparse: Option<Vec<String>>,
     },
+    /// 稀疏检出的范围。
+    #[command(subcommand)]
+    Sparse(SparseCmd),
     /// 显示本地改动。
     Status,
     /// 把本地改动创建为提交（尚未合入）。
@@ -107,6 +113,29 @@ enum Command {
     /// 本机 daemon（L1 缓存）：通常由其它命令自动拉起，`SCION_NO_DAEMON=1` 关闭。
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum SparseCmd {
+    /// 列出范围内的目录。
+    Ls,
+    /// 把范围设为这些目录（全部检出的工作副本由此变为稀疏检出）。
+    Set {
+        #[arg(required = true)]
+        dirs: Vec<String>,
+    },
+    /// 加入目录并检出。
+    Add {
+        #[arg(required = true)]
+        dirs: Vec<String>,
+    },
+    /// 移出目录并删除其中的文件（不能有未提交的改动）。
+    Rm {
+        #[arg(required = true)]
+        dirs: Vec<String>,
+    },
+    /// 恢复为全部检出。
+    Disable,
 }
 
 #[derive(Debug, Subcommand)]
@@ -186,9 +215,16 @@ async fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Version => emit(Ok(version_out()), json),
         Command::Doctor => emit(commands::doctor(&ctx).await, json),
-        Command::Clone { repo, dir, reference } => {
-            emit(commands::clone(&ctx, &repo, dir.as_deref(), &reference).await, json)
-        }
+        Command::Clone {
+            repo,
+            dir,
+            reference,
+            sparse,
+        } => emit(
+            commands::clone(&ctx, &repo, dir.as_deref(), &reference, sparse.as_deref()).await,
+            json,
+        ),
+        Command::Sparse(cmd) => emit(commands::sparse(&ctx, cmd).await, json),
         Command::Status => emit(commands::status(&ctx), json),
         Command::Commit { message, author } => emit(commands::commit(&ctx, &message, author.as_deref()).await, json),
         Command::Land => emit(commands::land(&ctx).await, json),
@@ -292,6 +328,15 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Clone { ref repo, ref reference, .. } if repo == "org/repo" && reference == "dev")
         );
+        let cli = Cli::try_parse_from(["scn", "clone", "r", "--sparse", "a/b,c"]).expect("parse");
+        assert!(
+            matches!(cli.command, Command::Clone { sparse: Some(ref d), .. } if d == &["a/b".to_string(), "c".into()])
+        );
+        let cli = Cli::try_parse_from(["scn", "sparse", "add", "x", "y"]).expect("parse");
+        assert!(matches!(cli.command, Command::Sparse(SparseCmd::Add { ref dirs }) if dirs.len() == 2));
+        assert!(Cli::try_parse_from(["scn", "sparse", "set"]).is_err(), "dirs required");
+        let cli = Cli::try_parse_from(["scn", "sparse", "disable"]).expect("parse");
+        assert!(matches!(cli.command, Command::Sparse(SparseCmd::Disable)));
         let cli = Cli::try_parse_from(["scn", "commit", "-m", "msg", "--author", "A <a@b>"]).expect("parse");
         assert!(matches!(cli.command, Command::Commit { ref message, .. } if message == "msg"));
         assert!(Cli::try_parse_from(["scn", "commit"]).is_err(), "message required");

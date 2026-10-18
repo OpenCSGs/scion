@@ -19,6 +19,14 @@ pub enum Error {
     /// 本地未合入的改动与 ref 上的新提交改了同样的文件。
     #[error("conflict: both you and upstream changed {}", .0.join(", "))]
     Conflict(Vec<String>),
+    #[error("{0}")]
+    Sparse(String),
+    /// 稀疏检出范围外出现了文件：提交它们可能覆盖服务端上没有检出的内容。
+    #[error("files outside the sparse checkout: {}; move them, or add their directories with `scn sparse add`", .0.join(", "))]
+    OutsideSparse(Vec<String>),
+    /// 调整范围时，新范围要检出的路径上已有内容不同的本地文件。
+    #[error("local files would be overwritten by the sparse checkout: {}; move or remove them first", .0.join(", "))]
+    WouldOverwrite(Vec<String>),
     #[error("ref {0:?} does not exist on the server")]
     RefNotFound(String),
     #[error("{path}: {source}")]
@@ -58,6 +66,13 @@ mod tests {
         assert!(Error::RefNotFound("main".into()).to_string().contains("main"));
         assert!(Error::TargetNotEmpty("/d".into()).to_string().contains("not empty"));
         assert!(Error::Corrupt("x".into()).to_string().contains("corrupt"));
+        assert_eq!(Error::Sparse("bad".into()).to_string(), "bad");
+        assert!(Error::OutsideSparse(vec!["z/x".into()]).to_string().contains("z/x"));
+        assert!(
+            Error::WouldOverwrite(vec!["c/z".into()])
+                .to_string()
+                .contains("overwritten by the sparse checkout: c/z")
+        );
         let e = io("/p")(std::io::Error::other("boom"));
         assert_eq!(e.to_string(), "/p: boom");
     }

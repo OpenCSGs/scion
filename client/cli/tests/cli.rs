@@ -564,3 +564,90 @@ async fn browser_login_saves_a_refresh_token() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
     assert_eq!(v["subject"], "alice");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sparse_checkout_commands() {
+    use scion_store::MetaStore;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("mono").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, async {
+        let _ = rx.await;
+    }));
+    let seed = scion_client::Client::builder()
+        .endpoint(&url)
+        .repo("mono")
+        .build()
+        .await
+        .expect("connect");
+    let cs = seed
+        .changeset(None)
+        .put("top.txt", "t")
+        .put("a/x.txt", "x")
+        .put("b/y.txt", "y")
+        .create()
+        .await
+        .expect("seed");
+    seed.land("main", &cs.id).await.expect("land");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || {
+        let v = json_of(&scn_in(
+            &root,
+            &["clone", "mono", "--sparse", "a/", "--endpoint", &u, "--json"],
+        ));
+        assert_eq!(v["sparse"], serde_json::json!(["a"]));
+        let wc = root.join("mono");
+        assert!(wc.join("top.txt").exists() && wc.join("a/x.txt").exists());
+        assert!(!wc.join("b").exists());
+        let out = scn_in(&root, &["clone", "mono", "w2", "--sparse", "a,b", "--endpoint", &u]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("sparse checkout: a, b"));
+
+        let v = json_of(&scn_in(&wc, &["sparse", "add", "b", "--json"]));
+        assert_eq!(v["schema"], "scion.cli.sparse/v1");
+        assert_eq!(v["dirs"], serde_json::json!(["a", "b"]));
+        assert_eq!(v["written"], 1);
+        assert!(wc.join("b/y.txt").exists());
+        let out = scn_in(&wc, &["sparse", "ls"]);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "sparse checkout:\n  a\n  b"
+        );
+        let out = scn_in(&wc, &["sparse", "rm", "a", "b"]);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "sparse checkout: root files only\n(0 written, 2 removed)"
+        );
+        // 不在范围中的目录：用法错误
+        let out = scn_in(&wc, &["sparse", "rm", "zzz"]);
+        assert_eq!(out.status.code(), Some(2));
+        // 范围外的文件
+        std::fs::create_dir_all(wc.join("b")).expect("mkdir");
+        std::fs::write(wc.join("b/new.txt"), "n").expect("write");
+        let out = scn_in(&wc, &["status"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&out.stderr).contains("outside the sparse checkout"));
+        std::fs::remove_dir_all(wc.join("b")).expect("rm");
+        let v = json_of(&scn_in(&wc, &["sparse", "set", "b", "--json"]));
+        assert_eq!(v["dirs"], serde_json::json!(["b"]));
+        let out = scn_in(&wc, &["sparse", "disable"]);
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("full checkout"));
+        assert!(wc.join("a/x.txt").exists() && wc.join("b/y.txt").exists());
+        let v = json_of(&scn_in(&wc, &["sparse", "ls", "--json"]));
+        assert!(v["dirs"].is_null());
+        let out = scn_in(&wc, &["sparse", "add", "a"]);
+        assert_eq!(out.status.code(), Some(2), "full checkout: use set");
+    })
+    .await
+    .expect("join");
+    let _ = tx.send(());
+}

@@ -5,7 +5,7 @@
 //! 可见。回源成功的 (服务端, 仓库, id) 记入可见集；命中而可见性未知的，先向服务端 `HasObjects` 确认。
 //!
 //! redaction：按 (服务端, 仓库) 保存 redact 过的对象，最多每 [`REDACTION_TTL`] 用调用者的身份增量同步一次。
-//! redact 过的对象返回与服务端相同的 REDACTED，本地副本删除。
+//! redact 过的对象返回与服务端相同的 REDACTED，本地副本删除。同步失败（包括离线）时拒绝读取。
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -112,6 +112,17 @@ fn redacted(objects: &[(ObjectId, String)]) -> Status {
         ]),
     }
     .to_status()
+}
+
+/// redaction 同步失败时拒绝读取的错误。令牌被拒、仓库不存在等业务错误原样返回，其它情况（包括离线）为 UNAVAILABLE。
+fn redaction_sync_failed(repo: &str, cause: Status) -> Status {
+    match cause.code() {
+        tonic::Code::Unauthenticated
+        | tonic::Code::PermissionDenied
+        | tonic::Code::NotFound
+        | tonic::Code::InvalidArgument => cause,
+        _ => Status::unavailable(format!("cannot verify redactions of {repo}: {}", cause.message())),
+    }
 }
 
 /// 把一个对象从 `start` 开始切成若干分块。`start == len` 时返回一个空的结尾块。
@@ -290,8 +301,10 @@ impl Daemon {
         Ok(())
     }
 
-    /// `ids` 中有 redact 过的对象时返回 REDACTED。状态过期时先用调用者的身份向服务端同步；
-    /// 同步失败（例如离线）时沿用已有状态。
+    /// `ids` 中有 redact 过的对象时返回 REDACTED。状态过期时先用调用者的身份向服务端同步。
+    ///
+    /// 同步失败（包括离线）时拒绝这次读取：否则 redact 之后本地副本会一直返回，`REDACTION_TTL`
+    /// 的上限不成立。只有不支持 redaction 的旧服务端（`Unimplemented`）按没有 redaction 处理。
     pub(crate) async fn check_redactions(
         &self,
         client: &scion_client::Client,
@@ -304,6 +317,7 @@ impl Daemon {
             .get_with((upstream.clone(), repo.clone()), Default::default);
         let mut st = state.lock().await;
         if st.synced_at.is_none_or(|t| t.elapsed() >= self.redaction_ttl) {
+            let mut synced = false;
             for _ in 0..MAX_REDACTION_PAGES {
                 let page = match client.list_redacted_objects(st.after_seq).await {
                     Ok(p) => p,
@@ -313,11 +327,12 @@ impl Daemon {
                         ..
                     }) => {
                         st.synced_at = Some(std::time::Instant::now());
+                        synced = true;
                         break;
                     }
                     Err(e) => {
-                        tracing::debug!(%repo, error = %e, "syncing redactions failed; using the previous state");
-                        break;
+                        tracing::debug!(%repo, error = %e, "syncing redactions failed; refusing the read");
+                        return Err(redaction_sync_failed(repo, e.to_status()));
                     }
                 };
                 for o in page.objects {
@@ -333,8 +348,14 @@ impl Daemon {
                 st.after_seq = page.next_seq;
                 if !page.more {
                     st.synced_at = Some(std::time::Instant::now());
+                    synced = true;
                     break;
                 }
+            }
+            if !synced {
+                return Err(Status::unavailable(format!(
+                    "redactions of {repo} are still syncing; retry the read"
+                )));
             }
         }
         let hits: Vec<(ObjectId, String)> = ids

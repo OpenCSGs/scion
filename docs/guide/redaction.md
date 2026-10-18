@@ -45,7 +45,8 @@ scion admin purge rd_… --now                       # 立即删除，不可撤�
 | 服务端 | `GetObjects`、`ReadFile`、`Blame` 立即返回 `REDACTED`；`ListDir`、`Diff`、`Log` 照常（只涉及路径和 id） |
 | 合入 | rebase 需要三方合并 redact 过的版本时，合入失败并返回 `REDACTED`，内容不会被合并进新提交 |
 | 区域缓存 `scion cache` | 每个仓库最多每 10 秒用调用者的令牌向服务端同步一次（`ObjectService.ListRedactedObjects`），之后返回 `REDACTED` 并删除本地副本 |
-| 本机 daemon | 同上，按（服务端, 仓库）同步；离线时沿用上次同步的状态 |
+| 本机 daemon | 同上，按（服务端, 仓库）同步 |
+| 同步失败 | 上游不可用、超时或离线时，缓存层**拒绝**读取（`UNAVAILABLE`），不返回本地副本；令牌被拒等错误原样返回。只有不支持 redaction 的旧服务端（`UNIMPLEMENTED`）按没有 redaction 处理 |
 | 撤销 | 同样最多 10 秒后在缓存层生效 |
 
 redaction 按仓库生效：同一个对象在别的仓库里没有被 redact 时，那个仓库照常可以读取。

@@ -397,8 +397,8 @@ async fn redacted_objects_are_refused_by_the_daemon() {
         meta: store.clone(),
         blobs: store.clone(),
     };
-    let (_stop_l3, rx) = oneshot::channel::<()>();
-    tokio::spawn(scion_api::serve(listener, app, async {
+    let (stop_l3, rx) = oneshot::channel::<()>();
+    let l3 = tokio::spawn(scion_api::serve(listener, app, async {
         let _ = rx.await;
     }));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -444,6 +444,21 @@ async fn redacted_objects_are_refused_by_the_daemon() {
     assert_eq!(
         c.get_object(&secret).await.expect("restored").as_ref(),
         b"password=hunter2"
+    );
+
+    // 服务端不可达：无法确认 redaction，本地有副本也拒绝读取
+    let _ = stop_l3.send(());
+    let _ = l3.await;
+    let err = c.get_object(&ObjectId::of_blob(b"a")).await.expect_err("unverified");
+    assert!(
+        matches!(
+            &err,
+            scion_client::Error::Rpc {
+                code: tonic::Code::Unavailable,
+                ..
+            }
+        ),
+        "{err:?}"
     );
     drop(c);
     daemon.stop().await;

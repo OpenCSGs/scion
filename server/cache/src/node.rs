@@ -7,7 +7,7 @@
 //! single-flight 按 (仓库, id) 合并，一个仓库的回源结果不会交给另一个仓库的请求。
 //!
 //! **redaction**：按仓库保存 redact 过的对象，最多每 [`REDACTION_TTL`] 用调用者的令牌向上游增量同步一次
-//! （`ListRedactedObjects`）。redact 过的对象返回与 L3 相同的 REDACTED，字节从本地缓存删除。
+//! （`ListRedactedObjects`）。redact 过的对象返回与 L3 相同的 REDACTED，字节从本地缓存删除。同步失败时拒绝读取。
 //!
 //! 一个 id 只由负责它的节点回源，整个区域对同一个对象只回源一次。负责的节点不可达时自己回源
 //! （区域内绕路，但绝不让客户端绕过 L2 直连源站）。转发来的请求（[`CACHE_FORWARDED_HEADER`]）不再
@@ -127,6 +127,17 @@ fn permission_denied(repo: &str) -> Status {
         format!("permission denied: read on {repo}"),
         details,
     )
+}
+
+/// redaction 同步失败时拒绝读取的错误。令牌被拒、仓库不存在等业务错误原样返回，其它情况为 UNAVAILABLE。
+fn redaction_sync_failed(repo: &str, cause: &Status) -> Status {
+    match cause.code() {
+        tonic::Code::Unauthenticated
+        | tonic::Code::PermissionDenied
+        | tonic::Code::NotFound
+        | tonic::Code::InvalidArgument => cause.clone(),
+        _ => Status::unavailable(format!("cannot verify redactions of {repo}: {}", cause.message())),
+    }
 }
 
 /// 与 L3 相同的「对象已被 redact」错误：NOT_FOUND / REDACTED，metadata 带 `ids`、`redaction_ids` 与 `count`。
@@ -298,7 +309,7 @@ impl CacheNode {
         let state = self.redactions.get_with(repo.clone(), Default::default);
         let mut st = state.lock().await;
         if st.synced_at.is_none_or(|t| t.elapsed() >= self.redaction_ttl) {
-            self.sync_redactions(repo, &mut st, ctx).await;
+            self.sync_redactions(repo, &mut st, ctx).await?;
         }
         let hits: Vec<(ObjectId, String)> = ids
             .iter()
@@ -307,14 +318,15 @@ impl CacheNode {
         if hits.is_empty() { Ok(()) } else { Err(redacted(&hits)) }
     }
 
-    /// 向上游增量同步一个仓库的 redaction。失败时保留已有状态（下一个请求再试），不阻塞读取。
-    async fn sync_redactions(&self, repo: &Arc<str>, st: &mut RepoRedactions, ctx: &RequestCtx) {
+    /// 向上游增量同步一个仓库的 redaction。同步失败时拒绝这次读取（已拉到的变化保留，下一个请求接着同步）：
+    /// 否则上游不可用或令牌被拒期间，redact 过的字节会一直从缓存返回，`REDACTION_TTL` 的上限不成立。
+    async fn sync_redactions(&self, repo: &Arc<str>, st: &mut RepoRedactions, ctx: &RequestCtx) -> Result<(), Status> {
         for _ in 0..MAX_REDACTION_PAGES {
             let page: RedactionPage = match self.upstream.redactions(repo, st.after_seq, ctx).await {
                 Ok(p) => p,
                 Err(e) => {
-                    tracing::warn!(%repo, error = %e, "syncing redactions failed; serving with the previous state");
-                    return;
+                    tracing::warn!(%repo, error = %e, "syncing redactions failed; refusing the read");
+                    return Err(redaction_sync_failed(repo, &e));
                 }
             };
             for c in page.changes {
@@ -330,9 +342,12 @@ impl CacheNode {
             st.after_seq = page.next_seq;
             if !page.more {
                 st.synced_at = Some(std::time::Instant::now());
-                return;
+                return Ok(());
             }
         }
+        Err(Status::unavailable(format!(
+            "redactions of {repo} are still syncing; retry the read"
+        )))
     }
 
     /// 确认 `ids` 都在 `repo` 中可见：可见集里没有的向上游批量查询。
@@ -568,13 +583,45 @@ mod tests {
         let got = n.get_many("r", &[id(A), id(B)], &ctx, false).await.expect("restored");
         assert_eq!(got, [Bytes::from_static(A), Bytes::from_static(B)]);
 
-        // 同步失败：保留已有状态，不阻塞读取
+        // 同步失败：拒绝读取，不交出本地副本；令牌被拒原样返回
         *up.redaction_error.lock().expect("lock") = Some(Status::unavailable("down"));
-        n.get_many("r", &[id(A)], &ctx, false).await.expect("still served");
+        let err = n.get_many("r", &[id(A)], &ctx, false).await.expect_err("refused");
+        assert_eq!(err.code(), Code::Unavailable);
+        assert!(err.message().contains("cannot verify redactions of r"), "{err:?}");
+        *up.redaction_error.lock().expect("lock") = Some(Status::permission_denied("token rejected"));
+        assert_eq!(
+            n.get_many("r", &[id(A)], &ctx, false).await.map_err(|e| e.code()),
+            Err(Code::PermissionDenied)
+        );
+
+        // 恢复后照常读取，已知的 redaction 仍然生效
+        *up.redaction_error.lock().expect("lock") = None;
+        n.get_many("r", &[id(A)], &ctx, false).await.expect("served again");
         assert_eq!(
             n.get_many("r", &[id(C)], &ctx, false).await.map_err(|e| e.code()),
             Err(Code::NotFound),
             "known redaction kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn reads_wait_until_a_long_redaction_backlog_is_synced() {
+        let up = Arc::new(Fake::new("l3", &[A, B]));
+        // 每页 2 条：超过 MAX_REDACTION_PAGES 页的积压一次同步不完
+        for _ in 0..MAX_REDACTION_PAGES {
+            up.redact(B, true);
+            up.redact(B, false);
+        }
+        up.redact(B, true);
+        let n = single(&up).await;
+        let ctx = RequestCtx::default();
+        let err = n.get_many("r", &[id(A)], &ctx, false).await.expect_err("still syncing");
+        assert_eq!(err.code(), Code::Unavailable);
+        // 下一个请求接着同步完剩下的
+        n.get_many("r", &[id(A)], &ctx, false).await.expect("synced");
+        assert_eq!(
+            n.get_many("r", &[id(B)], &ctx, false).await.map_err(|e| e.code()),
+            Err(Code::NotFound)
         );
     }
 

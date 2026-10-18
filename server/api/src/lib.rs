@@ -4,6 +4,7 @@ pub mod auth;
 pub mod config;
 pub mod events;
 pub mod limit;
+pub mod prehook;
 pub mod redaction;
 mod service;
 pub mod status;
@@ -259,10 +260,26 @@ pub async fn serve(
     };
     let hub = watch::RefHub::new(app.meta.clone(), app.config.ref_poll_interval);
     let cluster_secret: Option<Arc<str>> = app.config.cluster_secret.as_deref().map(Arc::from);
+    let pre_land = match &app.config.pre_land {
+        Some(cfg) => match prehook::PreLand::new(app.meta.clone(), app.blobs.clone(), cfg.clone()) {
+            Ok(h) => Some(Arc::new(h)),
+            // 配置了检查却无法创建：拒绝合入，而不是悄悄跳过检查
+            Err(e) => {
+                tracing::error!(error = %e, "pre-land check misconfigured; lands will be refused");
+                Some(Arc::new(prehook::PreLand::refuse_all(
+                    app.meta.clone(),
+                    app.blobs.clone(),
+                    cfg.clone(),
+                )))
+            }
+        },
+        None => None,
+    };
     let mut land_svc = LandSvc::new(coordinator.clone())
         .with_ref_hub(hub.clone())
         .with_guard(guard.clone())
-        .with_cluster_secret(cluster_secret.clone());
+        .with_cluster_secret(cluster_secret.clone())
+        .with_pre_land(pre_land.clone());
     if let Some(l) = limiter {
         land_svc = land_svc.with_rate_limit(l);
     }
@@ -271,7 +288,11 @@ pub async fn serve(
     let max_write = write_message_limit(&app.config.limits, max_msg);
     let write = WriteServiceServer::new(write_svc).max_decoding_message_size(max_write);
     let hub_for_shutdown = hub.clone();
-    let refs = RefServiceServer::new(RefSvc::new(app.meta.clone(), hub).with_guard(guard.clone()));
+    let refs = RefServiceServer::new(
+        RefSvc::new(app.meta.clone(), hub)
+            .with_guard(guard.clone())
+            .with_pre_land(pre_land),
+    );
     let query = QueryServiceServer::new(
         QuerySvc::new(app.config.clone(), app.meta.clone(), app.blobs).with_guard(guard.clone()),
     )

@@ -99,6 +99,8 @@ pub struct Metrics {
     pub event_failures: Family<SinkLabels, Counter>,
     /// `scion_event_lag{sink}`：已分配的最大 seq 与已投递的 seq 之差。
     pub event_lag: Family<SinkLabels, Gauge>,
+    /// `scion_pre_land_checks_total{outcome}`：`allowed` / `denied` / `error`（检查服务不可用）。
+    pub pre_land: Family<OutcomeLabels, Counter>,
     registry: Mutex<Registry>,
 }
 
@@ -116,6 +118,7 @@ impl Metrics {
             events_delivered: Family::default(),
             event_failures: Family::default(),
             event_lag: Family::default(),
+            pre_land: Family::default(),
             registry: Mutex::new(Registry::default()),
         };
         if let Ok(mut r) = m.registry.lock() {
@@ -166,6 +169,11 @@ impl Metrics {
                 "Ref events not yet delivered, by sink",
                 m.event_lag.clone(),
             );
+            r.register(
+                "scion_pre_land_checks",
+                "Pre-land webhook checks, by outcome",
+                m.pre_land.clone(),
+            );
         }
         m
     }
@@ -214,6 +222,14 @@ impl Metrics {
         self.event_lag
             .get_or_create(&sink_labels(sink))
             .set(i64::try_from(lag).unwrap_or(i64::MAX));
+    }
+
+    pub fn pre_land(&self, outcome: &str) {
+        self.pre_land
+            .get_or_create(&OutcomeLabels {
+                outcome: outcome.to_owned(),
+            })
+            .inc();
     }
 
     pub fn land_finished(&self, elapsed: Duration) {
@@ -342,6 +358,7 @@ mod tests {
         m.event_delivered("webhook");
         m.event_failed("webhook");
         m.event_lag("webhook", 3);
+        m.pre_land("denied");
         let text = m.encode();
         assert!(
             text.contains("scion_events_delivered_total{sink=\"webhook\"}"),
@@ -349,6 +366,7 @@ mod tests {
         );
         assert!(text.contains("scion_event_delivery_failures_total{sink=\"webhook\"}"));
         assert!(text.contains("scion_event_lag{sink=\"webhook\"} 3"));
+        assert!(text.contains("scion_pre_land_checks_total{outcome=\"denied\"}"));
         assert!(
             text.contains("scion_rejected_requests_total{reason=\"overload\"}"),
             "{text}"

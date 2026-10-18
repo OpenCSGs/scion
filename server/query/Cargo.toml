@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 bytes.workspace = true
+futures.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 scion-tree.workspace = true

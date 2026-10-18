@@ -3501,6 +3501,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "flate2",
+ "futures",
  "hex",
  "scion-object",
  "scion-store",

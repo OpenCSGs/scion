@@ -4,8 +4,9 @@ use bytes::Bytes;
 use scion_object::{ObjectId, ObjectKind, Signature};
 use scion_proto::v1::{
     self, BlameRequest, BlameResponse, DerivedKind, DiffRequest, DiffResponse, GetDerivedRequest, GetDerivedResponse,
-    GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, LogRequest, LogResponse,
-    MergeBaseRequest, MergeBaseResponse, ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
+    GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, ListLastCommitsRequest,
+    ListLastCommitsResponse, LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ResolveRevisionRequest,
+    ResolveRevisionResponse, StatRequest, StatResponse,
 };
 use scion_query::{LogEntry, QueryError};
 use scion_store::{BlobStore, MetaStore};
@@ -204,6 +205,73 @@ pub(crate) async fn stat(
     Ok(StatResponse {
         changeset_id: id_bytes(&rec.id),
         entry: Some(proto_entry(&entry)),
+    })
+}
+
+/// ListLastCommits 每页的默认（也是最大）条目数。
+pub(crate) const MAX_LAST_COMMITS: u32 = 1000;
+
+pub(crate) fn join_path(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+/// `names` 为目录中对调用方可见的条目（按名字排序）；`all` 表示它就是目录的全部条目，此时结果写入缓存。
+/// `hidden` 中的条目只列名字，不给出最后提交。
+pub(crate) async fn list_last_commits(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    req: &ListLastCommitsRequest,
+    cs: ObjectId,
+    names: Vec<String>,
+    all: bool,
+    hidden: &std::collections::HashSet<String>,
+) -> Result<ListLastCommitsResponse, Status> {
+    let total = names.len();
+    let limit = match req.limit {
+        0 => MAX_LAST_COMMITS,
+        n => n.min(MAX_LAST_COMMITS),
+    } as usize;
+    let start = (req.offset as usize).min(total);
+    let end = start.saturating_add(limit).min(total);
+    let page = &names[start..end];
+    let cache = all && page.len() == total;
+    let found = scion_query::last_commits(meta, blobs, &req.repo, cs, &req.path, page, cache)
+        .await
+        .map_err(from_query)?;
+    let mut entries = Vec::with_capacity(page.len());
+    let mut ids = Vec::new();
+    for (name, id) in page.iter().zip(found) {
+        let id = id.filter(|_| !hidden.contains(name));
+        if let Some(id) = id {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        entries.push(v1::LastCommit {
+            name: name.clone(),
+            changeset_id: id.as_ref().map(id_bytes).unwrap_or_default(),
+        });
+    }
+    let mut commits = Vec::with_capacity(ids.len());
+    for id in ids {
+        let record = meta
+            .get_changeset(&req.repo, &id)
+            .await
+            .map_err(status::from_store)?
+            .ok_or_else(|| from_query(QueryError::NotFound(id)))?;
+        let changeset = scion_query::load_changeset(blobs, id).await.map_err(from_query)?;
+        commits.push(LogEntry { record, changeset });
+    }
+    commits.sort_by_key(|c| std::cmp::Reverse(c.record.generation));
+    Ok(ListLastCommitsResponse {
+        changeset_id: id_bytes(&cs),
+        entries,
+        commits: commits.into_iter().map(log_entry).collect(),
+        total: u32::try_from(total).unwrap_or(u32::MAX),
     })
 }
 

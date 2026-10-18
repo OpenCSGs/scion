@@ -1,0 +1,423 @@
+//! LastCommitPerEntry 派生数据：目录中每个条目最后一次被改动的提交（文件列表页的「最后提交」列）。
+//!
+//! 语义与 blame 相同，沿第一父提交链追溯：条目在某个提交的 delta（相对第一父提交）中出现，
+//! 就算被这个提交改动；经由合并带进来的改动归到合并提交上。子目录被改动指它下面的任意路径被改动。
+//!
+//! 计算顺序：
+//! 1. 缓存（提交, 目录）命中直接返回；
+//! 2. 第一父提交链上 64 个提交以内有缓存的祖先时增量计算：依次应用其后各提交的改动，
+//!    改动到的条目归到最近改动它的提交，其余沿用祖先的结果；
+//! 3. 其余条目用 PathHistory 索引找第一父提交链上最近的候选（并发查询）；
+//! 4. 索引不可用（旧数据深度未知或缺行）时沿第一父提交链逐个扫描 delta，最多 [`MAX_SCAN`] 个提交。
+
+use std::collections::{HashMap, HashSet};
+
+use futures::StreamExt;
+use scion_object::ObjectId;
+use scion_store::{MetaStore, path_within};
+
+use crate::{Graph, QueryError, Result, load_changeset, on_first_parent_chain};
+use scion_store::BlobStore;
+
+pub const LAST_COMMIT_KIND: &str = "last-commit";
+pub const LAST_COMMIT_VERSION: u32 = 1;
+/// 扫描回退时最多检查的提交数。
+pub const MAX_SCAN: usize = 2000;
+/// 往回找有缓存的祖先时最多检查的提交数。
+pub const ANCESTOR_REACH: usize = 64;
+/// 并发的索引查询数。
+const INDEX_PARALLEL: usize = 16;
+/// 每次从索引读取的候选数。
+const CANDIDATE_BATCH: usize = 64;
+
+fn join(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn cache_key(cs: &ObjectId, dir: &str) -> Vec<u8> {
+    let mut k = cs.to_bytes().to_vec();
+    k.extend_from_slice(dir.as_bytes());
+    k
+}
+
+/// 编码：依次为 名字长度（u32 LE）、名字、提交 id。
+fn encode(map: &[(String, ObjectId)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, id) in map {
+        out.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&id.to_bytes());
+    }
+    out
+}
+
+fn decode(mut b: &[u8]) -> Option<HashMap<String, ObjectId>> {
+    let mut out = HashMap::new();
+    while !b.is_empty() {
+        let len = u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
+        b = &b[4..];
+        let name = std::str::from_utf8(b.get(..len)?).ok()?.to_owned();
+        b = &b[len..];
+        let id = ObjectId::from_bytes(b.get(..scion_object::ID_LEN)?).ok()?;
+        b = &b[scion_object::ID_LEN..];
+        out.insert(name, id);
+    }
+    Some(out)
+}
+
+async fn cached(
+    meta: &dyn MetaStore,
+    repo: &str,
+    cs: &ObjectId,
+    dir: &str,
+) -> Result<Option<HashMap<String, ObjectId>>> {
+    Ok(meta
+        .get_derived(repo, LAST_COMMIT_KIND, LAST_COMMIT_VERSION, &cache_key(cs, dir))
+        .await?
+        .and_then(|v| decode(&v)))
+}
+
+/// `dir` 下被 `delta` 改动的直接条目名。
+fn touched<'a>(paths: impl Iterator<Item = &'a str>, dir: &str) -> HashSet<String> {
+    paths
+        .filter(|p| dir.is_empty() || (path_within(p, dir) && *p != dir))
+        .map(|p| {
+            let rest = if dir.is_empty() { p } else { &p[dir.len() + 1..] };
+            rest.split('/').next().unwrap_or(rest).to_owned()
+        })
+        .collect()
+}
+
+/// 用索引找 `path` 在 `cs` 的第一父提交链上最近的改动。`Ok(None)` 表示索引无法回答。
+async fn by_index(
+    meta: &dyn MetaStore,
+    g: &mut Graph<'_>,
+    repo: &str,
+    cs: ObjectId,
+    path: &str,
+) -> Result<Option<ObjectId>> {
+    let mut top = g.get(cs).await?.generation;
+    loop {
+        let hist = meta.path_history(repo, path, top, CANDIDATE_BATCH).await?;
+        for e in &hist {
+            match on_first_parent_chain(g, cs, e.cs).await {
+                Ok(Some(true)) => return Ok(Some(e.cs)),
+                Ok(Some(false)) => {}
+                Ok(None) => return Ok(None),
+                // 写索引后、写记录前崩溃留下的孤立索引行：不属于任何历史，跳过
+                Err(QueryError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        match hist.last() {
+            Some(last) if hist.len() == CANDIDATE_BATCH && last.generation > 1 => top = last.generation - 1,
+            // 条目存在却没有任何改动记录：索引缺行（建立索引之前的数据）
+            _ => return Ok(None),
+        }
+    }
+}
+
+/// 第一父提交链上最近（[`ANCESTOR_REACH`] 个提交以内）有缓存的祖先：以它的结果为起点，
+/// 依次应用其后各提交的改动。合入频繁而浏览较少时，最新提交的父提交往往没有缓存。
+#[allow(clippy::too_many_arguments)]
+async fn from_cached_ancestor(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    g: &mut Graph<'_>,
+    repo: &str,
+    cs: ObjectId,
+    dir: &str,
+    pending: &mut HashSet<String>,
+    found: &mut HashMap<String, ObjectId>,
+) -> Result<()> {
+    // chain[0] = cs，之后依次为第一父提交
+    let mut chain = vec![cs];
+    while chain.len() <= ANCESTOR_REACH {
+        match g.get(chain[chain.len() - 1]).await?.first_parent() {
+            Some(p) => chain.push(p),
+            None => break,
+        }
+    }
+    let keys: Vec<Vec<u8>> = chain[1..].iter().map(|id| cache_key(id, dir)).collect();
+    let hits = meta
+        .get_derived_many(repo, LAST_COMMIT_KIND, LAST_COMMIT_VERSION, &keys)
+        .await?;
+    let Some((i, base)) = hits
+        .iter()
+        .enumerate()
+        .find_map(|(i, v)| v.as_deref().and_then(decode).map(|m| (i + 1, m)))
+    else {
+        return Ok(());
+    };
+    // 从新到旧：最先改动到某个条目的提交就是它的最后提交
+    for id in &chain[..i] {
+        let c = load_changeset(blobs, *id).await?;
+        for name in touched(c.delta.iter().map(|d| d.path.as_str()), dir) {
+            if pending.remove(&name) {
+                found.insert(name, *id);
+            }
+        }
+    }
+    pending.retain(|name| match base.get(name) {
+        Some(id) => {
+            found.insert(name.clone(), *id);
+            false
+        }
+        None => true,
+    });
+    Ok(())
+}
+
+/// 沿第一父提交链扫描，给 `pending` 中的条目找到最近的改动。
+async fn by_scan(
+    blobs: &dyn BlobStore,
+    g: &mut Graph<'_>,
+    cs: ObjectId,
+    dir: &str,
+    pending: &mut HashSet<String>,
+    out: &mut HashMap<String, ObjectId>,
+) -> Result<()> {
+    let mut cur = Some(cs);
+    let mut scanned = 0;
+    while let Some(id) = cur {
+        if pending.is_empty() || scanned >= MAX_SCAN {
+            break;
+        }
+        scanned += 1;
+        let c = load_changeset(blobs, id).await?;
+        for name in touched(c.delta.iter().map(|d| d.path.as_str()), dir) {
+            if pending.remove(&name) {
+                out.insert(name, id);
+            }
+        }
+        cur = g.get(id).await?.first_parent();
+    }
+    Ok(())
+}
+
+/// `dir`（在提交 `cs` 中存在的目录，空串为根目录）里 `names` 各自最后被改动的提交，与 `names` 一一对应。
+/// 扫描上限内找不到的条目为 None。`cache` 为 true 时 `names` 必须是目录的全部条目，结果写入缓存。
+pub async fn last_commits(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    repo: &str,
+    cs: ObjectId,
+    dir: &str,
+    names: &[String],
+    cache: bool,
+) -> Result<Vec<Option<ObjectId>>> {
+    let mut found: HashMap<String, ObjectId> = HashMap::new();
+    if cache {
+        if let Some(hit) = cached(meta, repo, &cs, dir).await? {
+            found = hit;
+        }
+    }
+    let mut g = Graph::new(meta, repo);
+    let mut pending: HashSet<String> = names.iter().filter(|n| !found.contains_key(*n)).cloned().collect();
+    let complete_hit = pending.is_empty() && !found.is_empty();
+    if cache && !pending.is_empty() {
+        from_cached_ancestor(meta, blobs, &mut g, repo, cs, dir, &mut pending, &mut found).await?;
+    }
+    // 逐条目查索引：互不依赖，并发执行（每个任务用自己的提交记录缓存）
+    let lookups = futures::stream::iter(std::mem::take(&mut pending).into_iter().map(|name| async move {
+        let mut g = Graph::new(meta, repo);
+        let hit = by_index(meta, &mut g, repo, cs, &join(dir, &name)).await;
+        (name, hit)
+    }))
+    .buffer_unordered(INDEX_PARALLEL)
+    .collect::<Vec<_>>()
+    .await;
+    let mut unknown = HashSet::new();
+    for (name, hit) in lookups {
+        match hit? {
+            Some(id) => {
+                found.insert(name, id);
+            }
+            None => {
+                unknown.insert(name);
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        by_scan(blobs, &mut g, cs, dir, &mut unknown, &mut found).await?;
+    }
+    let out: Vec<Option<ObjectId>> = names.iter().map(|n| found.get(n).copied()).collect();
+    if cache && unknown.is_empty() && !complete_hit {
+        let all: Vec<(String, ObjectId)> = names
+            .iter()
+            .zip(&out)
+            .filter_map(|(n, id)| id.map(|id| (n.clone(), id)))
+            .collect();
+        meta.put_derived(
+            repo,
+            LAST_COMMIT_KIND,
+            LAST_COMMIT_VERSION,
+            &cache_key(&cs, dir),
+            &encode(&all),
+        )
+        .await?;
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::{Builder, REPO};
+
+    fn names(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    async fn run(b: &Builder, cs: ObjectId, dir: &str, n: &[&str], cache: bool) -> Vec<Option<ObjectId>> {
+        last_commits(&b.store, &b.store, REPO, cs, dir, &names(n), cache)
+            .await
+            .expect("last commits")
+    }
+
+    #[test]
+    fn touched_and_codec() {
+        let t = touched(["a/x", "a/y/z", "ab", "b", "a"].into_iter(), "a");
+        assert_eq!(t, ["x", "y"].iter().map(|s| (*s).to_owned()).collect());
+        let root = touched(["a/x", "b"].into_iter(), "");
+        assert_eq!(root, ["a", "b"].iter().map(|s| (*s).to_owned()).collect());
+        let id = ObjectId::hash(scion_object::ObjectKind::Changeset, b"x");
+        let enc = encode(&[("n".into(), id), ("中".into(), id)]);
+        let dec = decode(&enc).expect("decode");
+        assert_eq!((dec.len(), dec["中"]), (2, id));
+        assert_eq!(decode(&enc[..enc.len() - 1]), None);
+        assert_eq!(decode(&[9, 0, 0, 0, b'a']), None);
+        assert_eq!(decode(&[]), Some(HashMap::new()));
+    }
+
+    /// a ─ b ─ c ─ m
+    ///      \     /
+    ///       d ──'
+    #[tokio::test]
+    async fn first_parent_semantics_index_and_scan_agree() {
+        for indexed in [true, false] {
+            let mut b = Builder::with_index(indexed).await;
+            let a = b.commit(&[], &["README", "src/lib.rs", "src/util/x.rs"]).await;
+            let bb = b.commit(&[a], &["src/lib.rs"]).await;
+            let c = b.commit(&[bb], &["README"]).await;
+            let d = b.commit(&[bb], &["src/util/x.rs", "docs/new.md"]).await;
+            // 合并提交的 delta 相对第一父提交：带进来 d 的改动
+            let m = b.commit(&[c, d], &["src/util/x.rs", "docs/new.md"]).await;
+
+            assert_eq!(
+                run(&b, m, "", &["README", "docs", "src"], false).await,
+                vec![Some(c), Some(m), Some(m)],
+                "indexed={indexed}"
+            );
+            assert_eq!(
+                run(&b, m, "src", &["lib.rs", "util"], false).await,
+                vec![Some(bb), Some(m)]
+            );
+            assert_eq!(
+                run(&b, c, "src", &["lib.rs", "util"], false).await,
+                vec![Some(bb), Some(a)]
+            );
+            // d 不在 c 的第一父提交链上
+            assert_eq!(run(&b, d, "", &["README", "docs"], false).await, vec![Some(a), Some(d)]);
+            // 不存在的条目
+            assert_eq!(run(&b, c, "", &["nope"], false).await, vec![None]);
+        }
+    }
+
+    #[tokio::test]
+    async fn caches_and_extends_incrementally() {
+        let mut b = Builder::new().await;
+        let a = b.commit(&[], &["x", "y"]).await;
+        let bb = b.commit(&[a], &["x"]).await;
+        assert_eq!(run(&b, bb, "", &["x", "y"], true).await, vec![Some(bb), Some(a)]);
+        let key = cache_key(&bb, "");
+        assert!(
+            b.store
+                .get_derived(REPO, LAST_COMMIT_KIND, LAST_COMMIT_VERSION, &key)
+                .await
+                .expect("get")
+                .is_some()
+        );
+        // 缓存命中
+        assert_eq!(run(&b, bb, "", &["x", "y"], true).await, vec![Some(bb), Some(a)]);
+        // 子提交从父提交的缓存增量计算：新条目 z、改动的 y
+        let c = b.commit(&[bb], &["y", "z"]).await;
+        assert_eq!(
+            run(&b, c, "", &["x", "y", "z"], true).await,
+            vec![Some(bb), Some(c), Some(c)]
+        );
+        let got = cached(&b.store, REPO, &c, "").await.expect("cached").expect("hit");
+        assert_eq!(got.len(), 3);
+        // 不缓存的调用不写入
+        let d = b.commit(&[c], &["x"]).await;
+        assert_eq!(run(&b, d, "", &["x"], false).await, vec![Some(d)]);
+        assert_eq!(cached(&b.store, REPO, &d, "").await.expect("cached"), None);
+        // 缓存里缺的条目（损坏或旧版本）照常计算
+        b.store
+            .put_derived(
+                REPO,
+                LAST_COMMIT_KIND,
+                LAST_COMMIT_VERSION,
+                &cache_key(&d, ""),
+                &encode(&[]),
+            )
+            .await
+            .expect("put");
+        assert_eq!(run(&b, d, "", &["x", "z"], true).await, vec![Some(d), Some(c)]);
+    }
+
+    #[tokio::test]
+    async fn extends_from_a_cached_ancestor() {
+        let mut b = Builder::new().await;
+        let a = b.commit(&[], &["x", "y", "z"]).await;
+        assert_eq!(run(&b, a, "", &["x", "y", "z"], true).await, vec![Some(a); 3]);
+        // 几次合入之后才有人浏览：从 a 的缓存起，依次应用 b、c、d 的改动
+        let bb = b.commit(&[a], &["x", "w"]).await;
+        let c = b.commit(&[bb], &["x"]).await;
+        let d = b.commit(&[c], &["y"]).await;
+        assert_eq!(
+            run(&b, d, "", &["w", "x", "y", "z"], true).await,
+            vec![Some(bb), Some(c), Some(d), Some(a)]
+        );
+        // 超出可达范围的祖先缓存不使用（结果仍然正确，来自索引）
+        let mut tip = d;
+        for _ in 0..ANCESTOR_REACH {
+            tip = b.commit(&[tip], &["hot"]).await;
+        }
+        assert_eq!(run(&b, tip, "", &["hot", "z"], true).await, vec![Some(tip), Some(a)]);
+    }
+
+    #[tokio::test]
+    async fn scan_limit_and_errors() {
+        let mut b = Builder::with_index(false).await;
+        let a = b.commit(&[], &["old"]).await;
+        let mut tip = a;
+        for _ in 0..MAX_SCAN {
+            tip = b.commit(&[tip], &["hot"]).await;
+        }
+        // 超出扫描上限：找不到，也不写缓存
+        assert_eq!(run(&b, tip, "", &["hot", "old"], true).await, vec![Some(tip), None]);
+        assert_eq!(cached(&b.store, REPO, &tip, "").await.expect("cached"), None);
+        let stray = ObjectId::hash(scion_object::ObjectKind::Changeset, b"stray");
+        let err = last_commits(&b.store, &b.store, REPO, stray, "", &names(&["x"]), false).await;
+        assert_eq!(err, Err(QueryError::NotFound(stray)));
+    }
+
+    #[tokio::test]
+    async fn orphan_index_rows_are_skipped() {
+        let mut b = Builder::new().await;
+        let a = b.commit(&[], &["f"]).await;
+        let orphan = ObjectId::hash(scion_object::ObjectKind::Changeset, b"orphan");
+        let change = scion_store::PathChange {
+            path: "f".into(),
+            deleted: false,
+        };
+        b.store.index_paths(REPO, orphan, 5, &[change]).await.expect("index");
+        let tip = b.commit(&[a], &["g"]).await;
+        assert_eq!(run(&b, tip, "", &["f"], false).await, vec![Some(a)]);
+    }
+}

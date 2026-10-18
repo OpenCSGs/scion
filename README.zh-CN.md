@@ -15,6 +15,7 @@
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
 - [打包下载](docs/guide/archive.md)：用 `scn archive` 把某个版本或目录打包成 tar.gz、zip 或 tar
+- [文件列表页](docs/guide/browse.md)：目录中每个条目的最后提交、文件数与大小
 - [git 兼容的提交 sha](docs/guide/git-sha.md)：每个提交都有 40 位 git sha，可以直接当作版本号使用
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
@@ -98,6 +99,7 @@ M5 剩余工作：YugabyteDB 档、Helm 与发布构建。
 | 检出（[`client/daemon/tests/bench.rs`](client/daemon/tests/bench.rs)） | `scn clone` 1000 个目录、10 万个文件 | 经热 daemon 5.3 秒；本机磁盘上不经网络直接创建这些文件需要 5.4 秒，daemon 没有可测出的额外开销 | < 5 秒（受磁盘限制） |
 | 合入（[`server/land/tests/bench.rs`](server/land/tests/bench.rs)） | 200 个并发客户端向同一个 ref 合入 2000 次 | PostgreSQL 每秒 885 次（p99 379 ms）；SQLite 每秒 1921 次（p99 173 ms） | 每秒 ≥ 200 次，p99 < 500 ms |
 | 历史查询（[`server/query/tests/bench.rs`](server/query/tests/bench.rs)） | 10 万提交：log、diff、祖先判断、merge-base、blame | SQLite 与 PostgreSQL 下 p99 均低于 20 ms（冷 blame 13.6 ms，`log --path` 15.6 ms） | p99 < 100 ms |
+| 文件列表页（同一基准） | 10 万提交：根目录 100 个条目各自的最后提交、仓库统计 | PostgreSQL：冷查询 p50 33 ms（p99 93 ms），合入后父提交已缓存时 p99 2.4 ms，命中缓存 p99 < 5 ms；仓库统计冷查询 131 ms，下一个提交 3.1 ms | p99 < 100 ms |
 
 ## 目录结构
 

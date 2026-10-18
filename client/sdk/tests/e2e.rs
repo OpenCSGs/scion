@@ -513,6 +513,42 @@ async fn history_queries_end_to_end() {
     let sha = c.git_sha("main").await.expect("sha").expect("computed");
     assert_eq!(c.git_shas(&[m.id]).await.expect("batch"), vec![sha.clone()]);
     assert_eq!(c.resolve_revision(&sha).await.expect("by sha").id, m.id);
+    // 每个条目的最后提交：合并带进来的 other 归到合并提交
+    assert!(c.has_feature(scion_proto::features::QUERY_LAST_COMMITS));
+    let last = c.last_commits("main", "", 0, 0).await.expect("last commits");
+    let want = vec![
+        ("README".to_string(), Some(m.id)),
+        ("other".to_string(), Some(m.id)),
+        ("src".to_string(), Some(b.id)),
+    ];
+    assert_eq!((last.total, last.entries.clone()), (3, want.clone()));
+    assert_eq!(last.commits.iter().map(|e| e.id).collect::<Vec<_>>(), vec![m.id, b.id]);
+    assert_eq!(last.commits[1].message, "b");
+    assert_eq!(c.last_commits("main", "", 0, 0).await.expect("cached").entries, want);
+    let page = c.last_commits("main", "", 1, 1).await.expect("page");
+    assert_eq!((page.total, page.entries), (3, vec![("other".to_string(), Some(m.id))]));
+    assert!(
+        c.last_commits("main", "", 9, 0)
+            .await
+            .expect("past end")
+            .entries
+            .is_empty()
+    );
+    assert!(matches!(
+        c.last_commits("main", "README", 0, 0).await.expect_err("file"),
+        scion_client::Error::Rpc {
+            code: scion_client::Code::FailedPrecondition,
+            ..
+        }
+    ));
+    // 目录统计
+    let st = c.tree_stats("main", "").await.expect("stats");
+    assert_eq!((st.files, st.directories, st.bytes, st.changeset), (3, 1, 3, m.id));
+    assert_eq!(c.tree_stats(&b.id.to_string(), "src").await.expect("src").files, 1);
+    assert_eq!(
+        c.tree_stats("main", "nope").await.expect_err("missing").reason(),
+        Some(ErrorReason::PathNotFound)
+    );
     assert_eq!(c.generation("main").await.expect("gen"), (3, 3));
     let err = c.diff(Some("nope"), "main", None).await.expect_err("bad revision");
     assert_eq!(err.reason(), Some(ErrorReason::RefNotFound));

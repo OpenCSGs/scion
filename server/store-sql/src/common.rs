@@ -198,8 +198,13 @@ pub const REPO_TABLES: &[(&str, &str)] = &[
     ("objects_index", "id"),
 ];
 
-/// fork 时复制的表及其列（不含 `repo_id`）。redaction 另行复制（要分配新的 seq）。
+/// fork 时复制的表及其列（不含 `repo_id`），按顺序复制。redaction 另行复制（要分配新的 seq）。
+///
+/// PostgreSQL 的 READ COMMITTED 下每条 `INSERT … SELECT` 各自取快照，所以 ref 必须**最先**复制：写入顺序是
+/// 对象与索引 → 提交记录 → ref，先拿到的 ref 能到达的数据在之后的复制中一定已经存在；之后才落盘的数据只会多复制，
+/// 不会缺。不用 REPEATABLE READ：fork 事务里要更新序号计数器，长事务期间只要有合入就会序列化失败。
 pub const FORK_TABLES: &[(&str, &str)] = &[
+    ("refs", "name, target, version"),
     ("objects_index", "id, size"),
     (
         "changesets",
@@ -207,7 +212,6 @@ pub const FORK_TABLES: &[(&str, &str)] = &[
     ),
     ("derived", "kind, version, key, value"),
     ("path_changes", "path, cs_id, generation, deleted"),
-    ("refs", "name, target, version"),
 ];
 
 /// 一批删除的行数（每次清除调用最多删除这么多行）。

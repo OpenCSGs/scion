@@ -9,6 +9,9 @@ pub enum Error {
     /// 仓库已删除，宽限期内可以恢复；物理清除之前名字不能重新使用。
     #[error("repository {0:?} was deleted and is pending purge")]
     RepoDeleted(String),
+    /// 已删除的仓库正在被清除，不能再恢复。
+    #[error("repository {0:?} is being purged and can no longer be restored")]
+    RepoPurging(String),
     #[error("invalid repository name {0:?}")]
     InvalidRepoName(String),
     /// ref CAS 条件不满足。`current` 为 `None` 表示 ref 不存在。
@@ -42,6 +45,11 @@ mod tests {
             "repository \"a\" already exists"
         );
         assert!(Error::RepoDeleted("a".into()).to_string().contains("pending purge"));
+        assert!(
+            Error::RepoPurging("a".into())
+                .to_string()
+                .contains("no longer be restored")
+        );
         assert_eq!(
             Error::InvalidRepoName("".into()).to_string(),
             "invalid repository name \"\""

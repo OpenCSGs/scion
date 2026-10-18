@@ -1228,10 +1228,24 @@ pub async fn repo_admin<S: MetaStore + ?Sized>(s: &S) {
         None
     );
 
-    // 清除：分批，完成后名字可以重新使用，新仓库是空的
+    // 清除：分批，完成后名字可以重新使用，新仓库是空的。清除开始后不能再恢复
     s.delete_repo("adm/src", 60).await.expect("delete again");
+    let mut done = s.purge_repo("adm/src", 1).await.expect("first batch");
+    if !done {
+        assert_eq!(
+            s.restore_repo("adm/src").await,
+            Err(Error::RepoPurging("adm/src".into()))
+        );
+        assert!(
+            s.get_repo("adm/src")
+                .await
+                .expect("get")
+                .is_some_and(|r| r.deleted_at_ms.is_some())
+        );
+    }
     let mut rounds = 0;
-    while !s.purge_repo("adm/src", 1).await.expect("purge") {
+    while !done {
+        done = s.purge_repo("adm/src", 1).await.expect("purge");
         rounds += 1;
         assert!(rounds < 100, "purge must finish");
     }

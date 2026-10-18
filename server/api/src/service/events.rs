@@ -14,6 +14,9 @@ use crate::status;
 
 const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 1000;
+/// 按仓库拉取时，早于仓库创建时间这么久的事件属于此前同名的旧仓库（容忍节点间的时钟偏差）。
+/// 名字至少在删除 2 小时后才能重新使用，旧仓库的事件不会落在这个窗口里。
+const CLOCK_SKEW_MS: i64 = 10 * 60 * 1000;
 
 pub struct EventSvc {
     meta: Arc<dyn MetaStore>,
@@ -68,16 +71,33 @@ impl EventService for EventSvc {
             n => n.min(MAX_LIMIT),
         } as usize;
         let repo = Some(req.repo.as_str()).filter(|r| !r.is_empty());
-        let events = self
+        // 事件按仓库名保存，清除后的旧仓库与重新创建的同名仓库共用名字：只返回当前仓库创建之后的事件
+        let since = match repo {
+            Some(r) => match self.meta.get_repo(r).await.map_err(status::from_store)? {
+                Some(info) => info.created_at_ms.saturating_sub(CLOCK_SKEW_MS),
+                None => {
+                    return Ok(Response::new(ListRefEventsResponse {
+                        events: Vec::new(),
+                        next_seq: req.after_seq,
+                        truncated: false,
+                    }));
+                }
+            },
+            None => i64::MIN,
+        };
+        let scanned = self
             .meta
             .list_ref_events(req.after_seq, limit, repo)
             .await
             .map_err(status::from_store)?;
+        // 跳过的旧事件也计入进度
+        let last_scanned = scanned.last().map(|e| e.seq);
+        let events: Vec<_> = scanned.into_iter().filter(|e| e.created_at_ms >= since).collect();
         let (oldest, last) = self.meta.ref_event_bounds().await.map_err(status::from_store)?;
         // after_seq 之后有过事件，但最早的那些已被清理
         let truncated = last > req.after_seq && oldest.is_none_or(|lo| lo > req.after_seq.saturating_add(1));
         Ok(Response::new(ListRefEventsResponse {
-            next_seq: events.last().map_or(req.after_seq, |e| e.seq),
+            next_seq: last_scanned.unwrap_or(req.after_seq),
             events: events
                 .into_iter()
                 .map(|e| RefChangeEvent {
@@ -131,12 +151,46 @@ mod tests {
         assert_eq!((idle.events.len(), idle.next_seq, idle.truncated), (0, 3, false));
         let only_b = svc.list_ref_events(req(0, 0, "b")).await.expect("b").into_inner();
         assert_eq!(only_b.events.len(), 1);
+        let gone = svc
+            .list_ref_events(req(0, 0, "never-existed"))
+            .await
+            .expect("none")
+            .into_inner();
+        assert!(gone.events.is_empty() && gone.next_seq == 0);
         // 清理后落后的消费方得到 truncated
         store.prune_ref_events(i64::MAX).await.expect("prune");
         let behind = svc.list_ref_events(req(1, 0, "")).await.expect("behind").into_inner();
         assert!(behind.truncated && behind.events.is_empty());
         let current = svc.list_ref_events(req(3, 0, "")).await.expect("current").into_inner();
         assert!(!current.truncated);
+    }
+
+    /// 清除后重新创建的同名仓库：按仓库拉取看不到旧仓库的历史，管理员不带仓库拉取仍能看到。
+    #[tokio::test]
+    async fn a_recreated_repo_does_not_see_the_old_repos_events() {
+        use scion_store::RepoInfo;
+        let store = Arc::new(MemStore::new());
+        let x = scion_object::ObjectId::hash(scion_object::ObjectKind::Changeset, b"x");
+        let day = 24 * 3600 * 1000;
+        // 旧仓库的事件发生在新仓库创建的一天之前
+        store.create_repo_with(&RepoInfo::new("r", 0)).await.expect("old repo");
+        store
+            .cas_ref("r", "secret-branch", RefExpect::Absent, x)
+            .await
+            .expect("old ref");
+        store.delete_repo("r", 1).await.expect("delete");
+        while !store.purge_repo("r", 100).await.expect("purge") {}
+        let now = store.list_ref_events(0, 1, None).await.expect("events")[0].created_at_ms;
+        store
+            .create_repo_with(&RepoInfo::new("r", now + day))
+            .await
+            .expect("recreate");
+        let svc = EventSvc::new(store.clone());
+        let page = svc.list_ref_events(req(0, 0, "r")).await.expect("list").into_inner();
+        assert!(page.events.is_empty(), "old history hidden");
+        assert_eq!(page.next_seq, 1, "progress still advances past the old events");
+        let all = svc.list_ref_events(req(0, 0, "")).await.expect("all").into_inner();
+        assert_eq!(all.events[0].r#ref, "secret-branch");
     }
 
     #[tokio::test]

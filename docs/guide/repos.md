@@ -32,6 +32,8 @@ scn repo restore opencsg/qwen
 - **宽限期**：由 `scion server --repo-delete-grace` 设置（默认 24 小时，最少 2 小时），期间可以用 `scn repo restore` 恢复。
 - **名字暂不可用**：宽限期内用同一个名字创建仓库，返回 `ALREADY_EXISTS` / `REPO_DELETED`。
 - **清除**：宽限期过后，服务端的 janitor 分批删除这个仓库的全部元数据（ref、提交记录、对象索引、派生数据、redaction 等），之后名字才能重新使用。
+  - 清除一旦开始（第一批删除时），就不能再恢复，`scn repo restore` 返回 `FAILED_PRECONDITION`；
+  - 恢复与清除不会交错：每一批都在同一个事务里锁住仓库行、确认仍是已删除才删。
 - **对象字节**：在仓库之间共享，清除仓库时不删除。
 - **宽限期下限的原因**：服务端的提交记录缓存、区域缓存与 daemon 的可见集都按仓库名缓存，最长 1 小时。名字在这之后才重新可用，所以重新创建的同名仓库看不到旧仓库的数据。
 

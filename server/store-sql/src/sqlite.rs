@@ -644,24 +644,43 @@ impl MetaStore for SqliteMetaStore {
     }
 
     async fn restore_repo(&self, repo: &str) -> Result<()> {
-        let done = sqlx::query("UPDATE repos SET deleted_at_ms = NULL WHERE name = ?1 AND deleted_at_ms IS NOT NULL")
-            .bind(repo)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| backend("restore repo", e))?;
+        let done = sqlx::query(
+            "UPDATE repos SET deleted_at_ms = NULL WHERE name = ?1 AND deleted_at_ms IS NOT NULL AND NOT purging",
+        )
+        .bind(repo)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| backend("restore repo", e))?;
         if done.rows_affected() == 0 {
-            return Err(Error::RepoNotFound(repo.to_owned()));
+            let purging: Option<bool> =
+                sqlx::query_scalar("SELECT purging FROM repos WHERE name = ?1 AND deleted_at_ms IS NOT NULL")
+                    .bind(repo)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| backend("restore repo", e))?;
+            return Err(match purging {
+                Some(true) => Error::RepoPurging(repo.to_owned()),
+                _ => Error::RepoNotFound(repo.to_owned()),
+            });
         }
         Ok(())
     }
 
     async fn purge_repo(&self, repo: &str, batch: usize) -> Result<bool> {
-        let id: i64 = sqlx::query_scalar("SELECT repo_id FROM repos WHERE name = ?1 AND deleted_at_ms IS NOT NULL")
-            .bind(repo)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| backend("lookup deleted repo", e))?
-            .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))?;
+        // 每一批一个事务。第一句就是写：锁住仓库行、确认仍是已删除，并标记清除已开始（之后恢复会失败）。
+        // 恢复与清除因此不会交错：要么恢复先提交、这里找不到已删除的仓库，要么清除先开始、恢复被拒绝。
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let id: Option<i64> = sqlx::query_scalar(
+            "UPDATE repos SET purging = TRUE WHERE name = ?1 AND deleted_at_ms IS NOT NULL RETURNING repo_id",
+        )
+        .bind(repo)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| backend("lock deleted repo", e))?;
+        let Some(id) = id else {
+            tx.rollback().await.map_err(|e| backend("rollback", e))?;
+            return Err(Error::RepoNotFound(repo.to_owned()));
+        };
         // 每次只删一张表中的一批行，单个事务保持短小
         for (table, key) in REPO_TABLES {
             let done = sqlx::query(&format!(
@@ -670,18 +689,20 @@ impl MetaStore for SqliteMetaStore {
             ))
             .bind(id)
             .bind(purge_limit(batch))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| backend("purge repo", e))?;
             if done.rows_affected() > 0 {
+                tx.commit().await.map_err(|e| backend("commit", e))?;
                 return Ok(false);
             }
         }
-        sqlx::query("DELETE FROM repos WHERE repo_id = ?1")
+        sqlx::query("DELETE FROM repos WHERE repo_id = ?1 AND deleted_at_ms IS NOT NULL")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| backend("purge repo", e))?;
+        tx.commit().await.map_err(|e| backend("commit", e))?;
         Ok(true)
     }
 

@@ -18,6 +18,7 @@ ListRefEvents(after_seq, limit, repo) → { events, next_seq, truncated }
 ```
 
 - **权限**：指定 `repo` 时需要该仓库的 `read`；不指定时（全部仓库）需要系统管理员。
+- **同名仓库**：仓库清除后，事件按保留期继续保存。名字被重新使用时，按仓库拉取只返回新仓库创建之后的事件；不带 `repo` 的管理员拉取仍能看到旧仓库的历史。被跳过的旧事件同样计入 `next_seq`。
 - **事件内容**：每条包含 `seq`、`repo`、`ref`、变化前后的提交（`old_changeset_id` 为空表示新建，`new_changeset_id` 为空表示删除）、变化后的版本和时间。
 - **`truncated` 为 true**：`after_seq` 之后的部分事件已经超过保留期被清理，消费方需要用 `ListRefs` 重新同步全部 ref。
 - **SDK**：`Client::list_ref_events(after_seq, limit, repo)`。

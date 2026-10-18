@@ -56,6 +56,8 @@ impl ServerInfoSvc {
             features::EVENTS,
             features::GIT_SHA1,
             features::QUERY_ARCHIVE,
+            features::QUERY_LAST_COMMITS,
+            features::QUERY_TREE_STATS,
         ]
         .map(String::from)
         .to_vec();

@@ -8,9 +8,10 @@ use scion_object::{EntryMode, ObjectId, TreeEntry};
 use scion_proto::v1::query_service_server::QueryService;
 use scion_proto::v1::{
     self, ArchiveRequest, ArchiveResponse, BlameRequest, BlameResponse, DiffRequest, DiffResponse, GetDerivedRequest,
-    GetDerivedResponse, GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, ListDirRequest,
-    ListDirResponse, LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ReadFileRequest, ReadFileResponse,
-    ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
+    GetDerivedResponse, GetGitShasRequest, GetGitShasResponse, GetTreeStatsRequest, GetTreeStatsResponse,
+    IsAncestorRequest, IsAncestorResponse, ListDirRequest, ListDirResponse, ListLastCommitsRequest,
+    ListLastCommitsResponse, LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ReadFileRequest,
+    ReadFileResponse, ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
 };
 use scion_store::{BlobStore, MetaStore};
 use scion_tree::{BlobTreeSource, TreeSource, lookup};
@@ -392,6 +393,78 @@ impl QueryService for QuerySvc {
             }
         });
         Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
+    }
+
+    async fn list_last_commits(
+        &self,
+        request: Request<ListLastCommitsRequest>,
+    ) -> Result<Response<ListLastCommitsResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        check_path(&req.path)?;
+        self.authorize_read(&p, &req.repo, "").await?;
+        let rec = resolve_revision(self.meta.as_ref(), &req.repo, &req.revision).await?;
+        let src = self.source();
+        let tree_id = dir_tree(&src, rec.root_tree, &req.path).await?;
+        let tree = src.load_tree(&tree_id).await.map_err(status::from_tree)?;
+        // 只限某些路径的读者：只列出可见的条目；看不到全部内容的条目不给出最后提交
+        let everything = self.reads_everything(&p, &req.repo).await?;
+        let mut names = Vec::with_capacity(tree.entries().len());
+        let mut hidden = std::collections::HashSet::new();
+        for e in tree.entries() {
+            if everything {
+                names.push(e.name.clone());
+                continue;
+            }
+            let full = history::join_path(&req.path, &e.name);
+            if !self.guard.path_visible(&p, &req.repo, &full).await.map_err(to_status)? {
+                continue;
+            }
+            let readable = self
+                .guard
+                .check(&p, &AuthRequest::repo(&req.repo, Action::Read).with_path(&full))
+                .await
+                .map_err(to_status)?;
+            if !readable {
+                hidden.insert(e.name.clone());
+            }
+            names.push(e.name.clone());
+        }
+        Ok(Response::new(
+            history::list_last_commits(
+                self.meta.as_ref(),
+                self.blobs.as_ref(),
+                &req,
+                rec.id,
+                names,
+                everything,
+                &hidden,
+            )
+            .await?,
+        ))
+    }
+
+    async fn get_tree_stats(
+        &self,
+        request: Request<GetTreeStatsRequest>,
+    ) -> Result<Response<GetTreeStatsResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        check_path(&req.path)?;
+        // 统计覆盖整棵子树：需要能读其中全部内容
+        self.authorize_subtree(&p, &req.repo, &req.path).await?;
+        let rec = resolve_revision(self.meta.as_ref(), &req.repo, &req.revision).await?;
+        let tree_id = dir_tree(&self.source(), rec.root_tree, &req.path).await?;
+        let st = scion_query::tree_stats(self.meta.as_ref(), self.blobs.as_ref(), &req.repo, tree_id)
+            .await
+            .map_err(history::from_query)?;
+        Ok(Response::new(GetTreeStatsResponse {
+            changeset_id: Bytes::copy_from_slice(&rec.id.to_bytes()),
+            tree_id: Bytes::copy_from_slice(&tree_id.to_bytes()),
+            files: st.files,
+            directories: st.dirs,
+            bytes: st.bytes,
+        }))
     }
 
     async fn get_git_shas(&self, request: Request<GetGitShasRequest>) -> Result<Response<GetGitShasResponse>, Status> {

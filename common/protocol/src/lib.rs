@@ -71,6 +71,10 @@ pub mod features {
     pub const GIT_SHA1: &str = "git.sha1";
     /// QueryService.Archive：tar.gz / zip / tar 打包下载。
     pub const QUERY_ARCHIVE: &str = "query.archive";
+    /// QueryService.ListLastCommits：目录条目的最后提交。
+    pub const QUERY_LAST_COMMITS: &str = "query.last_commits";
+    /// QueryService.GetTreeStats：目录统计。
+    pub const QUERY_TREE_STATS: &str = "query.tree_stats";
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ A server-first source control system: history, merges and rebases are computed o
 - [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
 - [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check
 - [Archives](docs/guide/archive.md) (Chinese): download a revision or a directory as tar.gz, zip or tar with `scn archive`
+- [Directory listings](docs/guide/browse.md) (Chinese): the last commit of every entry in a directory, file counts and sizes
 - [Git-compatible commit SHAs](docs/guide/git-sha.md) (Chinese): a 40-hex git SHA-1 for every commit, accepted wherever a revision is
 - [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
 - [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
@@ -100,6 +101,7 @@ Benchmarks run on one machine (Apple M5, 10 cores) with objects in memory; clien
 | Checkout ([`client/daemon/tests/bench.rs`](client/daemon/tests/bench.rs)) | `scn clone` of 100,000 files in 1,000 directories | Through a warm daemon 5.3 s; creating the same files without any network takes 5.4 s on this disk, so the daemon adds no measurable overhead | < 5 s, disk permitting |
 | Landing ([`server/land/tests/bench.rs`](server/land/tests/bench.rs)) | 2,000 lands on one ref from 200 concurrent clients | PostgreSQL 885/s (p99 379 ms); SQLite 1,921/s (p99 173 ms) | ≥ 200/s, p99 < 500 ms |
 | History queries ([`server/query/tests/bench.rs`](server/query/tests/bench.rs)) | 100,000 commits: log, diff, ancestry, merge-base, blame | p99 < 20 ms on SQLite and PostgreSQL (cold blame 13.6 ms, `log --path` 15.6 ms) | p99 < 100 ms |
+| Directory listings (same benchmark) | Last commit of every entry in a 100-entry root, and repository stats, at 100,000 commits | PostgreSQL: cold p50 33 ms (p99 93 ms); after a land with the parent cached p99 2.4 ms; cached p99 < 5 ms. Repository stats cold 131 ms, next commit 3.1 ms | p99 < 100 ms |
 
 ## Quick start
 

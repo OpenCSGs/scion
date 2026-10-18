@@ -31,6 +31,10 @@ service QueryService {
   rpc GetGitShas(GetGitShasRequest) returns (GetGitShasResponse);
   // 把一个版本（或其中的目录）打包成 tar.gz / zip / tar，分块流式返回。
   rpc Archive(ArchiveRequest) returns (stream ArchiveResponse);
+  // 目录中每个条目最后一次被改动的提交（沿第一父提交链，与 Blame 相同），按名字分页。
+  rpc ListLastCommits(ListLastCommitsRequest) returns (ListLastCommitsResponse);
+  // 目录（含全部子目录）下的文件数、子目录数与总字节数；path 为空表示整个仓库。
+  rpc GetTreeStats(GetTreeStatsRequest) returns (GetTreeStatsResponse);
 }
 
 message ReadFileRequest {
@@ -248,4 +252,48 @@ message ArchiveResponse {
   bytes data = 1;
   // 只在第一条消息中设置：打包的提交。
   bytes changeset_id = 2;
+}
+
+message ListLastCommitsRequest {
+  string repo = 1;
+  string revision = 2;
+  // 目录路径，空表示根目录。
+  string path = 3;
+  // 按名字排序后跳过的条目数。
+  uint32 offset = 4;
+  // 每页条目数，0 表示默认值 1000，最大 1000。
+  uint32 limit = 5;
+}
+
+message LastCommit {
+  // 条目名。
+  string name = 1;
+  // 最后改动它的提交；超过扫描上限仍未找到时为空。
+  bytes changeset_id = 2;
+}
+
+message ListLastCommitsResponse {
+  bytes changeset_id = 1;
+  repeated LastCommit entries = 2;
+  // entries 引用到的提交（去重，按代数从新到旧）。
+  repeated LogEntry commits = 3;
+  // 目录中（对调用方可见的）条目总数，用于分页。
+  uint32 total = 4;
+}
+
+message GetTreeStatsRequest {
+  string repo = 1;
+  string revision = 2;
+  string path = 3;
+}
+
+message GetTreeStatsResponse {
+  bytes changeset_id = 1;
+  bytes tree_id = 2;
+  // 文件数（含可执行文件与符号链接）。
+  uint64 files = 3;
+  // 子目录数（不含自身）。
+  uint64 directories = 4;
+  // 文件字节数之和。
+  uint64 bytes = 5;
 }

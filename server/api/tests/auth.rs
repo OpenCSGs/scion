@@ -253,6 +253,26 @@ async fn tokens_and_acl_are_enforced() {
         .await
         .expect("readable subtree");
     assert!(n > 0 && sink.windows(16).any(|w| w == b"src/ui/button.rs"));
+    // 最后提交：只列可见条目；看不到全部内容的目录（src）不给出提交
+    let last = cc.last_commits("main", "", 0, 0).await.expect("last commits");
+    assert_eq!((last.total, last.entries.len()), (1, 1));
+    assert_eq!(last.entries[0], ("src".to_string(), None));
+    assert!(last.commits.is_empty());
+    let last = cc.last_commits("main", "src", 0, 0).await.expect("last commits");
+    assert_eq!(last.entries.len(), 1);
+    assert_eq!(last.entries[0].0, "ui");
+    assert!(last.entries[0].1.is_some());
+    assert_eq!(last.commits.len(), 1);
+    // 统计：整个仓库需要全部读权限，可读的子目录可以
+    assert_eq!(
+        code(&cc.tree_stats("main", "").await.expect_err("whole repo")),
+        Some(Code::PermissionDenied)
+    );
+    assert_eq!(cc.tree_stats("main", "src/ui").await.expect("stats").files, 1);
+    assert_eq!(
+        code(&cc.tree_stats("main", "src").await.expect_err("src has hidden files")),
+        Some(Code::PermissionDenied)
+    );
     let changed = cc.diff(None, "main", None).await.expect("diff");
     assert!(changed.iter().all(|f| f.path.starts_with("src/ui")), "{changed:?}");
     assert_eq!(cc.log("main", None, 10, None).await.expect("log").entries.len(), 1);

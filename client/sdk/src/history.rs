@@ -6,8 +6,8 @@ use bytes::Bytes;
 use scion_object::ObjectId;
 use scion_proto::v1::{
     self, ArchiveRequest, BlameRequest, DerivedKind, DiffRequest, GetDerivedRequest, GetGitShasRequest,
-    IsAncestorRequest, LogRequest, MergeBaseRequest, ResolveRevisionRequest, StatRequest,
-    query_service_client::QueryServiceClient,
+    GetTreeStatsRequest, IsAncestorRequest, ListLastCommitsRequest, LogRequest, MergeBaseRequest,
+    ResolveRevisionRequest, StatRequest, query_service_client::QueryServiceClient,
 };
 
 use crate::client::Client;
@@ -45,6 +45,27 @@ impl ArchiveFormat {
             _ => None,
         }
     }
+}
+
+/// 一页目录条目的最后提交。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastCommitsPage {
+    /// (条目名, 最后改动它的提交)；提交未知或调用方看不到全部内容时为 None。
+    pub entries: Vec<(String, Option<ObjectId>)>,
+    /// `entries` 引用到的提交，按代数从新到旧。
+    pub commits: Vec<LogItem>,
+    /// 目录中（对调用方可见的）条目总数。
+    pub total: u32,
+}
+
+/// 目录（含全部子目录）的统计。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TreeStatsInfo {
+    pub changeset: ObjectId,
+    pub tree: ObjectId,
+    pub files: u64,
+    pub directories: u64,
+    pub bytes: u64,
 }
 
 /// 一页历史；`next_page_token` 为 None 表示没有更多。
@@ -311,6 +332,52 @@ impl Client {
         }
         let changeset = changeset.ok_or_else(|| Error::Protocol("Archive returned no data".into()))?;
         Ok((changeset, written))
+    }
+
+    /// 目录 `path`（空串为根目录）中每个条目最后一次被改动的提交，按名字分页；`limit` 为 0 时用服务端默认值。
+    pub async fn last_commits(&self, revision: &str, path: &str, offset: u32, limit: u32) -> Result<LastCommitsPage> {
+        let req = ListLastCommitsRequest {
+            repo: self.repo()?,
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+            offset,
+            limit,
+        };
+        let resp = self.query().list_last_commits(self.request(req)?).await?.into_inner();
+        let entries = resp
+            .entries
+            .into_iter()
+            .map(|e| {
+                let id = if e.changeset_id.is_empty() {
+                    None
+                } else {
+                    Some(id_from(&e.changeset_id, "changeset id")?)
+                };
+                Ok((e.name, id))
+            })
+            .collect::<Result<_>>()?;
+        Ok(LastCommitsPage {
+            entries,
+            commits: resp.commits.into_iter().map(item).collect::<Result<_>>()?,
+            total: resp.total,
+        })
+    }
+
+    /// 目录 `path`（空串为整个仓库）下的文件数、子目录数与总字节数。
+    pub async fn tree_stats(&self, revision: &str, path: &str) -> Result<TreeStatsInfo> {
+        let req = GetTreeStatsRequest {
+            repo: self.repo()?,
+            revision: revision.to_owned(),
+            path: path.to_owned(),
+        };
+        let resp = self.query().get_tree_stats(self.request(req)?).await?.into_inner();
+        Ok(TreeStatsInfo {
+            changeset: id_from(&resp.changeset_id, "changeset id")?,
+            tree: id_from(&resp.tree_id, "tree id")?,
+            files: resp.files,
+            directories: resp.directories,
+            bytes: resp.bytes,
+        })
     }
 
     /// 代数与第一父提交链深度（深度 0 表示未知）。

@@ -6,7 +6,9 @@
 mod archive;
 mod blame;
 mod gitsha;
+mod lastcommit;
 mod reindex;
+mod treestats;
 
 pub use archive::{ArchiveFormat, ArchiveOptions, Emit, redacted_placeholder, write_archive};
 pub use blame::{BLAME_KIND, BLAME_VERSION, BlameResult, blame};
@@ -15,7 +17,9 @@ pub use gitsha::{
     SCION_ID_HEADER, cached_git_shas, derive_git_sha, git_commit_body, git_hash, git_sha_of, git_tree_body,
     index_git_sha, lookup_git_sha, parse_git_sha,
 };
+pub use lastcommit::{LAST_COMMIT_KIND, LAST_COMMIT_VERSION, last_commits};
 pub use reindex::{ReindexStats, all_records, describe, reindex};
+pub use treestats::{TREE_STATS_KIND, TREE_STATS_VERSION, TreeStats, tree_stats};
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -399,35 +403,35 @@ async fn log_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use bytes::Bytes;
     use scion_object::{EntryMode, FileChange, Signature};
     use scion_store::MemStore;
     use std::collections::BTreeMap;
 
-    const REPO: &str = "r";
+    pub(crate) const REPO: &str = "r";
 
     /// 构造提交图的小工具：直接写入提交对象和记录（不建树，root_tree 用占位）。
-    struct Builder {
-        store: MemStore,
-        n: u8,
+    pub(crate) struct Builder {
+        pub(crate) store: MemStore,
+        n: u32,
         /// 是否写 PathHistory 索引（false 模拟索引建立之前的旧数据）。
         indexed: bool,
     }
 
     impl Builder {
-        async fn new() -> Self {
+        pub(crate) async fn new() -> Self {
             Self::with_index(true).await
         }
 
-        async fn with_index(indexed: bool) -> Self {
+        pub(crate) async fn with_index(indexed: bool) -> Self {
             let store = MemStore::new();
             store.create_repo(REPO).await.expect("repo");
             Self { store, n: 0, indexed }
         }
 
-        async fn commit(&mut self, parents: &[ObjectId], paths: &[&str]) -> ObjectId {
+        pub(crate) async fn commit(&mut self, parents: &[ObjectId], paths: &[&str]) -> ObjectId {
             self.n += 1;
             let sig = Signature {
                 name: "a".into(),
@@ -444,7 +448,11 @@ mod tests {
                 sig.clone(),
                 sig,
                 format!("c{}", self.n),
-                [self.n; 16],
+                {
+                    let mut id = [0u8; 16];
+                    id[..4].copy_from_slice(&self.n.to_le_bytes());
+                    id
+                },
                 delta,
                 BTreeMap::new(),
             )

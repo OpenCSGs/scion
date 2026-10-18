@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use bytes::Bytes;
 use scion_object::{Changeset, EntryMode, FileChange, ObjectId, Signature, Tree};
-use scion_query::{blame, is_ancestor, log, merge_bases};
+use scion_query::{blame, is_ancestor, last_commits, log, merge_bases, tree_stats};
 use scion_store::{BlobStore, ChangesetRecord, MemStore, MetaStore};
 use scion_tree::{TreeError, TreeSource, apply_delta, diff};
 
@@ -384,4 +384,77 @@ async fn history_queries_on_large_repo() {
     );
     report("blame new file (derived cache empty)", cold[1..].to_vec());
     report("blame same file again (derived cached)", warm);
+
+    // 文件列表页：根目录 100 个子目录、每个子目录 20 个文件。相隔 100 个提交取样，避免命中父提交的缓存
+    let root: Vec<String> = (0..100).map(|i| format!("dir{i:03}")).collect();
+    let (mut cold, mut warm, mut incr) = (Vec::new(), Vec::new(), Vec::new());
+    for k in 0..30 {
+        let at = h.main[h.main.len() - 2 - k * 100];
+        cold.push(
+            time(async {
+                last_commits(s, blobs, REPO, at, "", &root, true).await.expect("last");
+            })
+            .await,
+        );
+        warm.push(
+            time(async {
+                last_commits(s, blobs, REPO, at, "", &root, true).await.expect("last");
+            })
+            .await,
+        );
+    }
+    // 合入后查看新提交：父提交已有缓存，增量计算
+    for k in 0..30 {
+        let child = h.main[h.main.len() - 1 - k * 100];
+        incr.push(
+            time(async {
+                last_commits(s, blobs, REPO, child, "", &root, true)
+                    .await
+                    .expect("last");
+            })
+            .await,
+        );
+    }
+    report("last commits, root (100 dirs, cold)", cold);
+    report("last commits, root (child of cached parent)", incr);
+    report("last commits, root (cached)", warm);
+    let mut v = Vec::new();
+    for d in 0..30u64 {
+        let names: Vec<String> = (0..20).map(|j| format!("file{:04}.rs", j * 100 + d)).collect();
+        let dir = format!("dir{d:03}");
+        v.push(
+            time(async {
+                last_commits(s, blobs, REPO, tip, &dir, &names, true)
+                    .await
+                    .expect("last");
+            })
+            .await,
+        );
+    }
+    report("last commits, subdir (20 files, cold)", v);
+    let root_tree = s.get_changeset(REPO, &tip).await.expect("ok").expect("tip").root_tree;
+    let t = time(async {
+        tree_stats(s, blobs, REPO, root_tree).await.expect("stats");
+    })
+    .await;
+    println!(
+        "{:<44} {:.2}ms",
+        "tree stats, whole repo (cold)",
+        t.as_secs_f64() * 1000.0
+    );
+    let prev_tree = s
+        .get_changeset(REPO, &h.main[h.main.len() - 2])
+        .await
+        .expect("ok")
+        .expect("prev")
+        .root_tree;
+    let t = time(async {
+        tree_stats(s, blobs, REPO, prev_tree).await.expect("stats");
+    })
+    .await;
+    println!(
+        "{:<44} {:.2}ms",
+        "tree stats, parent commit (subtrees cached)",
+        t.as_secs_f64() * 1000.0
+    );
 }

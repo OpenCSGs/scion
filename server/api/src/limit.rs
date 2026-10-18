@@ -170,12 +170,15 @@ pub struct TenantLimitLayer {
     rate: Option<Arc<RateLimiter>>,
     /// 每个租户的在途请求上限与各租户的名额。
     concurrency: Option<(usize, moka::sync::Cache<String, Arc<Semaphore>>)>,
+    /// 集群共享密钥：带着它转发来的请求已在第一个节点计过（见 [`crate::service::trusted_forward`]）。
+    cluster_secret: Option<Arc<str>>,
 }
 
 impl TenantLimitLayer {
     /// `rate` 为 (每秒补充, 突发) 的令牌桶参数；`max_in_flight` 为每个租户的在途请求上限。
     pub fn new(rate: Option<(u32, u32)>, max_in_flight: Option<usize>) -> Self {
         Self {
+            cluster_secret: None,
             rate: rate.map(|(r, b)| Arc::new(RateLimiter::new(r, b))),
             concurrency: max_in_flight.map(|n| {
                 let cache = moka::sync::Cache::builder()
@@ -185,6 +188,11 @@ impl TenantLimitLayer {
                 (n.max(1), cache)
             }),
         }
+    }
+
+    pub fn with_cluster_secret(mut self, secret: Option<Arc<str>>) -> Self {
+        self.cluster_secret = secret.filter(|s| !s.is_empty());
+        self
     }
 }
 
@@ -239,9 +247,13 @@ where
     fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
         let clone = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, clone);
-        // 健康检查不限；集群内转发来的请求已在第一个节点计过
+        // 健康检查不限；本集群转发来的请求已在第一个节点计过（调用方自带的转发头照常计数）
+        let forwarded = crate::service::trusted_forward(
+            req.headers().get(crate::FORWARDED_HEADER).map(|v| v.as_bytes()),
+            self.limits.cluster_secret.as_deref(),
+        );
         if req.uri().path().starts_with("/grpc.health.v1.")
-            || req.headers().contains_key(crate::FORWARDED_HEADER)
+            || forwarded
             || (self.limits.rate.is_none() && self.limits.concurrency.is_none())
         {
             return Box::pin(inner.call(req));
@@ -380,18 +392,27 @@ mod tests {
     #[tokio::test]
     async fn tenant_rate_limits_each_caller_separately() {
         let gate = Arc::new(Notify::new());
-        let mut svc = TenantLimitLayer::new(Some((1, 1)), None).layer(Slow(gate.clone()));
+        let mut svc = TenantLimitLayer::new(Some((1, 1)), None)
+            .with_cluster_secret(Some(Arc::from("s3cret")))
+            .layer(Slow(gate.clone()));
         std::future::poll_fn(|cx| svc.poll_ready(cx)).await.expect("ready");
         let first = tokio::spawn(svc.call(as_user(request("/s.S/M"), "alice")));
         tokio::task::yield_now().await;
         let limited = svc.call(as_user(request("/s.S/M"), "alice")).await.expect("response");
+        assert_eq!(code_of(&limited), Some(tonic::Code::ResourceExhausted));
+        // 调用方自带的转发头不能绕过限流
+        let mut spoofed = as_user(request("/s.S/M"), "alice");
+        spoofed
+            .headers_mut()
+            .insert(crate::FORWARDED_HEADER, http::HeaderValue::from_static("1"));
+        let limited = svc.call(spoofed).await.expect("response");
         assert_eq!(code_of(&limited), Some(tonic::Code::ResourceExhausted));
         // 别的调用者、健康检查和集群内转发不受影响
         let bob = tokio::spawn(svc.call(as_user(request("/s.S/M"), "bob")));
         let health = tokio::spawn(svc.call(as_user(request("/grpc.health.v1.Health/Check"), "alice")));
         let mut fwd = as_user(request("/s.S/M"), "alice");
         fwd.headers_mut()
-            .insert(crate::FORWARDED_HEADER, http::HeaderValue::from_static("1"));
+            .insert(crate::FORWARDED_HEADER, http::HeaderValue::from_static("s3cret"));
         let forwarded = tokio::spawn(svc.call(fwd));
         for _ in 0..4 {
             tokio::task::yield_now().await;

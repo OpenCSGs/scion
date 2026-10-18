@@ -9,6 +9,9 @@ pub mod v1 {
 /// 当前实现的协议版本（主版本.次版本）。
 pub const PROTOCOL_VERSION: &str = "1.0";
 
+/// 协议中全部 RPC 的路径（如 `/scion.v1.ObjectService/GetObjects`），按字典序。
+pub const METHODS: &[&str] = include!(concat!(env!("OUT_DIR"), "/methods.rs"));
+
 /// 错误详情 `google.rpc.ErrorInfo` 的 domain。
 pub const ERROR_DOMAIN: &str = "scion.dev";
 
@@ -63,6 +66,13 @@ pub mod features {
 #[cfg(test)]
 mod tests {
     use super::v1;
+
+    #[test]
+    fn method_paths_are_listed() {
+        assert!(super::METHODS.contains(&"/scion.v1.ObjectService/GetObjects"));
+        assert!(super::METHODS.contains(&"/scion.v1.AdminService/Redact"));
+        assert!(super::METHODS.windows(2).all(|w| w[0] < w[1]), "sorted and unique");
+    }
 
     #[test]
     fn enum_values_match_spec_bytes() {

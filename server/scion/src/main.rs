@@ -161,6 +161,10 @@ struct ServerArgs {
     /// 对象存储时，每个 ref 的合入由持有租约的节点处理，其它节点转发给它。
     #[arg(long, value_name = "URL", env = "SCION_ADVERTISE_URL", conflicts_with = "lite")]
     advertise_url: Option<String>,
+    /// 集群共享密钥（各节点相同）：节点间转发合入时带上，收到的节点据此跳过重复的限流计数。
+    /// 不设置时转发的合入在两个节点上各计一次。
+    #[arg(long, value_name = "SECRET", env = "SCION_CLUSTER_SECRET", hide_env_values = true)]
+    cluster_secret: Option<String>,
     /// 全局在途请求上限，超过时立即拒绝（客户端可重试）。
     #[arg(
         long,
@@ -441,6 +445,16 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
         Some(url) => anyhow::bail!("--advertise-url must be an http:// or https:// URL, got {url:?}"),
         None => None,
     };
+    if cluster.is_some() && args.cluster_secret.as_deref().is_none_or(str::is_empty) {
+        tracing::warn!(
+            "cluster mode without --cluster-secret: forwarded lands count against rate limits on both nodes"
+        );
+    }
+    if let Some(s) = &args.cluster_secret {
+        if tonic::metadata::MetadataValue::<tonic::metadata::Ascii>::try_from(s.as_str()).is_err() {
+            anyhow::bail!("--cluster-secret must be printable ASCII");
+        }
+    }
     let auth = args.auth.guard_config()?;
     let (meta_spec, blob_spec) = args.storage.specs()?;
     let (meta, blobs) = storage::open(&meta_spec, &blob_spec, env).await?;
@@ -471,6 +485,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             max_concurrent_requests: args.max_concurrent_requests,
             repo_write_rate: args.repo_write_rate,
             tenant_rate: args.tenant_rate,
+            cluster_secret: args.cluster_secret.clone().filter(|s| !s.is_empty()),
             max_concurrent_per_tenant: args.tenant_concurrency,
             max_request_timeout: Some(args.max_request_timeout).filter(|d| !d.is_zero()),
             read_endpoints: args.read_endpoints.clone(),
@@ -1004,6 +1019,22 @@ mod tests {
         );
         assert_eq!(app.config.max_concurrent_per_tenant, Some(8));
         assert_eq!(app.config.max_request_timeout, None, "0s means client deadlines only");
+        assert_eq!(app.config.cluster_secret, None);
+        let (app, _) = build_app(
+            &args(&["--advertise-url", "http://10.0.0.5:7080", "--cluster-secret", "s3cret"]),
+            no_env,
+        )
+        .await
+        .expect("cluster");
+        assert_eq!(app.config.cluster_secret.as_deref(), Some("s3cret"));
+        assert!(
+            build_app(&args(&["--cluster-secret", "bad\nsecret"]), no_env)
+                .await
+                .is_err()
+        );
+        build_app(&args(&["--advertise-url", "http://10.0.0.5:7080"]), no_env)
+            .await
+            .expect("cluster without a secret only warns");
     }
 
     #[tokio::test]

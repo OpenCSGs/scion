@@ -17,7 +17,7 @@ scion cache  --metrics-listen 0.0.0.0:9464 --otlp-endpoint http://otel-collector
 
 | 指标 | 类型 | 标签 | 说明 |
 |---|---|---|---|
-| `scion_rpc_requests_total` | counter | `service`, `method`, `code` | 每个 RPC 的请求数，按 gRPC 状态码（`OK`、`NOT_FOUND` …）。客户端中途断开记为 `CANCELLED` |
+| `scion_rpc_requests_total` | counter | `service`, `method`, `code` | 每个 RPC 的请求数，按 gRPC 状态码（`OK`、`NOT_FOUND` …）。客户端中途断开记为 `CANCELLED`。协议之外的路径归入 `service="unknown", method="unknown"`，任意路径不会新增时间序列 |
 | `scion_rpc_duration_seconds` | histogram | `service`, `method` | 从收到请求到响应结束。流式响应（例如 `WatchRefs`）到流结束为止 |
 | `scion_rpc_in_flight` | gauge | | 正在处理的请求 |
 | `scion_rejected_requests_total` | counter | `reason` | 被拒绝的请求：`overload`（全局在途上限）、`repo_rate`、`tenant_rate`、`tenant_concurrency`、`deadline` |

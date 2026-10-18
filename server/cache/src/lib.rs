@@ -291,7 +291,12 @@ pub async fn serve_node(
     let _stats = register_stats(&node);
     let result = tonic::transport::Server::builder()
         .layer(scion_obs::trace::TraceLayer)
-        .layer(scion_obs::grpc::MetricsLayer)
+        .layer(scion_obs::grpc::MetricsLayer::new(
+            scion_proto::METHODS
+                .iter()
+                .chain(scion_obs::grpc::HEALTH_METHODS)
+                .copied(),
+        ))
         // 不设上限，只把客户端的 deadline 交给回源请求
         .layer(scion_obs::deadline::DeadlineLayer::new(None))
         .add_service(health_svc)

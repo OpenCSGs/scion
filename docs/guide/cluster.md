@@ -30,6 +30,10 @@ scion server --listen 0.0.0.0:7080 --advertise-url http://10.0.0.12:7080 \
 
 也可以用环境变量 `SCION_ADVERTISE_URL`。Lite 模式（`--lite`）是单机模式，不能开启集群。
 
+建议同时给所有节点设置同一个 `--cluster-secret`（`SCION_CLUSTER_SECRET`，可打印 ASCII）。
+- **作用**：节点之间转发合入时带上这个密钥，收到的节点据此确认是本集群转发的，不再重复计入限流。
+- **不设置时**：转发的合入在两个节点上各计一次。调用方自己带上转发头，也绕不过限流。
+
 开启后，每个 ref 的合入由一个节点处理（leader）：
 
 - 第一次收到某个 ref 的合入的节点申请这个 ref 的租约，成为 leader。租约有效期 5 秒，每 2 秒续约。
@@ -60,7 +64,7 @@ scion server --listen 0.0.0.0:7080 --advertise-url http://10.0.0.12:7080 \
 
 另外，每个 ref 的合入队列最多 1024 个请求，排满时同样返回 `RATE_LIMITED`。
 
-- **按调用者的限制**：健康检查不计入；集群内转发的请求已在第一个节点计过，也不再计。
+- **按调用者的限制**：健康检查不计入；带着正确 `--cluster-secret` 转发来的请求已在第一个节点计过，也不再计。
 - **deadline 的传递**：转发给 leader 的合入沿用剩余的 deadline。区域缓存回源时同样沿用调用者剩余的时间。
 - **被拒绝的请求**：计入指标 `scion_rejected_requests_total{reason}`，见 [observability.md](observability.md)。
 

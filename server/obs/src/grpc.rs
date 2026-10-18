@@ -2,8 +2,13 @@
 //!
 //! 状态码可能在响应头里（只有 trailers 的错误响应），也可能在响应体结束时的 trailers 里，所以包装响应体，
 //! 在流结束时记录。客户端中途断开（响应体未读完就被丢弃）记为 `CANCELLED`。
+//!
+//! 本层在认证之外，路径由调用方任意给出：只给已知的方法建时间序列，其它路径归入 `unknown`，
+//! 否则换着路径请求就能让注册表无限增长。
 
+use std::collections::HashSet;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
@@ -47,20 +52,41 @@ fn status_of(headers: &http::HeaderMap) -> Option<tonic::Code> {
     Some(tonic::Code::from_i32(v))
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MetricsLayer;
+/// 不在已知方法中的请求使用的标签值。
+pub const UNKNOWN: &str = "unknown";
+
+/// gRPC 标准健康检查的方法（`grpc.health.v1`）。
+pub const HEALTH_METHODS: &[&str] = &["/grpc.health.v1.Health/Check", "/grpc.health.v1.Health/Watch"];
+
+#[derive(Debug, Clone)]
+pub struct MetricsLayer {
+    known: Arc<HashSet<String>>,
+}
+
+impl MetricsLayer {
+    /// `known` 为已知方法的路径（如 `/scion.v1.ObjectService/GetObjects`）。
+    pub fn new<'a>(known: impl IntoIterator<Item = &'a str>) -> Self {
+        Self {
+            known: Arc::new(known.into_iter().map(str::to_owned).collect()),
+        }
+    }
+}
 
 impl<S> Layer<S> for MetricsLayer {
     type Service = MetricsService<S>;
 
     fn layer(&self, inner: S) -> Self::Service {
-        MetricsService { inner }
+        MetricsService {
+            inner,
+            known: self.known.clone(),
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MetricsService<S> {
     inner: S,
+    known: Arc<HashSet<String>>,
 }
 
 /// 一个进行中的请求；结束（或被丢弃）时记录一次。
@@ -72,8 +98,12 @@ struct Pending {
 }
 
 impl Pending {
-    fn new(path: &str) -> Self {
-        let (service, method) = split_path(path);
+    fn new(path: &str, known: &HashSet<String>) -> Self {
+        let (service, method) = if known.contains(path) {
+            split_path(path)
+        } else {
+            (UNKNOWN, UNKNOWN)
+        };
         metrics().rpc_in_flight.inc();
         Self {
             service: service.to_owned(),
@@ -115,7 +145,7 @@ where
     }
 
     fn call(&mut self, req: http::Request<ReqBody>) -> Self::Future {
-        let pending = Pending::new(req.uri().path());
+        let pending = Pending::new(req.uri().path(), &self.known);
         MetricsFuture {
             inner: self.inner.call(req),
             pending: Some(pending),
@@ -255,6 +285,7 @@ mod tests {
         );
         assert_eq!(split_path("/scion.v1.X/Get"), ("scion.v1.X", "Get"));
         assert_eq!(split_path("odd"), ("odd", ""));
+        assert_eq!(HEALTH_METHODS.len(), 2);
     }
 
     /// 测试用服务：按路径返回不同的响应。
@@ -288,7 +319,8 @@ mod tests {
 
     #[tokio::test]
     async fn records_codes_from_headers_body_end_and_drops() {
-        let mut svc = MetricsLayer.layer(Fake);
+        let paths = ["/t.S/Header", "/t.S/Plain", "/t.S/Dropped", "/t.S/Never", "/t.S/Fail"];
+        let mut svc = MetricsLayer::new(paths).layer(Fake);
         // 响应头里的状态码（只有 trailers 的错误响应）
         let before = count("t.S", "Header", "NOT_FOUND");
         let resp = svc.call(request("/t.S/Header")).await.expect("resp");
@@ -316,6 +348,14 @@ mod tests {
         let before = count("t.S", "Fail", "UNKNOWN");
         assert!(svc.call(request("/t.S/Fail")).await.is_err());
         assert_eq!(count("t.S", "Fail", "UNKNOWN"), before + 1);
+        // 未知路径归入固定的标签，不新建时间序列
+        let before = count(UNKNOWN, UNKNOWN, "UNKNOWN");
+        for i in 0..3 {
+            let resp = svc.call(request(&format!("/attacker.S/M{i}"))).await.expect("resp");
+            resp.into_body().collect().await.expect("body");
+        }
+        assert_eq!(count(UNKNOWN, UNKNOWN, "UNKNOWN"), before + 3);
+        assert!(!metrics().encode().contains("attacker"));
         std::future::poll_fn(|cx| svc.poll_ready(cx)).await.expect("ready");
     }
 
@@ -339,8 +379,9 @@ mod tests {
 
     #[tokio::test]
     async fn trailers_and_body_errors() {
+        let known: HashSet<String> = ["/t.B/Trailers", "/t.B/Broken"].map(str::to_owned).into();
         let pending = |m: &str| {
-            let mut p = Pending::new(&format!("/t.B/{m}"));
+            let mut p = Pending::new(&format!("/t.B/{m}"), &known);
             p.code = None;
             p
         };

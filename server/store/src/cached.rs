@@ -2,6 +2,9 @@
 //!
 //! 提交记录写入后不再改变（`put_changeset` 保留第一次写入），因此可以无失效地缓存。
 //! 只缓存存在的记录，「不存在」的结果不缓存。其余方法原样转发。
+//!
+//! 缓存按仓库名索引。仓库删除后名字要等清除之后才能重新使用（宽限期不短于 [`RECORD_TTL`]），
+//! 所以重新创建的同名仓库不会读到旧仓库的记录。集群中其它节点的缓存也靠这个时限失效。
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,8 +15,11 @@ use scion_object::ObjectId;
 
 use crate::{
     ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange, PathHistoryEntry,
-    Redaction, RedactionFilter, RefExpect, RefState, Result, TokenRecord,
+    Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord,
 };
+
+/// 提交记录在缓存中的最长保留时间。
+pub const RECORD_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// 在任意 [`MetaStore`] 外加一层提交记录缓存。
 pub struct CachedMeta {
@@ -26,7 +32,7 @@ impl CachedMeta {
     pub fn new(inner: Arc<dyn MetaStore>, capacity: u64) -> Self {
         Self {
             inner,
-            records: Cache::new(capacity),
+            records: Cache::builder().max_capacity(capacity).time_to_live(RECORD_TTL).build(),
         }
     }
 
@@ -256,6 +262,42 @@ impl MetaStore for CachedMeta {
     async fn list_leases(&self) -> Result<Vec<(String, Lease)>> {
         self.inner.list_leases().await
     }
+
+    async fn create_repo_with(&self, info: &RepoInfo) -> Result<()> {
+        self.inner.create_repo_with(info).await
+    }
+
+    async fn get_repo(&self, repo: &str) -> Result<Option<RepoInfo>> {
+        self.inner.get_repo(repo).await
+    }
+
+    async fn list_repo_infos(&self, filter: &RepoFilter) -> Result<Vec<RepoInfo>> {
+        self.inner.list_repo_infos(filter).await
+    }
+
+    async fn update_repo(&self, repo: &str, patch: &RepoPatch) -> Result<RepoInfo> {
+        self.inner.update_repo(repo, patch).await
+    }
+
+    async fn delete_repo(&self, repo: &str, now_ms: i64) -> Result<()> {
+        self.inner.delete_repo(repo, now_ms).await
+    }
+
+    async fn restore_repo(&self, repo: &str) -> Result<()> {
+        self.inner.restore_repo(repo).await
+    }
+
+    async fn purge_repo(&self, repo: &str, batch: usize) -> Result<bool> {
+        self.inner.purge_repo(repo, batch).await
+    }
+
+    async fn fork_repo(&self, source: &str, target: &str, now_ms: i64) -> Result<()> {
+        self.inner.fork_repo(source, target, now_ms).await
+    }
+
+    async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
+        self.inner.delete_ref(repo, name, expect).await
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +329,22 @@ mod tests {
         assert!(unsupported(s.object_repos(&id).await.expect_err("repos")));
         assert!(unsupported(s.list_leases().await.expect_err("leases")));
         assert!(unsupported(s.get_setting("k").await.expect_err("setting")));
+        let info = RepoInfo::new("r", 1);
+        assert!(unsupported(s.create_repo_with(&info).await.expect_err("create")));
+        assert!(unsupported(s.get_repo("r").await.expect_err("get repo")));
+        assert!(unsupported(
+            s.list_repo_infos(&RepoFilter::default()).await.expect_err("list repos")
+        ));
+        assert!(unsupported(
+            s.update_repo("r", &RepoPatch::default()).await.expect_err("update")
+        ));
+        assert!(unsupported(s.delete_repo("r", 1).await.expect_err("delete")));
+        assert!(unsupported(s.restore_repo("r").await.expect_err("restore")));
+        assert!(unsupported(s.purge_repo("r", 1).await.expect_err("purge")));
+        assert!(unsupported(s.fork_repo("r", "f", 1).await.expect_err("fork")));
+        assert!(unsupported(
+            s.delete_ref("r", "main", None).await.expect_err("delete ref")
+        ));
     }
 
     #[tokio::test]
@@ -319,6 +377,7 @@ mod tests {
         testsuite::leases(&cached()).await;
         testsuite::tokens_and_settings(&cached()).await;
         testsuite::redactions(&cached()).await;
+        testsuite::repo_admin(&cached()).await;
     }
 
     #[tokio::test]

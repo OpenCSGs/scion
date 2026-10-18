@@ -249,7 +249,18 @@ pub fn from_store(err: scion_store::Error) -> Status {
     use scion_store::Error as E;
     match err {
         E::RepoNotFound(repo) => repo_not_found(&repo),
-        E::RepoAlreadyExists(repo) => Status::already_exists(format!("repository {repo:?} already exists")),
+        E::RepoAlreadyExists(repo) => with_reason(
+            Code::AlreadyExists,
+            ErrorReason::RepoAlreadyExists,
+            format!("repository {repo:?} already exists"),
+            HashMap::from([("repo".to_string(), repo)]),
+        ),
+        E::RepoDeleted(repo) => with_reason(
+            Code::AlreadyExists,
+            ErrorReason::RepoDeleted,
+            format!("repository {repo:?} was deleted and is pending purge; restore it or wait until it is purged"),
+            HashMap::from([("repo".to_string(), repo)]),
+        ),
         E::InvalidRepoName(repo) => Status::invalid_argument(format!("invalid repository name {repo:?}")),
         E::RefVersionMismatch { name, current } => with_reason(
             Code::FailedPrecondition,
@@ -378,6 +389,14 @@ mod tests {
         use scion_store::Error as E;
         assert_eq!(from_store(E::RepoNotFound("r".into())).code(), Code::NotFound);
         assert_eq!(from_store(E::RepoAlreadyExists("r".into())).code(), Code::AlreadyExists);
+        assert_eq!(
+            info(&from_store(E::RepoAlreadyExists("r".into()))).0,
+            "REPO_ALREADY_EXISTS"
+        );
+        let s = from_store(E::RepoDeleted("r".into()));
+        assert_eq!(s.code(), Code::AlreadyExists);
+        let (reason, _, md) = info(&s);
+        assert_eq!((reason.as_str(), md["repo"].as_str()), ("REPO_DELETED", "r"));
         assert_eq!(from_store(E::InvalidRepoName("r".into())).code(), Code::InvalidArgument);
         let s = from_store(E::RefVersionMismatch {
             name: "main".into(),

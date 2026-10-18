@@ -670,6 +670,18 @@ SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architectur
 >   - 派生滞后指标：还没有 deriver；
 >   - 元数据库与 S3 调用的子 span。
 
+> **仓库与分支管理实现说明**（2026-10-18）：这是接入 starhub 的最小闭环第一步，插在 M5c 和 M5d 之间。
+> - **`RepoService`**：Create / Get / List / Update / Delete / Restore / Fork。配额推迟。
+>   - 权限：创建、修改、删除、恢复需要该仓库名上的 admin；fork 需要来源的 read 加目标的 admin；ListRepos 逐个检查 read，只返回能读的仓库。
+> - **软删除**：`repos` 表加 `deleted_at_ms`，按名字查仓库只找未删除的。宽限期（`--repo-delete-grace`，默认 24 小时，下限 2 小时）后 janitor 分批清除。
+>   - 清除方式：按每张表的主键每次删一批（`(pk) IN (SELECT pk … LIMIT n)`，SQLite、PostgreSQL 通用，不依赖 ctid），最后删 `repos` 行，名字才释放。
+>   - 宽限期下限的原因：各层缓存按仓库名索引（提交记录缓存、L2 与 daemon 的可见集和 redaction 状态），都加了 1 小时的 TTL。名字释放前它们一定已过期，所以不需要跨节点失效。
+>   - `object_repos` 不计入已删除的仓库。
+> - **fork**：一个事务内用 `INSERT … SELECT` 复制对象索引、提交、派生数据、路径历史和 ref；有效的 redaction 用 `ROW_NUMBER()` 分配新的 seq。不复制合入记录和请求结果。超大仓库的异步 fork 推迟。
+> - **ref 写操作**：`CreateRef` / `UpdateRef`（可以非快进，即强制回退）/ `DeleteRef`，都是单个 ref 的 CAS，需要该 ref 的 land 权限。默认分支不能删除。
+>   - 删除后重新创建的 ref 版本从 1 开始；WatchRefs 不推送删除。
+> - **部署**：`Dockerfile`（多阶段构建，BuildKit 缓存，非 root 运行，基础镜像可换成镜像站）；`deploy/compose`（PostgreSQL + SeaweedFS + server，可选 cache profile）。
+
 | **M5 生产化** | 4 周 | YugabyteDB 档与 `migrate-meta` 工具、ACL/OIDC/JWT、redaction、OTel、Helm、混沌测试、多区域 follower read、`conformance` 发布 | 全部 SLO 达标；单 AZ 故障演练通过 |
 
 ---

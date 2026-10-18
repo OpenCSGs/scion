@@ -1,0 +1,6 @@
+/target
+/.git
+/.scion-data
+*.profraw
+lcov.info
+.DS_Store

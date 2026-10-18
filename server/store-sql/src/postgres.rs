@@ -8,14 +8,15 @@ use async_trait::async_trait;
 use scion_object::ObjectId;
 use scion_store::{
     ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, Result, TokenRecord, validate_repo_name,
+    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result,
+    TokenRecord, prefix_upper_bound, validate_repo_name,
 };
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use crate::common::{
-    CHANGESET_COLUMNS, ChangesetRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, RedactionRow, backend, id_from_db,
-    ids_to_db, is_unique_violation, now_ms, record_from_row, redaction_from_row, size_to_db, subtract_present,
-    version_from_db, version_to_db,
+    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REPO_COLUMNS, REPO_TABLES,
+    RedactionRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation, list_limit, now_ms, purge_limit,
+    record_from_row, redaction_from_row, repo_from_row, size_to_db, subtract_present, version_from_db, version_to_db,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -46,7 +47,7 @@ impl PgMetaStore {
     }
 
     async fn repo_id(&self, repo: &str) -> Result<i64> {
-        sqlx::query_scalar::<_, i64>("SELECT repo_id FROM repos WHERE name = $1")
+        sqlx::query_scalar::<_, i64>("SELECT repo_id FROM repos WHERE name = $1 AND deleted_at_ms IS NULL")
             .bind(repo)
             .fetch_optional(&self.pool)
             .await
@@ -64,25 +65,25 @@ impl PgMetaStore {
             .map(version_from_db)
             .transpose()
     }
+
+    /// 名字已被占用时的错误：正常的仓库或已删除、尚未清除的仓库。
+    async fn name_taken(&self, repo: &str) -> Error {
+        match sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at_ms FROM repos WHERE name = $1")
+            .bind(repo)
+            .fetch_optional(&self.pool)
+            .await
+        {
+            Ok(Some(Some(_))) => Error::RepoDeleted(repo.to_owned()),
+            Ok(_) => Error::RepoAlreadyExists(repo.to_owned()),
+            Err(e) => backend("lookup repo", e),
+        }
+    }
 }
 
 #[async_trait]
 impl MetaStore for PgMetaStore {
     async fn create_repo(&self, repo: &str) -> Result<()> {
-        validate_repo_name(repo)?;
-        sqlx::query("INSERT INTO repos (name, created_at_ms) VALUES ($1, $2)")
-            .bind(repo)
-            .bind(now_ms())
-            .execute(&self.pool)
-            .await
-            .map_err(|e| {
-                if is_unique_violation(&e) {
-                    Error::RepoAlreadyExists(repo.to_owned())
-                } else {
-                    backend("create repo", e)
-                }
-            })?;
-        Ok(())
+        self.create_repo_with(&RepoInfo::new(repo, now_ms())).await
     }
 
     async fn repo_exists(&self, repo: &str) -> Result<bool> {
@@ -95,10 +96,12 @@ impl MetaStore for PgMetaStore {
 
     async fn list_repos(&self) -> Result<Vec<String>> {
         // COLLATE "C"：按字节序，与其它后端一致，不受数据库 locale 影响
-        sqlx::query_scalar::<_, String>(r#"SELECT name FROM repos ORDER BY name COLLATE "C""#)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| backend("list repos", e))
+        sqlx::query_scalar::<_, String>(
+            r#"SELECT name FROM repos WHERE deleted_at_ms IS NULL ORDER BY name COLLATE "C""#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| backend("list repos", e))
     }
 
     async fn get_ref(&self, repo: &str, name: &str) -> Result<Option<RefState>> {
@@ -485,7 +488,7 @@ impl MetaStore for PgMetaStore {
     async fn object_repos(&self, id: &ObjectId) -> Result<Vec<String>> {
         // 逐个仓库按主键探测：objects_index 没有按 id 的索引（写入热路径上不值得多维护一个）
         sqlx::query_scalar(
-            "SELECT r.name FROM repos r WHERE EXISTS \
+            "SELECT r.name FROM repos r WHERE r.deleted_at_ms IS NULL AND EXISTS \
              (SELECT 1 FROM objects_index o WHERE o.repo_id = r.repo_id AND o.id = $1) ORDER BY r.name",
         )
         .bind(id.to_bytes().to_vec())
@@ -512,6 +515,234 @@ impl MetaStore for PgMetaStore {
                 ))
             })
             .collect()
+    }
+
+    async fn create_repo_with(&self, info: &RepoInfo) -> Result<()> {
+        validate_repo_name(&info.name)?;
+        let res = sqlx::query(
+            "INSERT INTO repos (name, created_at_ms, default_branch, description, forked_from) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(&info.name)
+        .bind(info.created_at_ms)
+        .bind(&info.default_branch)
+        .bind(&info.description)
+        .bind(&info.forked_from)
+        .execute(&self.pool)
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) if is_unique_violation(&e) => Err(self.name_taken(&info.name).await),
+            Err(e) => Err(backend("create repo", e)),
+        }
+    }
+
+    async fn get_repo(&self, repo: &str) -> Result<Option<RepoInfo>> {
+        let row: Option<RepoRow> = sqlx::query_as(&format!("SELECT {REPO_COLUMNS} FROM repos WHERE name = $1"))
+            .bind(repo)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| backend("get repo", e))?;
+        Ok(row.map(repo_from_row))
+    }
+
+    async fn list_repo_infos(&self, filter: &RepoFilter) -> Result<Vec<RepoInfo>> {
+        let state = if filter.deleted { "IS NOT NULL" } else { "IS NULL" };
+        let after = filter.after.clone().unwrap_or_default();
+        let rows: Vec<RepoRow> = sqlx::query_as(&format!(
+            "SELECT {REPO_COLUMNS} FROM repos WHERE deleted_at_ms {state} \
+             AND name COLLATE \"C\" >= $1 AND name COLLATE \"C\" < $2 AND name COLLATE \"C\" > $3 \
+             ORDER BY name COLLATE \"C\" LIMIT $4"
+        ))
+        .bind(&filter.prefix)
+        .bind(prefix_upper_bound(&filter.prefix))
+        .bind(after)
+        .bind(list_limit(filter.limit))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| backend("list repos", e))?;
+        Ok(rows.into_iter().map(repo_from_row).collect())
+    }
+
+    async fn update_repo(&self, repo: &str, patch: &RepoPatch) -> Result<RepoInfo> {
+        let row: Option<RepoRow> = sqlx::query_as(&format!(
+            "UPDATE repos SET default_branch = COALESCE($1, default_branch), description = COALESCE($2, description) \
+             WHERE name = $3 AND deleted_at_ms IS NULL RETURNING {REPO_COLUMNS}"
+        ))
+        .bind(&patch.default_branch)
+        .bind(&patch.description)
+        .bind(repo)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| backend("update repo", e))?;
+        row.map(repo_from_row)
+            .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))
+    }
+
+    async fn delete_repo(&self, repo: &str, now_ms: i64) -> Result<()> {
+        let done = sqlx::query("UPDATE repos SET deleted_at_ms = $1 WHERE name = $2 AND deleted_at_ms IS NULL")
+            .bind(now_ms)
+            .bind(repo)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("delete repo", e))?;
+        if done.rows_affected() == 0 {
+            return Err(Error::RepoNotFound(repo.to_owned()));
+        }
+        Ok(())
+    }
+
+    async fn restore_repo(&self, repo: &str) -> Result<()> {
+        let done = sqlx::query("UPDATE repos SET deleted_at_ms = NULL WHERE name = $1 AND deleted_at_ms IS NOT NULL")
+            .bind(repo)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("restore repo", e))?;
+        if done.rows_affected() == 0 {
+            return Err(Error::RepoNotFound(repo.to_owned()));
+        }
+        Ok(())
+    }
+
+    async fn purge_repo(&self, repo: &str, batch: usize) -> Result<bool> {
+        let id: i64 = sqlx::query_scalar("SELECT repo_id FROM repos WHERE name = $1 AND deleted_at_ms IS NOT NULL")
+            .bind(repo)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| backend("lookup deleted repo", e))?
+            .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))?;
+        // 每次只删一张表中的一批行，单个事务保持短小
+        for (table, key) in REPO_TABLES {
+            let done = sqlx::query(&format!(
+                "DELETE FROM {table} WHERE repo_id = $1 AND ({key}) IN \
+                 (SELECT {key} FROM {table} WHERE repo_id = $1 LIMIT $2)"
+            ))
+            .bind(id)
+            .bind(purge_limit(batch))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("purge repo", e))?;
+            if done.rows_affected() > 0 {
+                return Ok(false);
+            }
+        }
+        sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("purge repo", e))?;
+        Ok(true)
+    }
+
+    async fn fork_repo(&self, source: &str, target: &str, now_ms: i64) -> Result<()> {
+        validate_repo_name(target)?;
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let src: Option<(i64, String, String)> = sqlx::query_as(
+            "SELECT repo_id, default_branch, description FROM repos WHERE name = $1 AND deleted_at_ms IS NULL",
+        )
+        .bind(source)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| backend("lookup repo", e))?;
+        let Some((src_id, default_branch, description)) = src else {
+            return Err(Error::RepoNotFound(source.to_owned()));
+        };
+        let existing: Option<Option<i64>> = sqlx::query_scalar("SELECT deleted_at_ms FROM repos WHERE name = $1")
+            .bind(target)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| backend("lookup repo", e))?;
+        match existing {
+            Some(None) => return Err(Error::RepoAlreadyExists(target.to_owned())),
+            Some(Some(_)) => return Err(Error::RepoDeleted(target.to_owned())),
+            None => {}
+        }
+        let dst_id: i64 = sqlx::query_scalar(
+            "INSERT INTO repos (name, created_at_ms, default_branch, description, forked_from) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING repo_id",
+        )
+        .bind(target)
+        .bind(now_ms)
+        .bind(&default_branch)
+        .bind(&description)
+        .bind(source)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                Error::RepoAlreadyExists(target.to_owned())
+            } else {
+                backend("fork repo", e)
+            }
+        })?;
+        for (table, cols) in FORK_TABLES {
+            sqlx::query(&format!(
+                "INSERT INTO {table} (repo_id, {cols}) SELECT $1, {cols} FROM {table} WHERE repo_id = $2"
+            ))
+            .bind(dst_id)
+            .bind(src_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| backend("fork repo", e))?;
+        }
+        // 有效的 redaction 一并复制，按对象顺序分配新的 seq（缓存层按 seq 增量同步）
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM redactions WHERE repo_id = $1 AND active")
+            .bind(src_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| backend("fork redactions", e))?;
+        if n > 0 {
+            let last: i64 = sqlx::query_scalar("UPDATE redaction_seq SET seq = seq + $1 WHERE id = 1 RETURNING seq")
+                .bind(n)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| backend("allocate redaction seq", e))?;
+            sqlx::query(
+                "INSERT INTO redactions (repo_id, object_id, redaction_id, reason, created_by, created_at_ms, \
+                 active, purge_after_ms, purged_at_ms, seq) \
+                 SELECT $1, object_id, redaction_id, reason, created_by, created_at_ms, active, purge_after_ms, \
+                 purged_at_ms, $2 + ROW_NUMBER() OVER (ORDER BY object_id) \
+                 FROM redactions WHERE repo_id = $3 AND active",
+            )
+            .bind(dst_id)
+            .bind(last - n)
+            .bind(src_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| backend("fork redactions", e))?;
+        }
+        tx.commit().await.map_err(|e| backend("commit", e))
+    }
+
+    async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
+        let repo_id = self.repo_id(repo).await?;
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let done = match expect {
+            Some(v) => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND version = $3")
+                .bind(repo_id)
+                .bind(name)
+                .bind(version_to_db(v)?),
+            None => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2")
+                .bind(repo_id)
+                .bind(name),
+        }
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| backend("delete ref", e))?;
+        if done.rows_affected() == 0 {
+            tx.rollback().await.map_err(|e| backend("rollback", e))?;
+            return Err(Error::RefVersionMismatch {
+                name: name.to_owned(),
+                current: self.current_version(repo_id, name).await?,
+            });
+        }
+        // 重新创建的 ref 版本从 1 开始，旧的审计记录会与之冲突：随 ref 一起删除
+        sqlx::query("DELETE FROM ref_log WHERE repo_id = $1 AND name = $2")
+            .bind(repo_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| backend("delete ref log", e))?;
+        tx.commit().await.map_err(|e| backend("commit", e))
     }
 
     async fn release_lease(&self, scope: &str, holder: &str) -> Result<()> {
@@ -1088,6 +1319,7 @@ mod tests {
         testsuite::leases(&s).await;
         testsuite::tokens_and_settings(&s).await;
         testsuite::redactions(&s).await;
+        testsuite::repo_admin(&s).await;
     }
 
     #[tokio::test]
@@ -1148,6 +1380,23 @@ mod tests {
             s.cas_ref("r", "m", RefExpect::Absent, id).await,
             Err(Error::Backend(_))
         ));
+        let backend = |r: Result<()>| matches!(r, Err(Error::Backend(_)));
+        assert!(backend(s.create_repo_with(&RepoInfo::new("y", 1)).await));
+        assert!(matches!(s.get_repo("r").await, Err(Error::Backend(_))));
+        assert!(matches!(
+            s.list_repo_infos(&RepoFilter::default()).await,
+            Err(Error::Backend(_))
+        ));
+        assert!(matches!(
+            s.update_repo("r", &RepoPatch::default()).await,
+            Err(Error::Backend(_))
+        ));
+        assert!(backend(s.delete_repo("r", 1).await));
+        assert!(backend(s.restore_repo("r").await));
+        assert!(matches!(s.purge_repo("r", 1).await, Err(Error::Backend(_))));
+        assert!(backend(s.fork_repo("r", "f", 1).await));
+        assert!(backend(s.delete_ref("r", "m", None).await));
+        assert!(matches!(s.name_taken("r").await, Error::Backend(_)));
     }
 
     #[tokio::test]

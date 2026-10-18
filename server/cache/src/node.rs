@@ -94,6 +94,9 @@ pub const ACCESS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// 两次向上游同步 redaction 的最长间隔，即 redact 之后缓存层最多还返回该对象这么久。
 pub const REDACTION_TTL: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// 按仓库名保存的状态（可见集、redaction）的最长保留时间。
+pub const REPO_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// 一次同步最多读取的页数（每页最多 1000 条）；剩下的下次请求继续。
 const MAX_REDACTION_PAGES: usize = 100;
 
@@ -216,8 +219,16 @@ impl CacheNode {
         Self {
             store,
             flight: Group::new(),
-            visible: moka::sync::Cache::new(DEFAULT_VISIBLE_ENTRIES),
-            redactions: moka::sync::Cache::new(1_000_000),
+            // 按仓库名保存的状态最多保留 REPO_STATE_TTL：服务端删除的仓库名至少 2 小时后才能重新使用，
+            // 重新创建的同名仓库不会沿用旧仓库的可见集和 redaction
+            visible: moka::sync::Cache::builder()
+                .max_capacity(DEFAULT_VISIBLE_ENTRIES)
+                .time_to_live(REPO_STATE_TTL)
+                .build(),
+            redactions: moka::sync::Cache::builder()
+                .max_capacity(1_000_000)
+                .time_to_live(REPO_STATE_TTL)
+                .build(),
             redaction_ttl: REDACTION_TTL,
             access: moka::sync::Cache::builder()
                 .max_capacity(1_000_000)

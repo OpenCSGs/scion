@@ -11,6 +11,8 @@
 ## 文档
 
 **使用指南**
+- [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
+- [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
 - [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查
@@ -44,6 +46,9 @@
   - OpenTelemetry 追踪（OTLP），合入转发和缓存回源时接续调用方的 `traceparent`；
   - 按调用者的速率与在途请求上限（`--tenant-rate`、`--tenant-concurrency`）；
   - deadline：取客户端 `grpc-timeout` 与 `--max-request-timeout` 中较小的一个，并传给 leader 和服务端。
+
+- **仓库与分支管理**：`RepoService`（创建、列出、修改、软删除并可在宽限期内恢复、fork），以及分支的创建、移动与删除；命令行为 `scn repo`、`scn branch`。
+- **部署**：包含 `scion` 和 `scn` 的 Docker 镜像，以及 PostgreSQL + SeaweedFS 的 docker compose。
 
 M5 后续还有 YugabyteDB、Helm 与混沌测试。
 
@@ -99,6 +104,7 @@ common/              服务端和客户端共用（只能依赖 common）
   flight/            scion-flight  合并并发请求（single-flight），服务端缓存与 daemon 共用
 
 server/              服务端（可依赖 common 与更低层的 server crate）
+  obs/               scion-obs         Prometheus 指标、OpenTelemetry 追踪、gRPC deadline
   store/             scion-store       MetaStore / BlobStore trait、内存实现、后端一致性测试套件
   store-sql/         scion-store-sql   SQLite / PostgreSQL 元数据存储
   store-blob/        scion-store-blob  本地目录 / S3 兼容对象存储
@@ -129,8 +135,11 @@ docs/design/         设计文档与架构图
 ## 快速开始
 
 ```sh
-# 启动服务端（Lite 档：SQLite + 本地目录，数据落盘），预建仓库 mono
-cargo run -p scion -- server --lite --data-dir ./.scion-data --repo mono
+# 方式一：docker compose，PostgreSQL + S3 兼容存储（见 docs/guide/deploy.md；国内可加 REGISTRY=docker.m.daocloud.io）
+docker compose -f deploy/compose/docker-compose.yml up -d --build
+
+# 方式二：从源码启动 Lite 档（SQLite + 本地目录，数据落盘）
+cargo run -p scion -- server --lite --data-dir ./.scion-data
 
 # 其它后端：--meta mem|sqlite://PATH|postgres://…  --blobs mem|DIR|s3://bucket/prefix
 # S3 连接参数：SCION_S3_ENDPOINT、SCION_S3_ACCESS_KEY_ID、SCION_S3_SECRET_ACCESS_KEY、SCION_S3_REGION、
@@ -139,6 +148,7 @@ cargo run -p scion -- server --lite --data-dir ./.scion-data --repo mono
 # 另一个终端：安装 scn 并检查连接
 cargo install --path client/cli
 scn doctor
+scn repo create mono                # 仓库与分支：scn repo / scn branch（见 docs/guide/repos.md）
 
 # 日常流程
 scn clone mono && cd mono          # 检出（默认 ref main，空仓库也可以）

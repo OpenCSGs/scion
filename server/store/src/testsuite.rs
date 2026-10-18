@@ -942,3 +942,311 @@ pub async fn tokens_and_settings<S: MetaStore + ?Sized>(s: &S) {
     s.put_setting("acl", b"v2").await.expect("overwrite");
     assert_eq!(s.get_setting("acl").await.expect("get").as_deref(), Some(&b"v2"[..]));
 }
+
+/// 仓库管理：属性、列出与分页、软删除与恢复、清除、fork、删除 ref。
+pub async fn repo_admin<S: MetaStore + ?Sized>(s: &S) {
+    use crate::{RepoFilter, RepoInfo, RepoPatch};
+    let info = |name: &str| RepoInfo {
+        default_branch: "dev".into(),
+        description: "a model".into(),
+        ..RepoInfo::new(name, 1_000)
+    };
+    s.create_repo_with(&info("adm/src")).await.expect("create");
+    s.create_repo("adm/plain").await.expect("create");
+    s.create_repo("adm_other").await.expect("create");
+    assert_eq!(
+        s.create_repo_with(&info("adm/src")).await,
+        Err(Error::RepoAlreadyExists("adm/src".into()))
+    );
+    assert!(matches!(
+        s.create_repo_with(&info("../x")).await,
+        Err(Error::InvalidRepoName(_))
+    ));
+    let got = s.get_repo("adm/src").await.expect("get").expect("exists");
+    assert_eq!(got, info("adm/src"));
+    let plain = s.get_repo("adm/plain").await.expect("get").expect("exists");
+    assert_eq!(
+        (plain.default_branch.as_str(), plain.description.as_str()),
+        ("main", "")
+    );
+    assert!(plain.created_at_ms > 0);
+    assert_eq!(s.get_repo("adm/none").await, Ok(None));
+
+    // 列出：前缀、分页、按名字排序
+    let names = |v: Vec<RepoInfo>| v.into_iter().map(|r| r.name).collect::<Vec<_>>();
+    let filter = |prefix: &str, after: Option<&str>, limit: usize| RepoFilter {
+        prefix: prefix.into(),
+        after: after.map(str::to_owned),
+        limit,
+        deleted: false,
+    };
+    assert_eq!(
+        names(s.list_repo_infos(&filter("adm/", None, 10)).await.expect("list")),
+        ["adm/plain", "adm/src"]
+    );
+    assert_eq!(
+        names(s.list_repo_infos(&filter("adm", None, 10)).await.expect("list")),
+        ["adm/plain", "adm/src", "adm_other"]
+    );
+    assert_eq!(
+        names(s.list_repo_infos(&filter("adm", None, 1)).await.expect("page 1")),
+        ["adm/plain"]
+    );
+    assert_eq!(
+        names(
+            s.list_repo_infos(&filter("adm", Some("adm/plain"), 1))
+                .await
+                .expect("page 2")
+        ),
+        ["adm/src"]
+    );
+    assert_eq!(
+        names(
+            s.list_repo_infos(&filter("adm", Some("a"), 10))
+                .await
+                .expect("cursor before prefix")
+        ),
+        ["adm/plain", "adm/src", "adm_other"]
+    );
+
+    // 修改属性
+    let patch = RepoPatch {
+        description: Some("updated".into()),
+        default_branch: None,
+    };
+    let updated = s.update_repo("adm/src", &patch).await.expect("update");
+    assert_eq!(
+        (updated.description.as_str(), updated.default_branch.as_str()),
+        ("updated", "dev")
+    );
+    let patch = RepoPatch {
+        default_branch: Some("main".into()),
+        description: None,
+    };
+    assert_eq!(
+        s.update_repo("adm/src", &patch).await.expect("update").default_branch,
+        "main"
+    );
+    assert_eq!(
+        s.update_repo("adm/none", &patch).await,
+        Err(Error::RepoNotFound("adm/none".into()))
+    );
+
+    // 准备数据：对象、提交、派生、路径历史、ref、合入记录、redaction
+    let blob = ObjectId::of_blob(b"weights");
+    let gone = ObjectId::of_blob(b"unredacted");
+    s.index_objects(
+        "adm/src",
+        &[
+            IndexedObject { id: blob, size: 7 },
+            IndexedObject { id: gone, size: 10 },
+        ],
+    )
+    .await
+    .expect("index");
+    let root = ChangesetRecord {
+        id: cs(201),
+        root_tree: ObjectId::hash(ObjectKind::Tree, b"t"),
+        parents: vec![],
+        generation: 1,
+        fp_depth: 1,
+        fp_jump: None,
+    };
+    s.put_changeset("adm/src", &root).await.expect("changeset");
+    s.put_derived("adm/src", "k", 1, b"key", b"value")
+        .await
+        .expect("derived");
+    s.index_paths(
+        "adm/src",
+        root.id,
+        1,
+        &[PathChange {
+            path: "model.bin".into(),
+            deleted: false,
+        }],
+    )
+    .await
+    .expect("paths");
+    let landed = LandedChange {
+        change_id: [7; 16],
+        changeset: root.id,
+        landed: root.id,
+        ref_version: 1,
+    };
+    s.land_commit("adm/src", "main", RefExpect::Absent, root.id, &[landed], &[])
+        .await
+        .expect("land");
+    s.cas_ref("adm/src", "dev", RefExpect::Absent, root.id)
+        .await
+        .expect("dev");
+    let red = |id: ObjectId, active: bool| Redaction {
+        repo: "adm/src".into(),
+        id,
+        redaction_id: "rd_adm".into(),
+        reason: "leak".into(),
+        created_by: "root".into(),
+        created_at_ms: 5,
+        active,
+        purge_after_ms: None,
+        purged_at_ms: None,
+        seq: 0,
+    };
+    s.put_redactions(&[red(blob, true), red(gone, false)])
+        .await
+        .expect("redact");
+    let src_seq = s.get_redactions("adm/src", &[blob]).await.expect("get")[0].seq;
+
+    // fork：复制属性、对象、提交、派生、路径历史、ref 与有效的 redaction；不复制合入记录
+    assert_eq!(
+        s.fork_repo("adm/none", "adm/fork", 9).await,
+        Err(Error::RepoNotFound("adm/none".into()))
+    );
+    assert_eq!(
+        s.fork_repo("adm/src", "adm/plain", 9).await,
+        Err(Error::RepoAlreadyExists("adm/plain".into()))
+    );
+    assert!(matches!(
+        s.fork_repo("adm/src", "../f", 9).await,
+        Err(Error::InvalidRepoName(_))
+    ));
+    s.fork_repo("adm/src", "adm/fork", 9).await.expect("fork");
+    let fork = s.get_repo("adm/fork").await.expect("get").expect("fork exists");
+    assert_eq!(fork.forked_from.as_deref(), Some("adm/src"));
+    assert_eq!((fork.created_at_ms, fork.description.as_str()), (9, "updated"));
+    assert_eq!(s.missing_objects("adm/fork", &[blob, gone]).await, Ok(vec![]));
+    assert_eq!(s.get_changeset("adm/fork", &root.id).await, Ok(Some(root.clone())));
+    assert_eq!(
+        s.get_derived("adm/fork", "k", 1, b"key").await,
+        Ok(Some(b"value".to_vec()))
+    );
+    assert_eq!(
+        s.path_history("adm/fork", "model.bin", u64::MAX >> 1, 10)
+            .await
+            .expect("history")
+            .len(),
+        1
+    );
+    let refs = s.list_refs("adm/fork").await.expect("refs");
+    assert_eq!(
+        refs.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["dev", "main"]
+    );
+    assert_eq!(s.landed_changes("adm/fork", "main", &[[7; 16]]).await, Ok(vec![]));
+    let fr = s.get_redactions("adm/fork", &[blob, gone]).await.expect("redactions");
+    assert_eq!(fr.len(), 1, "only active redactions are copied");
+    assert!(fr[0].active && fr[0].id == blob && fr[0].repo == "adm/fork");
+    assert!(fr[0].seq > src_seq, "fresh seq so caches sync the fork");
+
+    // 删除 ref
+    assert_eq!(
+        s.delete_ref("adm/fork", "dev", Some(9)).await,
+        Err(Error::RefVersionMismatch {
+            name: "dev".into(),
+            current: Some(1)
+        })
+    );
+    s.delete_ref("adm/fork", "dev", Some(1)).await.expect("delete dev");
+    assert_eq!(s.get_ref("adm/fork", "dev").await, Ok(None));
+    assert_eq!(
+        s.delete_ref("adm/fork", "dev", None).await,
+        Err(Error::RefVersionMismatch {
+            name: "dev".into(),
+            current: None
+        })
+    );
+    s.delete_ref("adm/fork", "main", None).await.expect("unconditional");
+    // 删除后重新创建：版本从 1 开始，之后照常前进（审计日志不能因旧版本号冲突）
+    let again = s
+        .cas_ref("adm/fork", "dev", RefExpect::Absent, root.id)
+        .await
+        .expect("recreate");
+    assert_eq!(again.version, 1);
+    s.cas_ref("adm/fork", "dev", RefExpect::Version(1), root.id)
+        .await
+        .expect("advance");
+    s.delete_ref("adm/fork", "dev", None).await.expect("delete again");
+    assert_eq!(
+        s.get_ref("adm/src", "main")
+            .await
+            .expect("source untouched")
+            .map(|r| r.version),
+        Some(1)
+    );
+    assert_eq!(
+        s.delete_ref("adm/none", "main", None).await,
+        Err(Error::RepoNotFound("adm/none".into()))
+    );
+
+    // 软删除：按名字找不到，数据保留；名字被占用直到清除
+    s.delete_repo("adm/src", 50).await.expect("delete");
+    assert_eq!(s.repo_exists("adm/src").await, Ok(false));
+    assert!(!s.list_repos().await.expect("list").contains(&"adm/src".to_string()));
+    assert_eq!(
+        s.get_ref("adm/src", "main").await,
+        Err(Error::RepoNotFound("adm/src".into()))
+    );
+    assert_eq!(
+        s.delete_repo("adm/src", 51).await,
+        Err(Error::RepoNotFound("adm/src".into()))
+    );
+    assert_eq!(s.object_repos(&blob).await, Ok(vec!["adm/fork".to_string()]));
+    assert_eq!(
+        s.create_repo("adm/src").await,
+        Err(Error::RepoDeleted("adm/src".into()))
+    );
+    assert_eq!(
+        s.fork_repo("adm/fork", "adm/src", 9).await,
+        Err(Error::RepoDeleted("adm/src".into()))
+    );
+    assert_eq!(
+        s.get_repo("adm/src").await.expect("get").and_then(|r| r.deleted_at_ms),
+        Some(50)
+    );
+    let deleted = RepoFilter {
+        deleted: true,
+        ..filter("adm", None, 10)
+    };
+    assert_eq!(names(s.list_repo_infos(&deleted).await.expect("deleted")), ["adm/src"]);
+    assert!(!names(s.list_repo_infos(&filter("adm", None, 10)).await.expect("live")).contains(&"adm/src".into()));
+    assert_eq!(
+        s.purge_repo("adm/fork", 10).await,
+        Err(Error::RepoNotFound("adm/fork".into()))
+    );
+
+    // 恢复
+    assert_eq!(
+        s.restore_repo("adm/fork").await,
+        Err(Error::RepoNotFound("adm/fork".into()))
+    );
+    s.restore_repo("adm/src").await.expect("restore");
+    assert_eq!(
+        s.get_ref("adm/src", "main").await.expect("ref").map(|r| r.target),
+        Some(root.id)
+    );
+    assert_eq!(
+        s.get_repo("adm/src").await.expect("get").and_then(|r| r.deleted_at_ms),
+        None
+    );
+
+    // 清除：分批，完成后名字可以重新使用，新仓库是空的
+    s.delete_repo("adm/src", 60).await.expect("delete again");
+    let mut rounds = 0;
+    while !s.purge_repo("adm/src", 1).await.expect("purge") {
+        rounds += 1;
+        assert!(rounds < 100, "purge must finish");
+    }
+    assert_eq!(s.get_repo("adm/src").await, Ok(None));
+    assert_eq!(
+        s.purge_repo("adm/src", 1).await,
+        Err(Error::RepoNotFound("adm/src".into()))
+    );
+    s.create_repo("adm/src").await.expect("name reusable after purge");
+    assert_eq!(s.list_refs("adm/src").await, Ok(vec![]));
+    assert_eq!(s.missing_objects("adm/src", &[blob]).await, Ok(vec![blob]));
+    assert_eq!(s.get_changeset("adm/src", &root.id).await, Ok(None));
+    assert_eq!(s.get_derived("adm/src", "k", 1, b"key").await, Ok(None));
+    assert_eq!(s.get_redactions("adm/src", &[blob, gone]).await, Ok(vec![]));
+    assert_eq!(s.landed_changes("adm/src", "main", &[[7; 16]]).await, Ok(vec![]));
+    // fork 不受来源清除的影响
+    assert_eq!(s.missing_objects("adm/fork", &[blob]).await, Ok(vec![]));
+}

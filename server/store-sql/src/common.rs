@@ -168,9 +168,76 @@ pub(crate) fn redact_url(url: &str) -> String {
     }
 }
 
+/// `repos` 表中仓库属性的列（顺序与 [`RepoRow`] 一致）。
+pub const REPO_COLUMNS: &str = "name, default_branch, description, created_at_ms, deleted_at_ms, forked_from";
+
+pub type RepoRow = (String, String, String, i64, Option<i64>, Option<String>);
+
+pub fn repo_from_row(r: RepoRow) -> scion_store::RepoInfo {
+    let (name, default_branch, description, created_at_ms, deleted_at_ms, forked_from) = r;
+    scion_store::RepoInfo {
+        name,
+        default_branch,
+        description,
+        created_at_ms,
+        deleted_at_ms,
+        forked_from,
+    }
+}
+
+/// 按仓库存数据的表及其主键中 `repo_id` 之后的列：清除已删除的仓库时分批删除。
+pub const REPO_TABLES: &[(&str, &str)] = &[
+    ("refs", "name"),
+    ("ref_log", "name, version"),
+    ("landed", "ref, change_id"),
+    ("idempotency", "request_id"),
+    ("redactions", "object_id"),
+    ("derived", "kind, version, key"),
+    ("path_changes", "path, cs_id"),
+    ("changesets", "cs_id"),
+    ("objects_index", "id"),
+];
+
+/// fork 时复制的表及其列（不含 `repo_id`）。redaction 另行复制（要分配新的 seq）。
+pub const FORK_TABLES: &[(&str, &str)] = &[
+    ("objects_index", "id, size"),
+    (
+        "changesets",
+        "cs_id, root_tree, first_parent, generation, parents, fp_depth, fp_jump",
+    ),
+    ("derived", "kind, version, key, value"),
+    ("path_changes", "path, cs_id, generation, deleted"),
+    ("refs", "name, target, version"),
+];
+
+/// 一批删除的行数（每次清除调用最多删除这么多行）。
+pub fn purge_limit(batch: usize) -> i64 {
+    i64::try_from(batch.max(1)).unwrap_or(i64::MAX)
+}
+
+/// 列出仓库时 `limit` 转为 SQL 参数。
+pub fn list_limit(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_rows_and_limits() {
+        let r = repo_from_row(("a".into(), "main".into(), "d".into(), 5, Some(9), Some("src".into())));
+        assert_eq!(
+            (r.name.as_str(), r.deleted_at_ms, r.forked_from.as_deref()),
+            ("a", Some(9), Some("src"))
+        );
+        assert_eq!(purge_limit(0), 1);
+        assert_eq!(purge_limit(usize::MAX), i64::MAX);
+        assert_eq!(list_limit(usize::MAX), i64::MAX);
+        assert_eq!(list_limit(3), 3);
+        assert!(REPO_TABLES.iter().any(|(t, _)| *t == "objects_index"));
+        assert!(FORK_TABLES.iter().all(|(t, _)| REPO_TABLES.iter().any(|(r, _)| r == t)));
+    }
 
     #[test]
     fn now_ms_is_after_2020() {

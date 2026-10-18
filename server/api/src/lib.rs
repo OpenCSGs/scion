@@ -17,6 +17,7 @@ use scion_proto::v1::land_service_server::LandServiceServer;
 use scion_proto::v1::object_service_server::ObjectServiceServer;
 use scion_proto::v1::query_service_server::QueryServiceServer;
 use scion_proto::v1::ref_service_server::RefServiceServer;
+use scion_proto::v1::repo_service_server::RepoServiceServer;
 use scion_proto::v1::server_info_service_server::ServerInfoServiceServer;
 use scion_proto::v1::write_service_server::WriteServiceServer;
 use scion_store::{BlobStore, MetaStore};
@@ -27,7 +28,8 @@ pub use config::{Limits, ReadEndpoint, ServerConfig, WriteRate};
 pub use scion_auth;
 pub use scion_proto::PROTOCOL_VERSION;
 pub use service::{
-    AdminSvc, AuthSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, ServerInfoSvc, WriteSvc, trusted_forward,
+    AdminSvc, AuthSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, RepoSvc, ServerInfoSvc, WriteSvc,
+    purge_deleted_repos, trusted_forward,
 };
 
 /// 服务端依赖的全部状态。
@@ -45,6 +47,7 @@ async fn janitor(
     redactor: Arc<redaction::Redactor>,
     ttl: std::time::Duration,
     interval: std::time::Duration,
+    repo_grace: std::time::Duration,
 ) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -63,6 +66,10 @@ async fn janitor(
         .unwrap_or(i64::MAX);
         if let Err(e) = redactor.run_purges(now).await {
             tracing::warn!(error = %e.message(), "purging redacted objects failed");
+        }
+        // 宽限期已过的已删除仓库
+        if let Err(e) = purge_deleted_repos(meta.as_ref(), repo_grace, now).await {
+            tracing::warn!(error = %e, "purging deleted repositories failed");
         }
     }
 }
@@ -163,6 +170,7 @@ pub async fn serve(
     health.set_serving::<QueryServiceServer<QuerySvc>>().await;
     health.set_serving::<AuthServiceServer<AuthSvc>>().await;
     health.set_serving::<AdminServiceServer<AdminSvc>>().await;
+    health.set_serving::<RepoServiceServer<RepoSvc>>().await;
 
     // 所有服务共享一份提交记录缓存；启动后在后台预热，不阻塞监听
     let cached = Arc::new(scion_store::CachedMeta::new(app.meta, app.config.record_cache_capacity));
@@ -182,6 +190,7 @@ pub async fn serve(
         redactor.clone(),
         app.config.idempotency_ttl,
         app.config.janitor_interval,
+        app.config.repo_delete_grace,
     ));
     let guard = build_guard(&app.config.auth, app.meta.clone());
     if guard.required() {
@@ -228,10 +237,16 @@ pub async fn serve(
     let write = WriteServiceServer::new(write_svc).max_decoding_message_size(max_write);
     let hub_for_shutdown = hub.clone();
     let refs = RefServiceServer::new(RefSvc::new(app.meta.clone(), hub).with_guard(guard.clone()));
-    let query =
-        QueryServiceServer::new(QuerySvc::new(app.config.clone(), app.meta, app.blobs).with_guard(guard.clone()))
-            .max_encoding_message_size(max_msg);
+    let query = QueryServiceServer::new(
+        QuerySvc::new(app.config.clone(), app.meta.clone(), app.blobs).with_guard(guard.clone()),
+    )
+    .max_encoding_message_size(max_msg);
     let auth_svc = AuthServiceServer::new(AuthSvc::new(guard.clone()));
+    let repo_svc = RepoServiceServer::new(
+        RepoSvc::new(app.meta.clone())
+            .with_guard(guard.clone())
+            .with_delete_grace(app.config.repo_delete_grace),
+    );
     let admin_svc =
         AdminServiceServer::new(AdminSvc::new(guard.clone()).with_redactor(redactor, app.config.purge_grace));
 
@@ -262,6 +277,7 @@ pub async fn serve(
         .add_service(query)
         .add_service(auth_svc)
         .add_service(admin_svc)
+        .add_service(repo_svc)
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
             shutdown.await;
             // 结束 WatchRefs 的长连接，否则优雅停机会一直等它们
@@ -344,6 +360,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn janitor_expires_on_each_tick() {
         let s = seeded().await;
+        s.create_repo("gone").await.expect("create");
+        s.delete_repo("gone", 0).await.expect("delete long ago");
         let task = tokio::spawn(janitor(
             s.clone(),
             Arc::new(redaction::Redactor::new(
@@ -352,12 +370,18 @@ mod tests {
             )),
             std::time::Duration::from_secs(3600),
             std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(24 * 3600),
         ));
         // 第一次 tick 立即触发
         for _ in 0..10 {
             tokio::task::yield_now().await;
         }
         assert_eq!(s.get_idempotency("r", "old").await, Ok(None));
+        assert_eq!(
+            s.get_repo("gone").await,
+            Ok(None),
+            "deleted repository purged after the grace period"
+        );
         task.abort();
     }
 }

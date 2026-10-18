@@ -134,6 +134,13 @@ async fn sdk_works_through_the_daemon() {
     assert_eq!(tip.changeset, a.id);
     assert_eq!(c.list_refs().await.expect("refs").len(), 1);
     assert_eq!(c.log("main", None, 10, None).await.expect("log").entries.len(), 1);
+    // 分支与仓库管理同样转发（RepoService 走透明代理）
+    assert_eq!(c.create_ref("dev", &a.id).await.expect("create ref"), (a.id, 1));
+    assert_eq!(c.update_ref("dev", &a.id, Some(1)).await.expect("update ref").1, 2);
+    c.delete_ref("dev", Some(2)).await.expect("delete ref");
+    c.create_repo("made-via-daemon", scion_client::NewRepo::default())
+        .await
+        .expect("create repo through the proxy");
 
     // 对象读取：第一次回源并写入本地缓存，之后即使服务端停了也能读到
     let blob = ObjectId::of_blob(b"fn a() {}");

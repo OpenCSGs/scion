@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package scion.v1;
+
+// 仓库管理（docs/guide/repos.md）。
+//
+// 权限：创建、修改、删除、恢复需要该仓库名上的 admin；读取属性需要 read；fork 需要来源仓库的 read 和目标仓库名上的
+// admin；ListRepos 只返回调用者能读的仓库。
+service RepoService {
+  rpc CreateRepo(CreateRepoRequest) returns (CreateRepoResponse);
+  rpc GetRepo(GetRepoRequest) returns (GetRepoResponse);
+  rpc ListRepos(ListReposRequest) returns (ListReposResponse);
+  rpc UpdateRepo(UpdateRepoRequest) returns (UpdateRepoResponse);
+  // 软删除：之后按名字找不到这个仓库；宽限期（服务端 --repo-delete-grace）内可以恢复，过后数据被清除，名字才能重新使用。
+  rpc DeleteRepo(DeleteRepoRequest) returns (DeleteRepoResponse);
+  rpc RestoreRepo(RestoreRepoRequest) returns (RestoreRepoResponse);
+  // 在一个事务里复制仓库的全部历史、ref 与有效的 redaction（对象字节在仓库之间共享，不复制）。
+  rpc ForkRepo(ForkRepoRequest) returns (ForkRepoResponse);
+}
+
+message Repo {
+  string name = 1;
+  string default_branch = 2;
+  string description = 3;
+  int64 created_at_ms = 4;
+  // 0 表示没有删除。
+  int64 deleted_at_ms = 5;
+  // 已删除的仓库在这个时间之后被清除；0 表示没有删除。
+  int64 purge_after_ms = 6;
+  // fork 的来源，空表示不是 fork。
+  string forked_from = 7;
+}
+
+message CreateRepoRequest {
+  string name = 1;
+  // 为空时为 main。
+  string default_branch = 2;
+  string description = 3;
+}
+
+message GetRepoRequest {
+  string name = 1;
+  // 已删除、尚未清除的仓库也返回（需要 admin）。
+  bool include_deleted = 2;
+}
+
+message ListReposRequest {
+  // 名字前缀，例如 "opencsg/"。
+  string prefix = 1;
+  // 上一页最后一个仓库名（next_page_token）。
+  string page_token = 2;
+  // 默认 100，最大 1000。
+  uint32 page_size = 3;
+  // 只列出已删除、尚未清除的仓库。
+  bool deleted = 4;
+}
+
+message ListReposResponse {
+  // 按名字字节序。
+  repeated Repo repos = 1;
+  // 为空表示没有更多。
+  string next_page_token = 2;
+}
+
+message UpdateRepoRequest {
+  string name = 1;
+  // 不设置的字段保持不变。
+  optional string default_branch = 2;
+  optional string description = 3;
+}
+
+message DeleteRepoRequest {
+  string name = 1;
+}
+
+message RestoreRepoRequest {
+  string name = 1;
+}
+
+message ForkRepoRequest {
+  string source = 1;
+  string target = 2;
+}
+
+message CreateRepoResponse {
+  Repo repo = 1;
+}
+
+message GetRepoResponse {
+  Repo repo = 1;
+}
+
+message UpdateRepoResponse {
+  Repo repo = 1;
+}
+
+message DeleteRepoResponse {
+  Repo repo = 1;
+}
+
+message RestoreRepoResponse {
+  Repo repo = 1;
+}
+
+message ForkRepoResponse {
+  Repo repo = 1;
+}

@@ -2,10 +2,17 @@ syntax = "proto3";
 
 package scion.v1;
 
-// ref 查询。ref 是唯一的可变状态，结果永远不缓存。
+// ref 查询与管理。ref 是唯一的可变状态，结果永远不缓存。
 service RefService {
   rpc ResolveRef(ResolveRefRequest) returns (ResolveRefResponse);
   rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+  // 创建 ref（分支），指向仓库中已有的提交。ref 已存在时返回 REF_VERSION_MISMATCH。需要该 ref 的 land 权限。
+  rpc CreateRef(CreateRefRequest) returns (CreateRefResponse);
+  // 把 ref 直接指向某个提交（可以不是快进，相当于强制推送）。expected_version 为 0 时不检查版本。
+  // 需要该 ref 的 land 权限。平时前进 ref 用 LandService.Land。
+  rpc UpdateRef(UpdateRefRequest) returns (UpdateRefResponse);
+  // 删除 ref。不能删除仓库的默认分支。expected_version 为 0 时不检查版本。需要该 ref 的 land 权限。
+  rpc DeleteRef(DeleteRefRequest) returns (DeleteRefResponse);
   // 订阅 ref 变化（daemon / 区域缓存预取、CI 触发）。先发送当前状态（快照），之后每次 ref 前进发送新状态。
   // 只保证最终送达每个 ref 的最新状态：同一 ref 短时间内多次前进时，中间版本可能被合并掉。
   // 断开后带上已知版本（known_versions）重新订阅即可续上，不会漏掉变化。
@@ -37,6 +44,35 @@ message ListRefsResponse {
   // 按名字字节序。
   repeated RefInfo refs = 1;
 }
+
+message CreateRefRequest {
+  string repo = 1;
+  string ref = 2;
+  bytes changeset_id = 3;
+}
+
+message UpdateRefRequest {
+  string repo = 1;
+  string ref = 2;
+  bytes changeset_id = 3;
+  uint64 expected_version = 4;
+}
+
+message DeleteRefRequest {
+  string repo = 1;
+  string ref = 2;
+  uint64 expected_version = 3;
+}
+
+message CreateRefResponse {
+  RefInfo ref = 1;
+}
+
+message UpdateRefResponse {
+  RefInfo ref = 1;
+}
+
+message DeleteRefResponse {}
 
 message WatchRefsRequest {
   string repo = 1;

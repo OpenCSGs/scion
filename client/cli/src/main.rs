@@ -9,6 +9,7 @@ mod daemon;
 mod history;
 mod login;
 mod output;
+mod repos;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -54,6 +55,12 @@ enum Command {
     /// 稀疏检出的范围。
     #[command(subcommand)]
     Sparse(SparseCmd),
+    /// 仓库管理：创建、列出、修改、删除、恢复、fork。
+    #[command(subcommand)]
+    Repo(RepoCmd),
+    /// 分支：列出、创建、删除（当前工作副本的仓库，或 --repo）。
+    #[command(subcommand)]
+    Branch(BranchCmd),
     /// 显示本地改动。
     Status,
     /// 把本地改动创建为提交（尚未合入）。
@@ -113,6 +120,56 @@ enum Command {
     /// 本机 daemon（L1 缓存）：通常由其它命令自动拉起，`SCION_NO_DAEMON=1` 关闭。
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum RepoCmd {
+    /// 创建仓库。
+    Create {
+        name: String,
+        /// 默认分支（默认 main）。
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// 列出能看到的仓库。
+    Ls {
+        /// 名字前缀，例如 opencsg/。
+        #[arg(default_value = "")]
+        prefix: String,
+        /// 列出已删除、尚未清除的仓库。
+        #[arg(long)]
+        deleted: bool,
+        #[arg(long, default_value_t = repos::DEFAULT_LIST_LIMIT)]
+        limit: usize,
+    },
+    /// 显示仓库属性（包括已删除的仓库）。
+    Info { name: String },
+    /// 修改默认分支或描述。
+    Set {
+        name: String,
+        #[arg(long)]
+        default_branch: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
+    /// 删除仓库（宽限期内可以用 restore 恢复）。
+    Rm { name: String },
+    /// 恢复已删除的仓库。
+    Restore { name: String },
+    /// fork：复制全部历史与分支到新仓库。
+    Fork { source: String, target: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum BranchCmd {
+    /// 列出分支（* 为默认分支）。
+    Ls,
+    /// 创建分支，指向 REV（默认为当前跟踪的 ref）。
+    Create { name: String, revision: Option<String> },
+    /// 删除分支（不能删除默认分支）。
+    Rm { name: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -225,6 +282,36 @@ async fn run(cli: Cli) -> ExitCode {
             json,
         ),
         Command::Sparse(cmd) => emit(commands::sparse(&ctx, cmd).await, json),
+        Command::Repo(cmd) => match cmd {
+            RepoCmd::Create {
+                name,
+                default_branch,
+                description,
+            } => emit(
+                repos::create(&ctx, &name, default_branch.as_deref(), &description).await,
+                json,
+            ),
+            RepoCmd::Ls { prefix, deleted, limit } => emit(repos::list(&ctx, &prefix, deleted, limit).await, json),
+            RepoCmd::Info { name } => emit(repos::info(&ctx, &name).await, json),
+            RepoCmd::Set {
+                name,
+                default_branch,
+                description,
+            } => emit(
+                repos::update(&ctx, &name, default_branch.as_deref(), description.as_deref()).await,
+                json,
+            ),
+            RepoCmd::Rm { name } => emit(repos::delete(&ctx, &name).await, json),
+            RepoCmd::Restore { name } => emit(repos::restore(&ctx, &name).await, json),
+            RepoCmd::Fork { source, target } => emit(repos::fork(&ctx, &source, &target).await, json),
+        },
+        Command::Branch(cmd) => match cmd {
+            BranchCmd::Ls => emit(repos::branches(&ctx).await, json),
+            BranchCmd::Create { name, revision } => {
+                emit(repos::create_branch(&ctx, &name, revision.as_deref()).await, json)
+            }
+            BranchCmd::Rm { name } => emit(repos::delete_branch(&ctx, &name).await, json),
+        },
         Command::Status => emit(commands::status(&ctx), json),
         Command::Commit { message, author } => emit(commands::commit(&ctx, &message, author.as_deref()).await, json),
         Command::Land => emit(commands::land(&ctx).await, json),
@@ -335,6 +422,20 @@ mod tests {
         let cli = Cli::try_parse_from(["scn", "sparse", "add", "x", "y"]).expect("parse");
         assert!(matches!(cli.command, Command::Sparse(SparseCmd::Add { ref dirs }) if dirs.len() == 2));
         assert!(Cli::try_parse_from(["scn", "sparse", "set"]).is_err(), "dirs required");
+        let cli = Cli::try_parse_from(["scn", "repo", "ls", "org/", "--deleted", "--limit", "5"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Command::Repo(RepoCmd::Ls {
+                deleted: true,
+                limit: 5,
+                ..
+            })
+        ));
+        let cli = Cli::try_parse_from(["scn", "branch", "create", "dev", "main"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Command::Branch(BranchCmd::Create { revision: Some(_), .. })
+        ));
         let cli = Cli::try_parse_from(["scn", "sparse", "disable"]).expect("parse");
         assert!(matches!(cli.command, Command::Sparse(SparseCmd::Disable)));
         let cli = Cli::try_parse_from(["scn", "commit", "-m", "msg", "--author", "A <a@b>"]).expect("parse");

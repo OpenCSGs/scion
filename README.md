@@ -11,6 +11,8 @@ A server-first source control system: history, merges and rebases are computed o
 ## Documentation
 
 **Guides**
+- [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
+- [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
 - [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
 - [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
 - [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks
@@ -46,6 +48,9 @@ A server-first source control system: history, merges and rebases are computed o
   - OpenTelemetry tracing over OTLP, continuing the caller's `traceparent` across land forwarding and cache fetches;
   - per-caller rate and concurrency limits (`--tenant-rate`, `--tenant-concurrency`);
   - deadlines: the smaller of the client's `grpc-timeout` and `--max-request-timeout`, passed on to the leader and to the servers.
+
+- **Repositories and branches:** `RepoService` (create, list, update, soft-delete with a restore window, fork) and branch create / move / delete, with `scn repo` and `scn branch`.
+- **Deployment:** a Docker image with `scion` and `scn`, and a docker compose setup with PostgreSQL and SeaweedFS.
 
 Still to come in M5: YugabyteDB, Helm and chaos testing.
 
@@ -91,8 +96,11 @@ Benchmarks run on one machine (Apple M5, 10 cores) with objects in memory; clien
 ## Quick start
 
 ```sh
-# Start a server in Lite mode (SQLite + a local directory, persisted) with a repository named "mono"
-cargo run -p scion -- server --lite --data-dir ./.scion-data --repo mono
+# Option 1: docker compose with PostgreSQL + S3-compatible storage (see docs/guide/deploy.md)
+docker compose -f deploy/compose/docker-compose.yml up -d --build
+
+# Option 2: a server in Lite mode (SQLite + a local directory, persisted), from source
+cargo run -p scion -- server --lite --data-dir ./.scion-data
 
 # Other backends: --meta mem|sqlite://PATH|postgres://…  --blobs mem|DIR|s3://bucket/prefix
 # S3 settings: SCION_S3_ENDPOINT, SCION_S3_ACCESS_KEY_ID, SCION_S3_SECRET_ACCESS_KEY, SCION_S3_REGION,
@@ -101,6 +109,7 @@ cargo run -p scion -- server --lite --data-dir ./.scion-data --repo mono
 # In another terminal: install scn and check the connection
 cargo install --path client/cli
 scn doctor
+scn repo create mono                # repositories and branches: scn repo / scn branch (see docs/guide/repos.md)
 
 # Everyday workflow
 scn clone mono && cd mono          # check out (ref main by default; empty repositories work too)
@@ -145,6 +154,7 @@ common/              shared by server and client (may depend only on common)
   flight/            scion-flight      single-flight request coalescing (server caches and the daemon)
 
 server/              server side (may depend on common and lower server crates)
+  obs/               scion-obs         Prometheus metrics, OpenTelemetry tracing, gRPC deadlines
   store/             scion-store       MetaStore / BlobStore traits, in-memory backend, conformance suite
   store-sql/         scion-store-sql   SQLite / PostgreSQL metadata store
   store-blob/        scion-store-blob  local directory / S3-compatible object store

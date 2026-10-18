@@ -14,6 +14,7 @@
 - [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
+- [git 兼容的提交 sha](docs/guide/git-sha.md)：每个提交都有 40 位 git sha，可以直接当作版本号使用
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
 - [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查

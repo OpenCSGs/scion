@@ -67,6 +67,8 @@ pub mod features {
     pub const REFS_WRITE: &str = "refs.write";
     /// EventService.ListRefEvents：按序号增量读取 ref 变化。
     pub const EVENTS: &str = "events";
+    /// 所有提交都有 git 兼容 sha（GetDerived 的 GIT_SHA1 与 GetGitShas）。
+    pub const GIT_SHA1: &str = "git.sha1";
 }
 
 #[cfg(test)]

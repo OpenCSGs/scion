@@ -70,6 +70,9 @@ pub struct Payload {
     pub reference: String,
     pub old: Option<String>,
     pub new: Option<String>,
+    /// `old` / `new` 对应的 git 兼容 sha（40 位十六进制）。
+    pub old_git_sha: Option<String>,
+    pub new_git_sha: Option<String>,
     pub version: u64,
     pub time_ms: i64,
     /// 本次变化引入的提交（从新到旧）；删除时为空。
@@ -81,6 +84,8 @@ pub struct Payload {
 #[derive(Debug, Serialize, PartialEq)]
 pub struct CommitInfo {
     pub id: String,
+    /// git 兼容 sha（40 位十六进制）；算不出来时省略。
+    pub git_sha: Option<String>,
     pub parents: Vec<String>,
     pub author: Person,
     pub message: String,
@@ -105,7 +110,18 @@ pub struct PathChange {
     pub size: Option<u64>,
 }
 
-pub(crate) fn commit_info(id: ObjectId, cs: &Changeset) -> CommitInfo {
+/// 提交的 git sha。算不出来（例如文件内容已被清除）时记录警告并返回 `None`，不阻塞推送或检查。
+pub(crate) async fn git_sha(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str, id: ObjectId) -> Option<String> {
+    match scion_query::derive_git_sha(meta, blobs, repo, id).await {
+        Ok(sha) => Some(hex::encode(sha)),
+        Err(e) => {
+            tracing::warn!(repo, %id, error = %e, "cannot derive git sha");
+            None
+        }
+    }
+}
+
+pub(crate) fn commit_info(id: ObjectId, git_sha: Option<String>, cs: &Changeset) -> CommitInfo {
     let changes = cs
         .delta
         .iter()
@@ -125,6 +141,7 @@ pub(crate) fn commit_info(id: ObjectId, cs: &Changeset) -> CommitInfo {
         .collect();
     CommitInfo {
         id: id.to_string(),
+        git_sha,
         parents: cs.parents.iter().map(ToString::to_string).collect(),
         author: Person {
             name: cs.author.name.clone(),
@@ -149,11 +166,20 @@ pub async fn payload(meta: &dyn MetaStore, blobs: &dyn BlobStore, ev: &RefEvent)
                 let cs = scion_query::load_changeset(blobs, r.id)
                     .await
                     .map_err(|e| e.to_string())?;
-                out.push(commit_info(r.id, &cs));
+                let sha = git_sha(meta, blobs, &ev.repo, r.id).await;
+                out.push(commit_info(r.id, sha, &cs));
             }
             (out, truncated)
         }
         None => (Vec::new(), false),
+    };
+    let old_git_sha = match ev.old_target {
+        Some(id) => git_sha(meta, blobs, &ev.repo, id).await,
+        None => None,
+    };
+    let new_git_sha = match ev.new_target {
+        Some(id) => git_sha(meta, blobs, &ev.repo, id).await,
+        None => None,
     };
     Ok(Payload {
         kind: event_kind(ev),
@@ -162,6 +188,8 @@ pub async fn payload(meta: &dyn MetaStore, blobs: &dyn BlobStore, ev: &RefEvent)
         reference: ev.name.clone(),
         old: ev.old_target.map(|t| t.to_string()),
         new: ev.new_target.map(|t| t.to_string()),
+        old_git_sha,
+        new_git_sha,
         version: ev.version,
         time_ms: ev.created_at_ms,
         commits,
@@ -375,6 +403,8 @@ impl Dispatcher {
                         reference: ev.name.clone(),
                         old: ev.old_target.map(|t| t.to_string()),
                         new: ev.new_target.map(|t| t.to_string()),
+                        old_git_sha: None,
+                        new_git_sha: None,
                         version: ev.version,
                         time_ms: ev.created_at_ms,
                         commits: Vec::new(),
@@ -561,6 +591,9 @@ mod tests {
         assert_eq!(updated["commits"][0]["changes"][0]["path"], "b.txt");
         assert_eq!(updated["commits"][0]["changes"][0]["size"], 3);
         assert_eq!(updated["commits"][0]["changes"][1]["op"], "delete");
+        // 这里的提交没有真实的目录树：算不出 git sha 时省略，事件照常推送
+        assert!(updated["commits"][0]["git_sha"].is_null());
+        assert!(updated["old_git_sha"].is_null() && updated["new_git_sha"].is_null());
         assert!(got[2].2["new"].is_null());
         assert_eq!(got[2].2["commits"].as_array().map(Vec::len), Some(0));
         assert_eq!(d.step(10).await, Ok(Some(0)), "nothing left");

@@ -3459,6 +3459,7 @@ dependencies = [
  "scion-store",
  "scion-store-sql",
  "scion-tree",
+ "sha1",
  "similar",
  "tempfile",
  "thiserror 2.0.21",

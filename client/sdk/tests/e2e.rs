@@ -509,7 +509,10 @@ async fn history_queries_end_to_end() {
         c.stat("main", "nope").await.expect_err("missing").reason(),
         Some(ErrorReason::PathNotFound)
     );
-    assert_eq!(c.git_sha("main").await.expect("sha"), None);
+    // 合并提交也有 git sha，并且可以当作版本号
+    let sha = c.git_sha("main").await.expect("sha").expect("computed");
+    assert_eq!(c.git_shas(&[m.id]).await.expect("batch"), vec![sha.clone()]);
+    assert_eq!(c.resolve_revision(&sha).await.expect("by sha").id, m.id);
     assert_eq!(c.generation("main").await.expect("gen"), (3, 3));
     let err = c.diff(Some("nope"), "main", None).await.expect_err("bad revision");
     assert_eq!(err.reason(), Some(ErrorReason::RefNotFound));

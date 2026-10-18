@@ -21,6 +21,7 @@
    ```
 
 3. **装好 `scn`**：`cargo install --path client/cli`。
+4. **服务端开启认证时，需要目标仓库的 `admin` 权限**。导入的提交带有原始 git sha（扩展字段 `git.sha1`），服务端把它当作这个提交的 sha，只有仓库 admin 才能写入这个字段，普通写者会收到 `PERMISSION_DENIED`。否则任何写者都可以让任意 git sha 指向自己的提交。
 
 导入只通过公开协议写入，和普通用户提交走同一条服务端校验，所以可以导入到任何 Scion 服务端（本机的 Lite 模式，或接入 PostgreSQL 与 S3 的集群）。
 

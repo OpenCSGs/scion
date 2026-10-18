@@ -4,8 +4,8 @@ use bytes::Bytes;
 use scion_object::{ObjectId, ObjectKind, Signature};
 use scion_proto::v1::{
     self, BlameRequest, BlameResponse, DerivedKind, DiffRequest, DiffResponse, GetDerivedRequest, GetDerivedResponse,
-    IsAncestorRequest, IsAncestorResponse, LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse,
-    ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
+    GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, LogRequest, LogResponse,
+    MergeBaseRequest, MergeBaseResponse, ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
 };
 use scion_query::{LogEntry, QueryError};
 use scion_store::{BlobStore, MetaStore};
@@ -51,6 +51,7 @@ pub(crate) fn from_query(e: QueryError) -> Status {
         QueryError::PathNotFound(p) => status::path_not_found(&p),
         QueryError::NotAFile(p) => Status::failed_precondition(format!("{p:?} is a directory")),
         QueryError::Tree(e) => status::from_tree(e),
+        QueryError::MissingObject(id) => Status::failed_precondition(format!("object {id} is missing (purged?)")),
     }
 }
 
@@ -205,6 +206,43 @@ pub(crate) async fn stat(
     })
 }
 
+/// 一次 GetGitShas 最多映射的提交数。
+pub(crate) const MAX_GIT_SHAS: usize = 1000;
+
+pub(crate) async fn get_git_shas(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    req: GetGitShasRequest,
+) -> Result<GetGitShasResponse, Status> {
+    if req.changeset_ids.len() > MAX_GIT_SHAS {
+        return Err(Status::invalid_argument(format!(
+            "at most {MAX_GIT_SHAS} changeset ids per request"
+        )));
+    }
+    let ids = req
+        .changeset_ids
+        .iter()
+        .map(|b| match ObjectId::from_bytes(b) {
+            Ok(id) if id.kind() == ObjectKind::Changeset => Ok(id),
+            _ => Err(Status::invalid_argument("invalid changeset id")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cached = scion_query::cached_git_shas(meta, &req.repo, &ids)
+        .await
+        .map_err(from_query)?;
+    let mut out = Vec::with_capacity(ids.len());
+    for (id, sha) in ids.into_iter().zip(cached) {
+        let sha = match sha {
+            Some(sha) => sha,
+            None => scion_query::derive_git_sha(meta, blobs, &req.repo, id)
+                .await
+                .map_err(from_query)?,
+        };
+        out.push(Bytes::copy_from_slice(&sha));
+    }
+    Ok(GetGitShasResponse { git_sha1: out })
+}
+
 pub(crate) async fn get_derived(
     meta: &dyn MetaStore,
     blobs: &dyn BlobStore,
@@ -213,9 +251,10 @@ pub(crate) async fn get_derived(
     let rec = resolve_revision(meta, &req.repo, &req.revision).await?;
     let value = match DerivedKind::try_from(req.kind) {
         Ok(DerivedKind::GitSha1) => {
-            let cs = scion_query::load_changeset(blobs, rec.id).await.map_err(from_query)?;
-            scion_query::git_sha_of(&cs)
-                .map(|sha| v1::get_derived_response::Value::GitSha1(Bytes::copy_from_slice(&sha)))
+            let sha = scion_query::derive_git_sha(meta, blobs, &req.repo, rec.id)
+                .await
+                .map_err(from_query)?;
+            Some(v1::get_derived_response::Value::GitSha1(Bytes::copy_from_slice(&sha)))
         }
         Ok(DerivedKind::Generation) => Some(v1::get_derived_response::Value::Generation(v1::Generation {
             generation: rec.generation,
@@ -607,7 +646,19 @@ mod tests {
         let g = get_derived(store.as_ref(), store.as_ref(), gd(DerivedKind::GitSha1, "main"))
             .await
             .expect("sha");
-        assert_eq!(g.value, None, "not imported from git");
+        let Some(v1::get_derived_response::Value::GitSha1(sha)) = g.value else {
+            panic!("native commits get a computed sha: {:?}", g.value);
+        };
+        let by_sha = resolve(
+            store.as_ref(),
+            ResolveRevisionRequest {
+                repo: REPO.into(),
+                revision: hex::encode(&sha),
+            },
+        )
+        .await
+        .expect("resolve by sha");
+        assert_eq!(by_sha.changeset_id, g.changeset_id, "computed sha resolves back");
         let r = get_derived(store.as_ref(), store.as_ref(), gd(DerivedKind::Unspecified, "main")).await;
         assert_eq!(r.map(|_| ()).map_err(|s| s.code()), Err(Code::InvalidArgument));
         let r = resolve(
@@ -647,6 +698,77 @@ mod tests {
             Some(v1::get_derived_response::Value::GitSha1(Bytes::from_static(
                 &[0xab; 20]
             )))
+        );
+    }
+
+    #[tokio::test]
+    async fn get_git_shas_batch() {
+        let (store, w) = svc().await;
+        upload(&w, b"x").await;
+        let one = w
+            .create(
+                REPO,
+                &spec_to_changeset(spec(&[], vec![put("f", b"x")]), 10).expect("spec"),
+            )
+            .await
+            .expect("one");
+        let two = w
+            .create(REPO, &spec_to_changeset(spec(&[one.id], vec![]), 11).expect("spec"))
+            .await
+            .expect("two");
+        let req = |ids: Vec<Bytes>| GetGitShasRequest {
+            repo: REPO.into(),
+            changeset_ids: ids,
+        };
+        // 第一次：两个都要计算；第二次：命中缓存，结果相同
+        let ids = vec![id_bytes(&two.id), id_bytes(&one.id), id_bytes(&two.id)];
+        let first = get_git_shas(store.as_ref(), store.as_ref(), req(ids.clone()))
+            .await
+            .expect("shas");
+        assert_eq!(first.git_sha1.len(), 3);
+        assert_eq!(first.git_sha1[0], first.git_sha1[2]);
+        assert_ne!(first.git_sha1[0], first.git_sha1[1]);
+        assert!(first.git_sha1.iter().all(|s| s.len() == 20));
+        let again = get_git_shas(store.as_ref(), store.as_ref(), req(ids))
+            .await
+            .expect("cached");
+        assert_eq!(again, first);
+        let empty = get_git_shas(store.as_ref(), store.as_ref(), req(vec![])).await;
+        assert_eq!(empty.expect("empty"), GetGitShasResponse::default());
+
+        let code = |r: Result<GetGitShasResponse, Status>| r.map(|_| ()).map_err(|s| s.code());
+        let too_many = vec![id_bytes(&one.id); MAX_GIT_SHAS + 1];
+        assert_eq!(
+            code(get_git_shas(store.as_ref(), store.as_ref(), req(too_many)).await),
+            Err(Code::InvalidArgument)
+        );
+        assert_eq!(
+            code(get_git_shas(store.as_ref(), store.as_ref(), req(vec![Bytes::from_static(b"x")])).await),
+            Err(Code::InvalidArgument)
+        );
+        assert_eq!(
+            code(get_git_shas(store.as_ref(), store.as_ref(), req(vec![id_bytes(&one.root_tree)])).await),
+            Err(Code::InvalidArgument),
+            "tree id is not a changeset id"
+        );
+        let stray = spec_to_changeset(spec(&[], vec![]), 99).expect("spec").id();
+        assert_eq!(
+            code(get_git_shas(store.as_ref(), store.as_ref(), req(vec![id_bytes(&stray)])).await),
+            Err(Code::NotFound)
+        );
+        // 文件内容已清除、还没算过的提交
+        upload(&w, b"gone").await;
+        let three = w
+            .create(
+                REPO,
+                &spec_to_changeset(spec(&[two.id], vec![put("g", b"gone")]), 12).expect("spec"),
+            )
+            .await
+            .expect("three");
+        store.delete(&ObjectId::of_blob(b"gone")).await.expect("delete");
+        assert_eq!(
+            code(get_git_shas(store.as_ref(), store.as_ref(), req(vec![id_bytes(&three.id)])).await),
+            Err(Code::FailedPrecondition)
         );
     }
 

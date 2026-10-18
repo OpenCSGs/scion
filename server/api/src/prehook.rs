@@ -16,7 +16,7 @@ use scion_store::{BlobStore, MetaStore};
 use serde::{Deserialize, Serialize};
 use tonic::Status;
 
-use crate::events::{CommitInfo, MAX_COMMITS, commit_info, signature};
+use crate::events::{CommitInfo, MAX_COMMITS, commit_info, git_sha, signature};
 use crate::status;
 
 /// 原因最多保留的字节数。
@@ -50,6 +50,9 @@ struct CheckRequest {
     old: Option<String>,
     /// 要合入（或指向）的提交。
     new: String,
+    /// `old` / `new` 对应的 git 兼容 sha。
+    old_git_sha: Option<String>,
+    new_git_sha: Option<String>,
     pusher: Pusher,
     commits: Vec<CommitInfo>,
     commits_truncated: bool,
@@ -178,15 +181,23 @@ impl PreLand {
             let cs = scion_query::load_changeset(self.blobs.as_ref(), r.id)
                 .await
                 .map_err(|e| e.to_string())?;
-            commits.push(commit_info(r.id, &cs));
+            let sha = git_sha(self.meta.as_ref(), self.blobs.as_ref(), repo, r.id).await;
+            commits.push(commit_info(r.id, sha, &cs));
         }
         let truncated = truncated || commits.iter().any(|c| c.changes_truncated);
+        let old_git_sha = match old {
+            Some(o) => git_sha(self.meta.as_ref(), self.blobs.as_ref(), repo, o).await,
+            None => None,
+        };
+        let new_git_sha = git_sha(self.meta.as_ref(), self.blobs.as_ref(), repo, tip).await;
         let req = CheckRequest {
             kind: "pre-land",
             repo: repo.to_owned(),
             reference: reference.to_owned(),
             old: old.map(|o| o.to_string()),
             new: tip.to_string(),
+            old_git_sha,
+            new_git_sha,
             pusher: Pusher {
                 subject: p.subject.clone(),
                 groups: p.groups.clone(),
@@ -413,6 +424,9 @@ mod tests {
             "only commits not on the ref"
         );
         assert_eq!(second["commits"][0]["changes"][0]["path"], "secret.env");
+        // 测试提交没有真实目录树，算不出 git sha：字段保留为 null
+        assert!(second.get("new_git_sha").is_some_and(|v| v.is_null()));
+        assert!(second["commits"][0].get("git_sha").is_some_and(|v| v.is_null()));
     }
 
     #[tokio::test]

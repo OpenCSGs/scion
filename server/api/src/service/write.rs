@@ -276,6 +276,19 @@ impl WriteService for WriteSvc {
             .ok_or_else(|| Status::invalid_argument("changeset is required"))?;
         let cs = spec_to_changeset(spec, self.config.limits.max_changes_per_changeset)?;
         self.authorize_paths(&p, &req.repo, &cs).await?;
+        // git sha 会被当作这个提交的身份（按 sha 解析版本、事件中的 git_sha），只有导入者可以声明：
+        // 否则任何写者都能让任意 sha 指向自己的提交，并抢在真正的导入之前占住它
+        if cs.extensions.contains_key(scion_query::GIT_SHA1_EXTENSION) {
+            authorize(&self.guard, &p, AuthRequest::repo(&req.repo, Action::Admin))
+                .await
+                .map_err(|s| {
+                    Status::permission_denied(format!(
+                        "the {} extension is reserved for git imports and needs admin on the repo: {}",
+                        scion_query::GIT_SHA1_EXTENSION,
+                        s.message()
+                    ))
+                })?;
+        }
         RateLimiter::admit(self.limiter.as_deref(), &req.repo)?;
         let rec = self.create(&req.repo, &cs).await?;
         tracing::info!(repo = %req.repo, changeset = %rec.id, request_id = %req.request_id, "changeset created");
@@ -290,6 +303,61 @@ impl WriteService for WriteSvc {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn git_sha_extension_needs_admin() {
+        use scion_auth::{GuardConfig, Principal};
+        let store = Arc::new(MemStore::new());
+        store.create_repo(REPO).await.expect("repo");
+        let guard = Guard::build(
+            GuardConfig {
+                required: true,
+                ..GuardConfig::default()
+            },
+            store.clone(),
+            Arc::new(|_: &str| None),
+        )
+        .expect("guard");
+        guard
+            .set_policy(
+                r#"
+                [[rule]]
+                subjects = ["user:alice"]
+                repos = ["r"]
+                actions = ["write"]
+
+                [[rule]]
+                subjects = ["user:importer"]
+                repos = ["r"]
+                actions = ["write", "admin"]
+                "#,
+            )
+            .await
+            .expect("policy");
+        let w = WriteSvc::new(Arc::new(ServerConfig::default()), store.clone(), store).with_guard(guard);
+        let call = |who: &str, git_sha: bool, n: u8| {
+            let mut sp = spec(&[], vec![]);
+            sp.change_id = Bytes::copy_from_slice(&[n; 16]);
+            if git_sha {
+                sp.extensions
+                    .insert(scion_query::GIT_SHA1_EXTENSION.into(), Bytes::from_static(&[0xab; 20]));
+            }
+            let mut r = Request::new(CreateChangesetRequest {
+                repo: REPO.into(),
+                request_id: String::new(),
+                changeset: Some(sp),
+            });
+            r.extensions_mut().insert(Principal::user(who, vec![]));
+            r
+        };
+        // 普通写者：可以创建提交，但不能声明 git sha
+        assert!(w.create_changeset(call("alice", false, 1)).await.is_ok());
+        let err = w.create_changeset(call("alice", true, 2)).await.expect_err("reserved");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert!(err.message().contains("git.sha1"), "{err:?}");
+        // 导入者（仓库 admin）可以
+        assert!(w.create_changeset(call("importer", true, 3)).await.is_ok());
+    }
     use scion_store::MemStore;
     use tonic::Code;
 

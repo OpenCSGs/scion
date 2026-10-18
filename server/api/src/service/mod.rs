@@ -1,4 +1,5 @@
 mod auth;
+mod events;
 mod history;
 mod land;
 mod object;
@@ -10,6 +11,7 @@ pub(crate) mod support;
 mod write;
 
 pub use auth::{AdminSvc, AuthSvc};
+pub use events::EventSvc;
 pub use land::{FORWARDED_HEADER, LandSvc, trusted_forward};
 pub use object::ObjectSvc;
 pub use query::QuerySvc;

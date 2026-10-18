@@ -48,6 +48,12 @@ pub struct CacheLabels {
     pub result: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct SinkLabels {
+    /// 事件推送目标：`webhook` 或 `nats`。
+    pub sink: String,
+}
+
 /// 被拒绝请求的原因（`scion_rejected_requests_total{reason}`）。
 pub mod reason {
     /// 全局在途请求超过上限（load shed）。
@@ -87,6 +93,12 @@ pub struct Metrics {
     pub land_duration: Histogram,
     /// `scion_object_cache_requests_total{layer, result}`
     pub object_cache: Family<CacheLabels, Counter>,
+    /// `scion_events_delivered_total{sink}`
+    pub events_delivered: Family<SinkLabels, Counter>,
+    /// `scion_event_delivery_failures_total{sink}`：失败的投递尝试（之后会重试）。
+    pub event_failures: Family<SinkLabels, Counter>,
+    /// `scion_event_lag{sink}`：已分配的最大 seq 与已投递的 seq 之差。
+    pub event_lag: Family<SinkLabels, Gauge>,
     registry: Mutex<Registry>,
 }
 
@@ -101,6 +113,9 @@ impl Metrics {
             land_batches: Family::default(),
             land_duration: Histogram::new(exponential_buckets(0.001, 2.0, 15)),
             object_cache: Family::default(),
+            events_delivered: Family::default(),
+            event_failures: Family::default(),
+            event_lag: Family::default(),
             registry: Mutex::new(Registry::default()),
         };
         if let Ok(mut r) = m.registry.lock() {
@@ -135,6 +150,21 @@ impl Metrics {
                 "scion_object_cache_requests",
                 "Object cache lookups, by layer and result",
                 m.object_cache.clone(),
+            );
+            r.register(
+                "scion_events_delivered",
+                "Ref events delivered, by sink",
+                m.events_delivered.clone(),
+            );
+            r.register(
+                "scion_event_delivery_failures",
+                "Failed ref event delivery attempts, by sink",
+                m.event_failures.clone(),
+            );
+            r.register(
+                "scion_event_lag",
+                "Ref events not yet delivered, by sink",
+                m.event_lag.clone(),
             );
         }
         m
@@ -171,6 +201,21 @@ impl Metrics {
         }
     }
 
+    /// 事件推送：成功投递一条、一次失败的尝试、积压量。
+    pub fn event_delivered(&self, sink: &str) {
+        self.events_delivered.get_or_create(&sink_labels(sink)).inc();
+    }
+
+    pub fn event_failed(&self, sink: &str) {
+        self.event_failures.get_or_create(&sink_labels(sink)).inc();
+    }
+
+    pub fn event_lag(&self, sink: &str, lag: u64) {
+        self.event_lag
+            .get_or_create(&sink_labels(sink))
+            .set(i64::try_from(lag).unwrap_or(i64::MAX));
+    }
+
     pub fn land_finished(&self, elapsed: Duration) {
         self.land_duration.observe(elapsed.as_secs_f64());
     }
@@ -196,6 +241,10 @@ impl Metrics {
         }
         out
     }
+}
+
+fn sink_labels(sink: &str) -> SinkLabels {
+    SinkLabels { sink: sink.to_owned() }
 }
 
 static METRICS: LazyLock<Metrics> = LazyLock::new(Metrics::new);
@@ -290,7 +339,16 @@ mod tests {
         m.land_batch("landed", 3);
         m.land_batch("retried", 3);
         m.land_finished(Duration::from_millis(5));
+        m.event_delivered("webhook");
+        m.event_failed("webhook");
+        m.event_lag("webhook", 3);
         let text = m.encode();
+        assert!(
+            text.contains("scion_events_delivered_total{sink=\"webhook\"}"),
+            "{text}"
+        );
+        assert!(text.contains("scion_event_delivery_failures_total{sink=\"webhook\"}"));
+        assert!(text.contains("scion_event_lag{sink=\"webhook\"} 3"));
         assert!(
             text.contains("scion_rejected_requests_total{reason=\"overload\"}"),
             "{text}"

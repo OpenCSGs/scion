@@ -682,6 +682,19 @@ SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architectur
 >   - 删除后重新创建的 ref 版本从 1 开始；WatchRefs 不推送删除。
 > - **部署**：`Dockerfile`（多阶段构建，BuildKit 缓存，非 root 运行，基础镜像可换成镜像站）；`deploy/compose`（PostgreSQL + SeaweedFS + server，可选 cache profile）。
 
+> **ref 变化事件实现说明**（2026-10-18）：starhub 接入 S1 的事件部分。
+> - **事件表**：`ref_events` 在 `land_commit` / `delete_ref` / `fork_repo` 的同一事务里写入。seq 取自单行计数器 `ref_event_seq`，与 `redaction_seq` 相同：行锁让 seq 顺序等于提交顺序，按 seq 增量读取不会漏掉晚提交的小序号。
+>   - 代价：所有 ref 写入在这一行上串行。合入是按批提交的，PostgreSQL 基准与 main 没有可测出的差异（同一台机器上 762–847 对 763–788 次/秒）。
+>   - 事件记录仓库名而不是 repo_id，仓库清除后在保留期内仍可读。
+>   - 变化前的提交取自 `ref_log` 的上一版本，删除时取 `DELETE … RETURNING`。
+> - **拉取**：`EventService.ListRefEvents(after_seq)`。`ref_event_bounds` 返回（最早保留的 seq，计数器的值），即使事件已全部清理也能判断消费方落后的部分是否已丢失（`truncated`）。
+> - **推送**：webhook（HMAC-SHA256，GitHub 格式）与 NATS JetStream（`Nats-Msg-Id` 去重，等待确认）。
+>   - 每个目标一个租约（`events/<目标>`），进度存在 settings 中，按 seq 顺序、至少送达一次，失败时退避重试。
+>   - 新目标从服务端开始监听前的位置开始，不重放历史。
+>   - 内容中的提交用 `scion_query::new_commits` 计算（从 new 可达、从 old 不可达），路径级改动取自提交的 delta。
+>   - 与原设计的差别：subject 不含仓库名（仓库名可以包含 `.`）。
+> - **推迟**：仓库级事件（创建、删除、fork 本身）、webhook 按仓库或按事件类型过滤、多个 webhook。
+
 | **M5 生产化** | 4 周 | YugabyteDB 档与 `migrate-meta` 工具、ACL/OIDC/JWT、redaction、OTel、Helm、混沌测试、多区域 follower read、`conformance` 发布 | 全部 SLO 达标；单 AZ 故障演练通过 |
 
 ---

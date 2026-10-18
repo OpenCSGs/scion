@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod events;
 pub mod limit;
 pub mod redaction;
 mod service;
@@ -13,6 +14,7 @@ use std::sync::Arc;
 
 use scion_proto::v1::admin_service_server::AdminServiceServer;
 use scion_proto::v1::auth_service_server::AuthServiceServer;
+use scion_proto::v1::event_service_server::EventServiceServer;
 use scion_proto::v1::land_service_server::LandServiceServer;
 use scion_proto::v1::object_service_server::ObjectServiceServer;
 use scion_proto::v1::query_service_server::QueryServiceServer;
@@ -28,8 +30,8 @@ pub use config::{Limits, ReadEndpoint, ServerConfig, WriteRate};
 pub use scion_auth;
 pub use scion_proto::PROTOCOL_VERSION;
 pub use service::{
-    AdminSvc, AuthSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, RepoSvc, ServerInfoSvc, WriteSvc,
-    purge_deleted_repos, trusted_forward,
+    AdminSvc, AuthSvc, EventSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, RepoSvc, ServerInfoSvc,
+    WriteSvc, purge_deleted_repos, trusted_forward,
 };
 
 /// 服务端依赖的全部状态。
@@ -48,6 +50,7 @@ async fn janitor(
     ttl: std::time::Duration,
     interval: std::time::Duration,
     repo_grace: std::time::Duration,
+    event_retention: std::time::Duration,
 ) {
     let mut tick = tokio::time::interval(interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -70,6 +73,10 @@ async fn janitor(
         // 宽限期已过的已删除仓库
         if let Err(e) = purge_deleted_repos(meta.as_ref(), repo_grace, now).await {
             tracing::warn!(error = %e, "purging deleted repositories failed");
+        }
+        let keep_ms = i64::try_from(event_retention.as_millis()).unwrap_or(i64::MAX);
+        if let Err(e) = meta.prune_ref_events(now.saturating_sub(keep_ms)).await {
+            tracing::warn!(error = %e, "pruning ref events failed");
         }
     }
 }
@@ -171,6 +178,7 @@ pub async fn serve(
     health.set_serving::<AuthServiceServer<AuthSvc>>().await;
     health.set_serving::<AdminServiceServer<AdminSvc>>().await;
     health.set_serving::<RepoServiceServer<RepoSvc>>().await;
+    health.set_serving::<EventServiceServer<EventSvc>>().await;
 
     // 所有服务共享一份提交记录缓存；启动后在后台预热，不阻塞监听
     let cached = Arc::new(scion_store::CachedMeta::new(app.meta, app.config.record_cache_capacity));
@@ -191,7 +199,34 @@ pub async fn serve(
         app.config.idempotency_ttl,
         app.config.janitor_interval,
         app.config.repo_delete_grace,
+        app.config.events.retention,
     ));
+    // 事件推送：每个目标在集群中由持有租约的一个节点负责
+    let holder = app
+        .config
+        .cluster
+        .as_ref()
+        .map_or_else(|| format!("local-{}", std::process::id()), |c| c.node.clone());
+    match events::sinks(&app.config.events) {
+        Ok(sinks) => {
+            for sink in sinks {
+                tracing::info!(sink = sink.name(), "delivering ref events");
+                let d = events::Dispatcher {
+                    meta: app.meta.clone(),
+                    blobs: app.blobs.clone(),
+                    sink,
+                    holder: holder.clone(),
+                    poll: std::time::Duration::from_millis(500),
+                };
+                // 开始监听之前确定起点：之后的变化一定会推送
+                if let Err(e) = d.init_cursor().await {
+                    tracing::warn!(error = %e, "initializing the event cursor failed; retrying in the background");
+                }
+                tokio::spawn(d.run());
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "event delivery disabled"),
+    }
     let guard = build_guard(&app.config.auth, app.meta.clone());
     if guard.required() {
         if let Err(e) = guard.reload_policy().await {
@@ -242,6 +277,7 @@ pub async fn serve(
     )
     .max_encoding_message_size(max_msg);
     let auth_svc = AuthServiceServer::new(AuthSvc::new(guard.clone()));
+    let event_svc = EventServiceServer::new(EventSvc::new(app.meta.clone()).with_guard(guard.clone()));
     let repo_svc = RepoServiceServer::new(
         RepoSvc::new(app.meta.clone())
             .with_guard(guard.clone())
@@ -278,6 +314,7 @@ pub async fn serve(
         .add_service(auth_svc)
         .add_service(admin_svc)
         .add_service(repo_svc)
+        .add_service(event_svc)
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
             shutdown.await;
             // 结束 WatchRefs 的长连接，否则优雅停机会一直等它们
@@ -371,6 +408,7 @@ mod tests {
             std::time::Duration::from_secs(3600),
             std::time::Duration::from_secs(60),
             std::time::Duration::from_secs(24 * 3600),
+            std::time::Duration::from_secs(3600),
         ));
         // 第一次 tick 立即触发
         for _ in 0..10 {

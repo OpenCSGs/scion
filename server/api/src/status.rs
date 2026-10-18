@@ -261,6 +261,9 @@ pub fn from_store(err: scion_store::Error) -> Status {
             format!("repository {repo:?} was deleted and is pending purge; restore it or wait until it is purged"),
             HashMap::from([("repo".to_string(), repo)]),
         ),
+        E::RepoPurging(repo) => Status::failed_precondition(format!(
+            "repository {repo:?} is being purged and can no longer be restored"
+        )),
         E::InvalidRepoName(repo) => Status::invalid_argument(format!("invalid repository name {repo:?}")),
         E::RefVersionMismatch { name, current } => with_reason(
             Code::FailedPrecondition,
@@ -398,6 +401,7 @@ mod tests {
         let (reason, _, md) = info(&s);
         assert_eq!((reason.as_str(), md["repo"].as_str()), ("REPO_DELETED", "r"));
         assert_eq!(from_store(E::InvalidRepoName("r".into())).code(), Code::InvalidArgument);
+        assert_eq!(from_store(E::RepoPurging("r".into())).code(), Code::FailedPrecondition);
         let s = from_store(E::RefVersionMismatch {
             name: "main".into(),
             current: Some(4),

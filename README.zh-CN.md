@@ -13,6 +13,7 @@
 **使用指南**
 - [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
+- [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
 - [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查
@@ -49,6 +50,10 @@
 
 - **仓库与分支管理**：`RepoService`（创建、列出、修改、软删除并可在宽限期内恢复、fork），以及分支的创建、移动与删除；命令行为 `scn repo`、`scn branch`。
 - **部署**：包含 `scion` 和 `scn` 的 Docker 镜像，以及 PostgreSQL + SeaweedFS 的 docker compose。
+- **ref 变化事件**：
+  - 每次 ref 变化都与修改同一事务写入一条按序号排列的事件；
+  - 消费方可以用 `EventService.ListRefEvents` 按序号拉取；
+  - 也可以由服务端把带提交与路径级改动的事件推送到 webhook（HMAC 签名）或 NATS JetStream，按顺序、至少送达一次。
 
 M5 后续还有 YugabyteDB、Helm 与混沌测试。
 

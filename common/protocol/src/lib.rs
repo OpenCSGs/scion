@@ -65,6 +65,8 @@ pub mod features {
     pub const REPOS_ADMIN: &str = "repos.admin";
     /// RefService 的 CreateRef / UpdateRef / DeleteRef。
     pub const REFS_WRITE: &str = "refs.write";
+    /// EventService.ListRefEvents：按序号增量读取 ref 变化。
+    pub const EVENTS: &str = "events";
 }
 
 #[cfg(test)]

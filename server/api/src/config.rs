@@ -87,6 +87,8 @@ pub struct ServerConfig {
     pub purge_grace: std::time::Duration,
     /// 删除的仓库保留多久（期间可以恢复），之后 janitor 清除数据、释放名字。不小于 2 小时。
     pub repo_delete_grace: std::time::Duration,
+    /// ref 变化的推送目标与事件保留期。
+    pub events: crate::events::EventsConfig,
 }
 
 /// 令牌桶参数：每秒补充 `per_second` 个，最多积攒 `burst` 个。
@@ -118,6 +120,10 @@ impl Default for ServerConfig {
             blob_cache: scion_store::BlobCacheConfig::default(),
             purge_grace: std::time::Duration::from_secs(24 * 3600),
             repo_delete_grace: std::time::Duration::from_secs(24 * 3600),
+            events: crate::events::EventsConfig {
+                retention: std::time::Duration::from_secs(7 * 24 * 3600),
+                ..Default::default()
+            },
             auth: scion_auth::GuardConfig::default(),
             policy_poll_interval: std::time::Duration::from_secs(30),
         }

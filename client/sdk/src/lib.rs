@@ -33,7 +33,7 @@ pub use info::{Limits, ProtocolVersion, ReadEndpoint, Role, ServerInfo};
 pub use ops::{
     ChangesetBuilder, CreatedChangeset, DirEntry, LAND_ATTEMPTS, Landed, LandedChangeset, Person, RefTip, Signature,
 };
-pub use repos::{NewRepo, RepoInfo, RepoPage};
+pub use repos::{NewRepo, RefEventInfo, RefEventPage, RepoInfo, RepoPage};
 pub use scion_object::{EntryMode, ObjectId, ObjectKind};
 /// gRPC 状态码，出现在 [`Error::Rpc`] 中。
 pub use tonic::Code;

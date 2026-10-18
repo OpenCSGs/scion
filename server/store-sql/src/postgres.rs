@@ -8,15 +8,16 @@ use async_trait::async_trait;
 use scion_object::ObjectId;
 use scion_store::{
     ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result,
-    TokenRecord, prefix_upper_bound, validate_repo_name,
+    PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch,
+    Result, TokenRecord, prefix_upper_bound, validate_repo_name,
 };
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use crate::common::{
-    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REPO_COLUMNS, REPO_TABLES,
-    RedactionRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation, list_limit, now_ms, purge_limit,
-    record_from_row, redaction_from_row, repo_from_row, size_to_db, subtract_present, version_from_db, version_to_db,
+    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REF_EVENT_COLUMNS,
+    REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation,
+    list_limit, now_ms, purge_limit, record_from_row, redaction_from_row, ref_event_from_row, repo_from_row,
+    size_to_db, subtract_present, version_from_db, version_to_db,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -77,6 +78,36 @@ impl PgMetaStore {
             Ok(_) => Error::RepoAlreadyExists(repo.to_owned()),
             Err(e) => backend("lookup repo", e),
         }
+    }
+
+    /// 在事务中追加一条 ref 变化（分配下一个 seq）。
+    async fn insert_ref_event(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        repo: &str,
+        name: &str,
+        old: Option<&[u8]>,
+        new: Option<&[u8]>,
+        version: u64,
+    ) -> Result<()> {
+        let seq: i64 = sqlx::query_scalar("UPDATE ref_event_seq SET seq = seq + 1 WHERE id = 1 RETURNING seq")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| backend("allocate ref event seq", e))?;
+        sqlx::query(
+            "INSERT INTO ref_events (seq, repo, ref, old_target, new_target, version, created_at_ms) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(seq)
+        .bind(repo)
+        .bind(name)
+        .bind(old)
+        .bind(new)
+        .bind(version_to_db(version)?)
+        .bind(now_ms())
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| backend("append ref event", e))?;
+        Ok(())
     }
 }
 
@@ -185,6 +216,21 @@ impl MetaStore for PgMetaStore {
             .execute(&mut *tx)
             .await
             .map_err(|e| backend("append ref log", e))?;
+
+        // 事件：变化前的提交取自审计日志中的上一版本（新建时没有）
+        let old: Option<Vec<u8>> = match new_version.checked_sub(1).filter(|v| *v > 0) {
+            Some(prev) => {
+                sqlx::query_scalar("SELECT target FROM ref_log WHERE repo_id = $1 AND name = $2 AND version = $3")
+                    .bind(repo_id)
+                    .bind(name)
+                    .bind(version_to_db(prev)?)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| backend("read ref log", e))?
+            }
+            None => None,
+        };
+        Self::insert_ref_event(&mut tx, repo, name, old.as_deref(), Some(&target_bytes), new_version).await?;
         let now = now_ms();
         for l in landed {
             sqlx::query(
@@ -592,24 +638,43 @@ impl MetaStore for PgMetaStore {
     }
 
     async fn restore_repo(&self, repo: &str) -> Result<()> {
-        let done = sqlx::query("UPDATE repos SET deleted_at_ms = NULL WHERE name = $1 AND deleted_at_ms IS NOT NULL")
-            .bind(repo)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| backend("restore repo", e))?;
+        let done = sqlx::query(
+            "UPDATE repos SET deleted_at_ms = NULL WHERE name = $1 AND deleted_at_ms IS NOT NULL AND NOT purging",
+        )
+        .bind(repo)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| backend("restore repo", e))?;
         if done.rows_affected() == 0 {
-            return Err(Error::RepoNotFound(repo.to_owned()));
+            let purging: Option<bool> =
+                sqlx::query_scalar("SELECT purging FROM repos WHERE name = $1 AND deleted_at_ms IS NOT NULL")
+                    .bind(repo)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| backend("restore repo", e))?;
+            return Err(match purging {
+                Some(true) => Error::RepoPurging(repo.to_owned()),
+                _ => Error::RepoNotFound(repo.to_owned()),
+            });
         }
         Ok(())
     }
 
     async fn purge_repo(&self, repo: &str, batch: usize) -> Result<bool> {
-        let id: i64 = sqlx::query_scalar("SELECT repo_id FROM repos WHERE name = $1 AND deleted_at_ms IS NOT NULL")
-            .bind(repo)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| backend("lookup deleted repo", e))?
-            .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))?;
+        // 每一批一个事务。第一句就是写：锁住仓库行、确认仍是已删除，并标记清除已开始（之后恢复会失败）。
+        // 恢复与清除因此不会交错：要么恢复先提交、这里找不到已删除的仓库，要么清除先开始、恢复被拒绝。
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let id: Option<i64> = sqlx::query_scalar(
+            "UPDATE repos SET purging = TRUE WHERE name = $1 AND deleted_at_ms IS NOT NULL RETURNING repo_id",
+        )
+        .bind(repo)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| backend("lock deleted repo", e))?;
+        let Some(id) = id else {
+            tx.rollback().await.map_err(|e| backend("rollback", e))?;
+            return Err(Error::RepoNotFound(repo.to_owned()));
+        };
         // 每次只删一张表中的一批行，单个事务保持短小
         for (table, key) in REPO_TABLES {
             let done = sqlx::query(&format!(
@@ -618,18 +683,20 @@ impl MetaStore for PgMetaStore {
             ))
             .bind(id)
             .bind(purge_limit(batch))
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| backend("purge repo", e))?;
             if done.rows_affected() > 0 {
+                tx.commit().await.map_err(|e| backend("commit", e))?;
                 return Ok(false);
             }
         }
-        sqlx::query("DELETE FROM repos WHERE repo_id = $1")
+        sqlx::query("DELETE FROM repos WHERE repo_id = $1 AND deleted_at_ms IS NOT NULL")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|e| backend("purge repo", e))?;
+        tx.commit().await.map_err(|e| backend("commit", e))?;
         Ok(true)
     }
 
@@ -684,6 +751,31 @@ impl MetaStore for PgMetaStore {
             .await
             .map_err(|e| backend("fork repo", e))?;
         }
+        // 每个复制过来的 ref 一条创建事件
+        let refs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM refs WHERE repo_id = $1")
+            .bind(dst_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| backend("fork events", e))?;
+        if refs > 0 {
+            let last: i64 = sqlx::query_scalar("UPDATE ref_event_seq SET seq = seq + $1 WHERE id = 1 RETURNING seq")
+                .bind(refs)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| backend("allocate ref event seq", e))?;
+            sqlx::query(
+                "INSERT INTO ref_events (seq, repo, ref, old_target, new_target, version, created_at_ms) \
+                 SELECT $1 + ROW_NUMBER() OVER (ORDER BY name), $2, name, NULL, target, version, $3 \
+                 FROM refs WHERE repo_id = $4",
+            )
+            .bind(last - refs)
+            .bind(target)
+            .bind(now_ms)
+            .bind(dst_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| backend("fork events", e))?;
+        }
         // 有效的 redaction 一并复制，按对象顺序分配新的 seq（缓存层按 seq 增量同步）
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM redactions WHERE repo_id = $1 AND active")
             .bind(src_id)
@@ -713,28 +805,71 @@ impl MetaStore for PgMetaStore {
         tx.commit().await.map_err(|e| backend("commit", e))
     }
 
+    async fn list_ref_events(&self, after_seq: u64, limit: usize, repo: Option<&str>) -> Result<Vec<RefEvent>> {
+        let filter = if repo.is_some() { "AND repo = $3" } else { "" };
+        let rows: Vec<RefEventRow> = sqlx::query_as(&format!(
+            "SELECT {REF_EVENT_COLUMNS} FROM ref_events WHERE seq > $1 {filter} ORDER BY seq LIMIT $2"
+        ))
+        .bind(version_to_db(after_seq)?)
+        .bind(list_limit(limit))
+        .bind(repo)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| backend("list ref events", e))?;
+        rows.into_iter().map(ref_event_from_row).collect()
+    }
+
+    async fn ref_event_bounds(&self) -> Result<(Option<u64>, u64)> {
+        let (lo, hi): (Option<i64>, i64) =
+            sqlx::query_as("SELECT (SELECT MIN(seq) FROM ref_events), seq FROM ref_event_seq WHERE id = 1")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| backend("ref event bounds", e))?;
+        Ok((lo.map(version_from_db).transpose()?, version_from_db(hi)?))
+    }
+
+    async fn prune_ref_events(&self, before_ms: i64) -> Result<u64> {
+        let done = sqlx::query("DELETE FROM ref_events WHERE created_at_ms < $1")
+            .bind(before_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("prune ref events", e))?;
+        Ok(done.rows_affected())
+    }
+
     async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
         let repo_id = self.repo_id(repo).await?;
         let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
-        let done = match expect {
-            Some(v) => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND version = $3")
-                .bind(repo_id)
-                .bind(name)
-                .bind(version_to_db(v)?),
-            None => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2")
+        let deleted: Option<(Vec<u8>, i64)> = match expect {
+            Some(v) => sqlx::query_as(
+                "DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND version = $3 RETURNING target, version",
+            )
+            .bind(repo_id)
+            .bind(name)
+            .bind(version_to_db(v)?),
+            None => sqlx::query_as("DELETE FROM refs WHERE repo_id = $1 AND name = $2 RETURNING target, version")
                 .bind(repo_id)
                 .bind(name),
         }
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| backend("delete ref", e))?;
-        if done.rows_affected() == 0 {
+        let Some((old_target, old_version)) = deleted else {
             tx.rollback().await.map_err(|e| backend("rollback", e))?;
             return Err(Error::RefVersionMismatch {
                 name: name.to_owned(),
                 current: self.current_version(repo_id, name).await?,
             });
-        }
+        };
+        Self::insert_ref_event(
+            &mut tx,
+            repo,
+            name,
+            Some(&old_target),
+            None,
+            version_from_db(old_version)?,
+        )
+        .await?;
         // 重新创建的 ref 版本从 1 开始，旧的审计记录会与之冲突：随 ref 一起删除
         sqlx::query("DELETE FROM ref_log WHERE repo_id = $1 AND name = $2")
             .bind(repo_id)
@@ -1320,6 +1455,7 @@ mod tests {
         testsuite::tokens_and_settings(&s).await;
         testsuite::redactions(&s).await;
         testsuite::repo_admin(&s).await;
+        testsuite::ref_events(&s).await;
     }
 
     #[tokio::test]

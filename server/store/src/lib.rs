@@ -84,6 +84,22 @@ pub fn prefix_upper_bound(prefix: &str) -> String {
     format!("{prefix}\u{7f}")
 }
 
+/// 一次 ref 变化（`ref_events` 表）。与 ref 的修改在同一个事务里写入，`seq` 全局递增且与提交顺序一致，
+/// 消费方按 `seq` 增量读取，不会漏掉变化。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefEvent {
+    pub seq: u64,
+    pub repo: String,
+    pub name: String,
+    /// 变化前的提交；`None` 表示 ref 是新建的。
+    pub old_target: Option<ObjectId>,
+    /// 变化后的提交；`None` 表示 ref 被删除。
+    pub new_target: Option<ObjectId>,
+    /// 变化后的版本（删除时为被删除的版本）。
+    pub version: u64,
+    pub created_at_ms: i64,
+}
+
 /// ref 的当前状态。`version` 每次更新加 1，作为 CAS 条件和 fencing token。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefState {
@@ -375,6 +391,22 @@ pub trait MetaStore: Send + Sync + 'static {
     /// 全部 ref 和有效的 redaction（重新分配 seq）。合入记录和请求结果不复制。
     async fn fork_repo(&self, _source: &str, _target: &str, _now_ms: i64) -> Result<()> {
         Err(unsupported("repository forks"))
+    }
+
+    /// 按 `seq` 升序读取 `after_seq` 之后的 ref 变化，最多 `limit` 条；`repo` 不为空时只返回该仓库的。
+    async fn list_ref_events(&self, _after_seq: u64, _limit: usize, _repo: Option<&str>) -> Result<Vec<RefEvent>> {
+        Err(unsupported("ref events"))
+    }
+
+    /// (仍保留的最小 `seq`, 已分配的最大 `seq`)。全部清理后最小值为 `None`，最大值仍是计数器的值，
+    /// 消费方据此判断自己落后的部分是否已被清理。
+    async fn ref_event_bounds(&self) -> Result<(Option<u64>, u64)> {
+        Err(unsupported("ref events"))
+    }
+
+    /// 删除早于 `before_ms` 的 ref 变化，返回删除的条数。
+    async fn prune_ref_events(&self, _before_ms: i64) -> Result<u64> {
+        Err(unsupported("ref events"))
     }
 
     /// 删除 ref。`expect` 为 `Some(v)` 时要求当前版本等于 v。ref 不存在或版本不符时返回

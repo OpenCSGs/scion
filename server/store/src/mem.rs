@@ -11,8 +11,8 @@ use crate::error::{Error, Result};
 use crate::repo::validate_repo_name;
 use crate::{
     BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, TokenRecord,
-    path_within, prefix_upper_bound,
+    PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch,
+    TokenRecord, path_within, prefix_upper_bound,
 };
 
 #[derive(Clone)]
@@ -58,6 +58,23 @@ struct Inner {
     settings: HashMap<String, Vec<u8>>,
     redactions: BTreeMap<(String, ObjectId), Redaction>,
     redaction_seq: u64,
+    ref_events: std::collections::VecDeque<RefEvent>,
+    ref_event_seq: u64,
+}
+
+impl Inner {
+    fn push_event(&mut self, repo: &str, name: &str, old: Option<ObjectId>, new: Option<ObjectId>, version: u64) {
+        self.ref_event_seq += 1;
+        self.ref_events.push_back(RefEvent {
+            seq: self.ref_event_seq,
+            repo: repo.to_owned(),
+            name: name.to_owned(),
+            old_target: old,
+            new_target: new,
+            version,
+            created_at_ms: now_ms(),
+        });
+    }
 }
 
 fn now_ms() -> i64 {
@@ -253,7 +270,42 @@ impl MetaStore for MemStore {
             };
             inner.redactions.insert((target.to_owned(), rec.id), rec);
         }
+        let mut refs: Vec<(String, RefState)> = repo_ref(&inner, target)?
+            .refs
+            .iter()
+            .map(|(n, s)| (n.clone(), *s))
+            .collect();
+        refs.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, s) in refs {
+            inner.push_event(target, &name, None, Some(s.target), s.version);
+        }
         Ok(())
+    }
+
+    async fn list_ref_events(&self, after_seq: u64, limit: usize, repo: Option<&str>) -> Result<Vec<RefEvent>> {
+        Ok(self
+            .read()?
+            .ref_events
+            .iter()
+            .filter(|e| e.seq > after_seq && repo.is_none_or(|r| r == e.repo))
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+
+    async fn ref_event_bounds(&self) -> Result<(Option<u64>, u64)> {
+        let inner = self.read()?;
+        Ok((inner.ref_events.front().map(|e| e.seq), inner.ref_event_seq))
+    }
+
+    async fn prune_ref_events(&self, before_ms: i64) -> Result<u64> {
+        let mut inner = self.write()?;
+        let mut n = 0;
+        while inner.ref_events.front().is_some_and(|e| e.created_at_ms < before_ms) {
+            inner.ref_events.pop_front();
+            n += 1;
+        }
+        Ok(n)
     }
 
     async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
@@ -266,7 +318,9 @@ impl MetaStore for MemStore {
                 current,
             }),
             (Some(_), _) => {
-                data.refs.remove(name);
+                if let Some(old) = data.refs.remove(name) {
+                    inner.push_event(repo, name, Some(old.target), None, old.version);
+                }
                 Ok(())
             }
             (None, _) => Err(Error::RefVersionMismatch {
@@ -293,6 +347,7 @@ impl MetaStore for MemStore {
         let mut inner = self.write()?;
         let data = repo_mut(&mut inner, repo)?;
         let current = data.refs.get(name).map(|r| r.version);
+        let old_target = data.refs.get(name).map(|r| r.target);
         let next_version = match (expect, current) {
             (RefExpect::Absent, None) => 1,
             (RefExpect::Version(want), Some(cur)) if want == cur => cur
@@ -318,6 +373,7 @@ impl MetaStore for MemStore {
                 .entry(r.request_id.clone())
                 .or_insert_with(|| r.clone());
         }
+        inner.push_event(repo, name, old_target, Some(target), next_version);
         Ok(state)
     }
 
@@ -693,6 +749,7 @@ mod tests {
         testsuite::tokens_and_settings(&MemStore::new()).await;
         testsuite::redactions(&MemStore::new()).await;
         testsuite::repo_admin(&MemStore::new()).await;
+        testsuite::ref_events(&MemStore::new()).await;
     }
 
     #[tokio::test]

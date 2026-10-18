@@ -102,3 +102,51 @@ scion server ... \
 | `scion_events_delivered_total{sink}` | 成功推送的事件数 |
 | `scion_event_delivery_failures_total{sink}` | 失败的推送尝试（之后会重试） |
 | `scion_event_lag{sink}` | 尚未推送的事件数 |
+
+## 合入前检查
+
+合入（`scn land`、`LandService.Land`）、创建分支和移动分支（`CreateRef` / `UpdateRef`）之前，服务端可以把要引入的改动交给外部服务检查，例如内容审查、文件类型或大小限制。
+
+```sh
+scion server ... \
+  --pre-land-webhook https://csghub.example.com/api/v1/scion/pre-land \
+  --pre-land-secret "$SECRET" \
+  [--pre-land-timeout 5s] [--pre-land-fail-open]
+```
+
+### 请求
+
+`POST` JSON，请求头 `X-Scion-Event: pre-land`，配置了密钥时带 `X-Scion-Signature-256`（与事件推送相同的 HMAC 格式）。
+
+```json
+{
+  "type": "pre-land",
+  "repo": "opencsg/qwen",
+  "ref": "main",
+  "old": "c1…",
+  "new": "c1…",
+  "pusher": {"subject": "alice", "groups": ["dev"], "authenticated": true},
+  "commits": [ … ],
+  "commits_truncated": false
+}
+```
+
+- **`old` 与 `new`**：`old` 为 ref 当前的提交（ref 不存在时为空），`new` 为客户端提交的版本。
+- **`commits`**：要引入的提交，格式与事件推送相同（路径级改动，不含文件内容）。
+  - 范围：从 `new` 可达、从 `old` 不可达的提交；
+  - 新建分支时以默认分支为基准，默认分支上已有的内容合入时已经检查过；
+  - 没有新提交时（重复合入、回退、指向已有内容）不调用检查服务。
+
+合入会在服务端 rebase，检查的是客户端提交的版本。rebase 不改变每个提交的改动。
+
+### 响应
+
+| 响应 | 结果 |
+|---|---|
+| 2xx | 允许；响应体为 `{"allowed": false, "message": "…"}` 时拒绝 |
+| 4xx（408、429 除外） | 拒绝，响应体作为原因 |
+| 其它状态、超时、连接失败 | 检查服务不可用：默认拒绝（`UNAVAILABLE`，客户端可以重试），设置 `--pre-land-fail-open` 时放行 |
+
+- **拒绝时**：客户端收到 `FAILED_PRECONDITION` / `PRE_LAND_REJECTED`，`metadata.message` 为原因，`scn` 会显示它。
+- **集群**：转发给 leader 的合入在第一个节点检查。配置了 `--cluster-secret` 时，leader 不再重复检查。
+- **指标**：`scion_pre_land_checks_total{outcome="allowed|denied|error"}`。

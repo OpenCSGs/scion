@@ -58,6 +58,8 @@ enum ErrorReason {
   ERROR_REASON_REPO_ALREADY_EXISTS = 17;
   // 仓库已删除、尚未清除，名字暂不能使用（ALREADY_EXISTS）。metadata.repo，可以用 RestoreRepo 恢复。
   ERROR_REASON_REPO_DELETED = 18;
+  // 合入前检查（服务端 --pre-land-webhook）拒绝了这次改动（FAILED_PRECONDITION）。metadata.message 为检查服务给出的原因。
+  ERROR_REASON_PRE_LAND_REJECTED = 19;
 }
 
 // 目录条目类型，取值与 SPEC.md §4 的 mode 字节一致。

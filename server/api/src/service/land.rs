@@ -52,6 +52,8 @@ pub struct LandSvc {
     guard: Arc<Guard>,
     /// 集群共享密钥：转发时作为 [`FORWARDED_HEADER`] 的值，收到时据此认定是本集群转发的。
     cluster_secret: Option<Arc<str>>,
+    /// 合入前检查（外部 webhook）。
+    pre_land: Option<Arc<crate::prehook::PreLand>>,
 }
 
 impl LandSvc {
@@ -63,7 +65,14 @@ impl LandSvc {
             hub: None,
             guard: Guard::disabled(),
             cluster_secret: None,
+            pre_land: None,
         }
+    }
+
+    /// 合入之前调用外部检查；本集群转发来的请求已在第一个节点检查过。
+    pub fn with_pre_land(mut self, hook: Option<Arc<crate::prehook::PreLand>>) -> Self {
+        self.pre_land = hook;
+        self
     }
 
     pub fn with_cluster_secret(mut self, secret: Option<Arc<str>>) -> Self {
@@ -223,6 +232,9 @@ impl LandService for LandSvc {
         let cs_id = parse_id(&req.changeset_id)?;
         if !trusted {
             RateLimiter::admit(self.limiter.as_deref(), &req.repo)?;
+            if let Some(hook) = &self.pre_land {
+                hook.check(&p, &req.repo, &req.r#ref, cs_id).await?;
+            }
         }
         let request_id = Some(req.request_id.as_str()).filter(|id| !id.is_empty());
         let out = match self

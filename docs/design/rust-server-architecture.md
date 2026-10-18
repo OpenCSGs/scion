@@ -695,6 +695,15 @@ SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architectur
 >   - 与原设计的差别：subject 不含仓库名（仓库名可以包含 `.`）。
 > - **推迟**：仓库级事件（创建、删除、fork 本身）、webhook 按仓库或按事件类型过滤、多个 webhook。
 
+> **合入前检查实现说明**（2026-10-18）：starhub 接入 S1 的推送前检查。
+> - **检查时机**：`Land`、`CreateRef`、`UpdateRef` 在授权和限流之后、进入合入队列之前，同步调用外部 webhook。
+>   - 检查的是客户端提交的版本（服务端 rebase 不改变每个提交的 delta），所以放在协调器之外，不拖慢批处理。
+>   - 本集群转发来的合入（带正确的 `--cluster-secret`）不再检查。
+> - **检查的范围**：`new_commits(base, tip)`，base 为 ref 当前提交；新建的 ref 以默认分支为基准。没有新提交时不调用。
+> - **结果**：2xx 允许（可以用 `{"allowed": false}` 拒绝）；4xx（408、429 除外）拒绝；其它情况视为不可用，默认拒绝（fail-closed）。
+>   - 配置了检查却无法创建 HTTP 客户端时一律拒绝，不会悄悄跳过检查。
+>   - 拒绝返回新的 `PRE_LAND_REJECTED`。
+
 | **M5 生产化** | 4 周 | YugabyteDB 档与 `migrate-meta` 工具、ACL/OIDC/JWT、redaction、OTel、Helm、混沌测试、多区域 follower read、`conformance` 发布 | 全部 SLO 达标；单 AZ 故障演练通过 |
 
 ---

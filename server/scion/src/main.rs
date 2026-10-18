@@ -240,6 +240,19 @@ struct EventArgs {
         env = "SCION_EVENT_NATS_SUBJECT"
     )]
     event_nats_subject: String,
+    /// 合入前检查：合入、创建或移动 ref 之前把要引入的提交 POST 到这个地址，由它决定是否允许。
+    #[arg(long, value_name = "URL", env = "SCION_PRE_LAND_WEBHOOK")]
+    pre_land_webhook: Option<String>,
+    /// 合入前检查的签名密钥（X-Scion-Signature-256）。
+    #[arg(long, value_name = "SECRET", env = "SCION_PRE_LAND_SECRET", hide_env_values = true)]
+    pre_land_secret: Option<String>,
+    /// 合入前检查的超时。
+    #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration,
+        env = "SCION_PRE_LAND_TIMEOUT")]
+    pre_land_timeout: std::time::Duration,
+    /// 检查服务不可用（超时、5xx、连接失败）时放行；默认拒绝。
+    #[arg(long, env = "SCION_PRE_LAND_FAIL_OPEN")]
+    pre_land_fail_open: bool,
     /// 事件在元数据库中保留多久（ListRefEvents 与推送都受它限制）。
     #[arg(long, value_name = "DURATION", default_value = "7d", value_parser = parse_duration,
         env = "SCION_EVENT_RETENTION")]
@@ -268,6 +281,21 @@ impl EventArgs {
             nats,
             retention: self.event_retention,
         })
+    }
+
+    fn pre_land(&self) -> anyhow::Result<Option<scion_api::prehook::PreLandConfig>> {
+        match &self.pre_land_webhook {
+            Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
+                Ok(Some(scion_api::prehook::PreLandConfig {
+                    url: url.clone(),
+                    secret: self.pre_land_secret.clone().filter(|s| !s.is_empty()),
+                    timeout: self.pre_land_timeout,
+                    fail_open: self.pre_land_fail_open,
+                }))
+            }
+            Some(url) => anyhow::bail!("--pre-land-webhook must be an http:// or https:// URL, got {url:?}"),
+            None => Ok(None),
+        }
     }
 }
 
@@ -562,6 +590,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             purge_grace: args.purge_grace,
             repo_delete_grace: args.repo_delete_grace,
             events: args.events.config()?,
+            pre_land: args.events.pre_land()?,
             ..ServerConfig::default()
         }),
         meta,
@@ -1145,6 +1174,31 @@ mod tests {
         );
         assert_eq!(e.retention, std::time::Duration::from_secs(86_400));
         assert!(build_app(&args(&["--event-webhook", "ftp://x"]), no_env).await.is_err());
+        assert!(app.config.pre_land.is_none());
+        let (app, _) = build_app(
+            &args(&[
+                "--pre-land-webhook",
+                "https://check.example.com/scion",
+                "--pre-land-secret",
+                "k",
+                "--pre-land-timeout",
+                "2s",
+                "--pre-land-fail-open",
+            ]),
+            no_env,
+        )
+        .await
+        .expect("pre-land");
+        let p = app.config.pre_land.as_ref().expect("configured");
+        assert_eq!(
+            (p.secret.as_deref(), p.timeout, p.fail_open),
+            (Some("k"), std::time::Duration::from_secs(2), true)
+        );
+        assert!(
+            build_app(&args(&["--pre-land-webhook", "check"]), no_env)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

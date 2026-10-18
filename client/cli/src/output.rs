@@ -103,6 +103,9 @@ impl CliError {
             CliError::Client(e) if e.reason() == Some(ErrorReason::RepoNotFound) => {
                 Some("check the repository name, or create it with `scn repo create NAME`")
             }
+            CliError::Client(e) if e.reason() == Some(ErrorReason::PreLandRejected) => {
+                Some("the server's pre-land check rejected this change; fix what the message says and land again")
+            }
             CliError::Client(e) if e.reason() == Some(ErrorReason::RepoDeleted) => {
                 Some("the repository was deleted; restore it with `scn repo restore NAME`, or wait until it is purged")
             }
@@ -364,6 +367,11 @@ mod tests {
                 .contains("scn sync")
         );
         assert!(rpc(Code::NotFound, Some(ErrorReason::RepoNotFound)).hint().is_some());
+        assert!(
+            rpc(Code::FailedPrecondition, Some(ErrorReason::PreLandRejected))
+                .hint()
+                .is_some()
+        );
         assert!(
             rpc(Code::AlreadyExists, Some(ErrorReason::RepoDeleted))
                 .hint()

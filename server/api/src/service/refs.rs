@@ -33,6 +33,7 @@ pub struct RefSvc {
     meta: Arc<dyn MetaStore>,
     hub: Arc<RefHub>,
     guard: Arc<Guard>,
+    pre_land: Option<Arc<crate::prehook::PreLand>>,
 }
 
 impl RefSvc {
@@ -41,7 +42,14 @@ impl RefSvc {
             meta,
             hub,
             guard: Guard::disabled(),
+            pre_land: None,
         }
+    }
+
+    /// 创建或移动 ref 之前调用外部检查（与合入相同）。
+    pub fn with_pre_land(mut self, hook: Option<Arc<crate::prehook::PreLand>>) -> Self {
+        self.pre_land = hook;
+        self
     }
 
     pub fn with_guard(mut self, guard: Arc<Guard>) -> Self {
@@ -67,6 +75,9 @@ impl RefSvc {
             .is_none()
         {
             return Err(status::object_missing(&[id]));
+        }
+        if let Some(hook) = &self.pre_land {
+            hook.check(p, repo, reference, id).await?;
         }
         Ok(id)
     }

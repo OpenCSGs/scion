@@ -1,12 +1,13 @@
 //! Scion 工作副本（客户端设计文档 §5）。
 //!
-//! M1 范围：完整检出、status、commit、land（快进）、sync（本地无改动时）。
-//! 稀疏检出、自动 rebase、操作日志在后续里程碑加入。
+//! 检出（可以是稀疏检出，见 [`Sparse`]）、status、commit、land、sync（含客户端 rebase）。
+//! 操作日志在后续里程碑加入。
 //!
 //! 工作副本只依赖公开协议：所有数据通过 [`scion_client::Client`] 取得。
 
 mod error;
 mod fsutil;
+mod sparse;
 mod state;
 
 use std::collections::BTreeMap;
@@ -17,6 +18,7 @@ use scion_client::{Client, CreatedChangeset, Landed};
 use scion_object::{EntryMode, ObjectId, Tree};
 
 pub use error::{Error, Result};
+pub use sparse::Sparse;
 pub use state::{DirState, FileRecord, Mode, State};
 
 use crate::fsutil::Found;
@@ -91,8 +93,8 @@ pub struct WorkingCopy {
 /// 每次批量读取的对象数（SDK 还会按服务端上限再分批）。
 const FETCH_BATCH: usize = 256;
 
-/// 递归展开目录树，得到 `路径 → 文件`。按层批量读取目录树。
-async fn flatten(client: &Client, root: ObjectId) -> Result<BTreeMap<String, TreeFile>> {
+/// 递归展开目录树，得到稀疏范围内的 `路径 → 文件`。按层批量读取目录树；范围外的子树不读取。
+async fn flatten(client: &Client, root: ObjectId, sparse: &Sparse) -> Result<BTreeMap<String, TreeFile>> {
     let mut out = BTreeMap::new();
     let mut level = vec![(String::new(), root)];
     while !level.is_empty() {
@@ -109,10 +111,11 @@ async fn flatten(client: &Client, root: ObjectId) -> Result<BTreeMap<String, Tre
                         format!("{prefix}/{}", e.name)
                     };
                     match Mode::from_entry(e.mode) {
-                        Some(mode) => {
+                        Some(mode) if sparse.includes_file(&path) => {
                             out.insert(path, TreeFile { mode, id: e.id });
                         }
-                        None => next.push((path, e.id)),
+                        None if sparse.descends(&path) => next.push((path, e.id)),
+                        _ => {}
                     }
                 }
             }
@@ -168,8 +171,16 @@ async fn checkout_files(
 }
 
 impl WorkingCopy {
-    /// 把 `repo` 的 `reference` 检出到 `dir`（目录必须不存在或为空）。ref 不存在时得到空的工作副本。
-    pub async fn clone(client: &Client, endpoint: &str, repo: &str, reference: &str, dir: &Path) -> Result<Self> {
+    /// 把 `repo` 的 `reference` 检出到 `dir`（目录必须不存在或为空），只检出 `sparse` 范围内的文件。
+    /// ref 不存在时得到空的工作副本。
+    pub async fn clone(
+        client: &Client,
+        endpoint: &str,
+        repo: &str,
+        reference: &str,
+        dir: &Path,
+        sparse: Sparse,
+    ) -> Result<Self> {
         if dir.exists() && std::fs::read_dir(dir).map_err(error::io(dir))?.next().is_some() {
             return Err(Error::TargetNotEmpty(dir.to_path_buf()));
         }
@@ -177,9 +188,10 @@ impl WorkingCopy {
         std::fs::create_dir_all(paths.meta_dir()).map_err(error::io(paths.meta_dir()))?;
         let _lock = paths.lock()?;
         let mut state = State::new(endpoint, repo, reference);
+        state.sparse = sparse.list().map(<[String]>::to_vec);
         let mut dirstate = DirState::default();
         if let Some(tip) = client.resolve_ref(reference).await? {
-            let files = flatten(client, tip.root_tree).await?;
+            let files = flatten(client, tip.root_tree, &sparse).await?;
             dirstate.files.extend(checkout_files(client, dir, &files).await?);
             state.base = Some(tip.changeset.to_string());
         }
@@ -203,10 +215,45 @@ impl WorkingCopy {
         &self.state
     }
 
+    /// 稀疏检出的范围。
+    pub fn sparse(&self) -> Result<Sparse> {
+        Sparse::from_state(self.state.sparse.as_deref())
+    }
+
+    /// 改变稀疏检出的范围：检出新加入的目录，删除移出范围的文件。要求没有未提交的改动。
+    /// 返回 (写入数, 删除数)。
+    pub async fn set_sparse(&mut self, client: &Client, sparse: Sparse) -> Result<(usize, usize)> {
+        let _lock = self.paths.lock()?;
+        if !self.changes()?.0.is_clean() {
+            return Err(Error::Dirty);
+        }
+        let mut counts = (0, 0);
+        if let Some(current) = self.state.current()? {
+            // 检出的是当前快照（有未合入的提交时为它），范围内外的文件版本一致，差异只有增删
+            let target = flatten(client, client.root_tree(&current.to_string()).await?, &sparse).await?;
+            let mut dirstate = self.paths.load_dirstate()?;
+            let delta = diff(&snapshot(&dirstate)?, &target);
+            counts = self.apply(client, &mut dirstate, &delta).await?;
+            self.paths.save_dirstate(&mut dirstate)?;
+        }
+        self.state.sparse = sparse.list().map(<[String]>::to_vec);
+        self.paths.save_state(&self.state)?;
+        Ok(counts)
+    }
+
     /// 计算相对当前快照的改动，同时返回提交所需的内容。
     fn changes(&self) -> Result<(Status, Vec<Change>)> {
         let dirstate = self.paths.load_dirstate()?;
         let found = fsutil::scan(self.root())?;
+        let sparse = self.sparse()?;
+        let outside: Vec<String> = found
+            .keys()
+            .filter(|p| !sparse.includes_file(p) && !dirstate.files.contains_key(*p))
+            .cloned()
+            .collect();
+        if !outside.is_empty() {
+            return Err(Error::OutsideSparse(outside));
+        }
         let mut status = Status::default();
         let mut changes = Vec::new();
         for (path, f) in &found {
@@ -349,8 +396,9 @@ impl WorkingCopy {
         };
         if landed.tip != head {
             // ref 上包含了别人的改动（rebase 或提交早已在历史中）：工作区从 head 更新到新的 tip
-            let from = flatten(client, client.root_tree(&head.to_string()).await?).await?;
-            let to = flatten(client, client.root_tree(&landed.tip.to_string()).await?).await?;
+            let sparse = self.sparse()?;
+            let from = flatten(client, client.root_tree(&head.to_string()).await?, &sparse).await?;
+            let to = flatten(client, client.root_tree(&landed.tip.to_string()).await?, &sparse).await?;
             let mut dirstate = self.paths.load_dirstate()?;
             self.apply(client, &mut dirstate, &diff(&from, &to)).await?;
             self.paths.save_dirstate(&mut dirstate)?;
@@ -392,7 +440,7 @@ impl WorkingCopy {
         if from == Some(tip.changeset) {
             return Ok(SyncOutcome::UpToDate);
         }
-        let target = flatten(client, tip.root_tree).await?;
+        let target = flatten(client, tip.root_tree, &self.sparse()?).await?;
         let mut dirstate = self.paths.load_dirstate()?;
         let delta = diff(&snapshot(&dirstate)?, &target);
         let (written, removed) = self.apply(client, &mut dirstate, &delta).await?;
@@ -466,13 +514,15 @@ impl WorkingCopy {
     }
 
     async fn rebase(&mut self, client: &Client, onto: ObjectId, onto_root: ObjectId) -> Result<SyncOutcome> {
+        // 两边都只比较稀疏范围内的文件：dirstate 里只有这些，范围外的不能当作被删除
+        let sparse = self.sparse()?;
         let base_files = match &self.state.base {
-            Some(b) => flatten(client, client.root_tree(b).await?).await?,
+            Some(b) => flatten(client, client.root_tree(b).await?, &sparse).await?,
             None => BTreeMap::new(),
         };
         let mut dirstate = self.paths.load_dirstate()?;
         let mine = diff(&base_files, &snapshot(&dirstate)?);
-        let theirs = diff(&base_files, &flatten(client, onto_root).await?);
+        let theirs = diff(&base_files, &flatten(client, onto_root, &sparse).await?);
         let conflicts: Vec<String> = mine
             .iter()
             .filter(|(p, v)| theirs.get(*p).is_some_and(|t| t != *v))

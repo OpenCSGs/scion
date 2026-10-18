@@ -33,6 +33,9 @@ pub struct State {
     pub head_message: Option<String>,
     #[serde(default)]
     pub head_author: Option<(String, String)>,
+    /// 稀疏检出的目录；None 为全部检出。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<Vec<String>>,
 }
 
 impl State {
@@ -46,6 +49,7 @@ impl State {
             head: None,
             head_message: None,
             head_author: None,
+            sparse: None,
         }
     }
 

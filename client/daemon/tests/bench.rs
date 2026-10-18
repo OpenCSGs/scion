@@ -18,7 +18,7 @@ use scion_api::{App, Limits, ServerConfig};
 use scion_client::Client;
 use scion_daemon::{DaemonConfig, PrefetchOptions};
 use scion_store::{MemStore, MetaStore};
-use scion_wc::WorkingCopy;
+use scion_wc::{Sparse, WorkingCopy};
 use tokio::net::TcpListener;
 
 fn env_or<T: std::str::FromStr>(k: &str, default: T) -> T {
@@ -27,7 +27,7 @@ fn env_or<T: std::str::FromStr>(k: &str, default: T) -> T {
 
 async fn clone(c: &Client, endpoint: &str, dir: &Path) -> Duration {
     let started = Instant::now();
-    WorkingCopy::clone(c, endpoint, "mono", "main", dir)
+    WorkingCopy::clone(c, endpoint, "mono", "main", dir, Sparse::full())
         .await
         .expect("clone");
     started.elapsed()

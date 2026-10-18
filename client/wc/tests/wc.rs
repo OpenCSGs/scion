@@ -7,7 +7,7 @@ use scion_api::{App, ServerConfig, serve};
 use scion_client::Client;
 use scion_proto::v1::ErrorReason;
 use scion_store::{MemStore, MetaStore};
-use scion_wc::{Error, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{Error, Sparse, Status, SyncOutcome, WorkingCopy};
 use tokio::net::TcpListener;
 
 struct Server {
@@ -64,7 +64,7 @@ async fn two_developers_collaborate() {
     let (a_dir, b_dir) = (tmp.path().join("alice"), tmp.path().join("bob"));
 
     // Alice 克隆空仓库，写文件，提交并合入
-    let mut alice = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir)
+    let mut alice = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
         .await
         .expect("clone empty");
     assert!(alice.status().expect("status").is_clean());
@@ -91,7 +91,7 @@ async fn two_developers_collaborate() {
     assert_eq!(alice.commit(&c, "noop", None).await.expect("noop"), None);
 
     // Bob 克隆，看到 Alice 的文件
-    let mut bob = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir)
+    let mut bob = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
         .await
         .expect("clone");
     assert_eq!(
@@ -182,13 +182,13 @@ async fn land_while_behind_rebases_on_server_and_updates_working_copy() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
-    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir)
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
         .await
         .expect("clone");
     write(&a_dir, "shared.txt", "1\n2\n3\n");
     a.commit(&c, "base", None).await.expect("commit").expect("changes");
     a.land(&c).await.expect("land");
-    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir)
+    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
         .await
         .expect("clone");
 
@@ -237,13 +237,13 @@ async fn rebase_conflict_reported_and_identical_changes_merge() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
-    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir)
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
         .await
         .expect("clone");
     write(&a_dir, "shared.txt", "base\n");
     a.commit(&c, "base", None).await.expect("commit").expect("changes");
     a.land(&c).await.expect("land");
-    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir)
+    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
         .await
         .expect("clone");
 
@@ -266,7 +266,7 @@ async fn rebase_conflict_reported_and_identical_changes_merge() {
 
     // 双方做了完全相同的改动：rebase 后没有剩余改动，直接同步
     let c_dir = tmp.path().join("c");
-    let mut cc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &c_dir)
+    let mut cc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &c_dir, Sparse::full())
         .await
         .expect("clone");
     write(&a_dir, "same.txt", "same\n");
@@ -286,7 +286,7 @@ async fn local_changes_report_old_versions_and_new_content() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("wc");
-    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir)
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
         .await
         .expect("clone");
     write(&dir, "keep", "k");
@@ -313,7 +313,7 @@ async fn sync_refuses_dirty_tree() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("wc");
-    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir)
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
         .await
         .expect("clone");
     assert_eq!(wc.sync(&c).await.expect("empty repo, no ref"), SyncOutcome::UpToDate);
@@ -327,7 +327,7 @@ async fn open_from_subdirectory() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("wc");
-    WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir)
+    WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
         .await
         .expect("clone");
     write(&dir, "a/b/c.txt", "x");
@@ -344,7 +344,7 @@ async fn clone_into_non_empty_dir_rejected() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     write(tmp.path(), "existing", "x");
-    let err = WorkingCopy::clone(&c, &srv.url, "mono", "main", tmp.path())
+    let err = WorkingCopy::clone(&c, &srv.url, "mono", "main", tmp.path(), Sparse::full())
         .await
         .err()
         .expect("rejected");
@@ -359,7 +359,7 @@ async fn modes_roundtrip_and_mode_change_detected() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
-    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir)
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
         .await
         .expect("clone");
     write(&a_dir, "run.sh", "#!/bin/sh\n");
@@ -368,7 +368,7 @@ async fn modes_roundtrip_and_mode_change_detected() {
     a.commit(&c, "modes", None).await.expect("commit").expect("changes");
     a.land(&c).await.expect("land");
 
-    WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir)
+    WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
         .await
         .expect("clone");
     let mode = std::fs::metadata(b_dir.join("run.sh"))
@@ -392,7 +392,7 @@ async fn racy_same_size_edit_detected_by_hash() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("wc");
-    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir)
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
         .await
         .expect("clone");
     write(&dir, "f.txt", "aaaa");
@@ -425,7 +425,7 @@ async fn concurrent_operations_are_locked_out() {
     let c = client(&srv.url).await;
     let tmp = tempfile::tempdir().expect("tempdir");
     let dir = tmp.path().join("wc");
-    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir)
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
         .await
         .expect("clone");
     std::fs::write(dir.join(".scion/lock"), "12345").expect("simulate other process");
@@ -433,4 +433,169 @@ async fn concurrent_operations_are_locked_out() {
     assert!(matches!(wc.commit(&c, "m", None).await, Err(Error::Locked(_))));
     std::fs::remove_file(dir.join(".scion/lock")).expect("unlock");
     assert!(wc.commit(&c, "m", None).await.expect("commit").is_some());
+}
+
+fn read(root: &Path, rel: &str) -> String {
+    std::fs::read_to_string(root.join(rel)).expect("read")
+}
+
+fn sparse(dirs: &[&str]) -> Sparse {
+    Sparse::dirs(dirs).expect("sparse")
+}
+
+/// 稀疏检出：只写范围内的文件；提交、合入、sync、rebase 不影响范围外的内容；范围可以调整。
+#[tokio::test]
+async fn sparse_checkout() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let seed = c
+        .changeset(None)
+        .put("top.txt", "top")
+        .put("a/x.txt", "ax")
+        .put("a/b/y.txt", "y1")
+        .put("a/bc/w.txt", "w")
+        .put("c/z.txt", "z1")
+        .create()
+        .await
+        .expect("seed");
+    c.land("main", &seed.id).await.expect("land seed");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (dir, full_dir) = (tmp.path().join("sparse"), tmp.path().join("full"));
+
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, sparse(&["a/b/"]))
+        .await
+        .expect("sparse clone");
+    assert_eq!(read(&dir, "top.txt"), "top", "root files are always checked out");
+    assert_eq!(read(&dir, "a/b/y.txt"), "y1");
+    for outside in ["a/x.txt", "a/bc", "c"] {
+        assert!(!dir.join(outside).exists(), "{outside}");
+    }
+    assert_eq!(wc.state().sparse, Some(vec!["a/b".to_string()]));
+    assert_eq!(wc.sparse().expect("sparse").list(), Some(&["a/b".to_string()][..]));
+    assert!(
+        wc.status().expect("status").is_clean(),
+        "unfetched files are not deleted"
+    );
+    let reopened = WorkingCopy::open(&dir.join("a/b")).expect("open");
+    assert_eq!(reopened.sparse().expect("sparse"), sparse(&["a/b"]));
+
+    // 范围外的新文件：拒绝，避免覆盖服务端上没有检出的内容
+    write(&dir, "c/z.txt", "shadow");
+    let e = wc.status().expect_err("outside");
+    assert!(
+        matches!(&e, Error::OutsideSparse(p) if p == &["c/z.txt".to_string()]),
+        "{e}"
+    );
+    assert!(matches!(wc.commit(&c, "x", None).await, Err(Error::OutsideSparse(_))));
+    std::fs::remove_dir_all(dir.join("c")).expect("rm");
+
+    // 提交并合入范围内的改动：服务端保留范围外的文件
+    write(&dir, "a/b/y.txt", "y2");
+    wc.commit(&c, "edit y", None).await.expect("commit").expect("changes");
+    wc.land(&c).await.expect("land");
+    assert_eq!(c.read_file("main", "c/z.txt").await.expect("kept").as_ref(), b"z1");
+    assert_eq!(c.read_file("main", "a/x.txt").await.expect("kept").as_ref(), b"ax");
+
+    // 别人改了范围内外的文件：sync 只写范围内的
+    let mut full = WorkingCopy::clone(&c, &srv.url, "mono", "main", &full_dir, Sparse::full())
+        .await
+        .expect("full clone");
+    assert!(full.sparse().expect("sparse").is_full());
+    write(&full_dir, "c/z.txt", "z2");
+    write(&full_dir, "a/b/new.txt", "new");
+    full.commit(&c, "upstream", None)
+        .await
+        .expect("commit")
+        .expect("changes");
+    full.land(&c).await.expect("land");
+    let o = wc.sync(&c).await.expect("sync");
+    assert!(
+        matches!(
+            o,
+            SyncOutcome::Updated {
+                written: 1,
+                removed: 0,
+                ..
+            }
+        ),
+        "{o:?}"
+    );
+    assert_eq!(read(&dir, "a/b/new.txt"), "new");
+    assert!(!dir.join("c").exists());
+
+    // 未合入的提交 + 上游前进：客户端 rebase 只比较范围内的文件，不会把范围外的当作删除
+    write(&dir, "a/b/y.txt", "y3");
+    wc.commit(&c, "edit y again", None)
+        .await
+        .expect("commit")
+        .expect("changes");
+    full.sync(&c).await.expect("sync full");
+    write(&full_dir, "c/z.txt", "z3");
+    write(&full_dir, "a/b/other.txt", "o");
+    full.commit(&c, "upstream 2", None)
+        .await
+        .expect("commit")
+        .expect("changes");
+    full.land(&c).await.expect("land");
+    let o = wc.sync(&c).await.expect("rebase");
+    assert!(
+        matches!(
+            o,
+            SyncOutcome::Rebased {
+                written: 1,
+                removed: 0,
+                ..
+            }
+        ),
+        "{o:?}"
+    );
+    wc.land(&c).await.expect("land rebased");
+    assert_eq!(c.read_file("main", "c/z.txt").await.expect("kept").as_ref(), b"z3");
+    assert_eq!(c.read_file("main", "a/b/y.txt").await.expect("mine").as_ref(), b"y3");
+
+    // 合入时服务端 rebase：把上游在范围内的改动写到本地
+    write(&dir, "a/b/y.txt", "y4");
+    wc.commit(&c, "edit y 4", None).await.expect("commit").expect("changes");
+    full.sync(&c).await.expect("sync full");
+    write(&full_dir, "a/b/third.txt", "t");
+    write(&full_dir, "c/z.txt", "z4");
+    full.commit(&c, "upstream 3", None)
+        .await
+        .expect("commit")
+        .expect("changes");
+    full.land(&c).await.expect("land");
+    wc.land(&c).await.expect("land with server rebase");
+    assert_eq!(read(&dir, "a/b/third.txt"), "t");
+    assert!(!dir.join("c").exists());
+    assert_eq!(c.read_file("main", "c/z.txt").await.expect("kept").as_ref(), b"z4");
+
+    // 调整范围
+    let added = wc.sparse().expect("sparse").add(&["c"]).expect("add");
+    assert_eq!(wc.set_sparse(&c, added).await.expect("add c"), (1, 0));
+    assert_eq!(read(&dir, "c/z.txt"), "z4");
+    let removed = wc.sparse().expect("sparse").remove(&["a/b"]).expect("rm");
+    assert_eq!(wc.set_sparse(&c, removed).await.expect("rm a/b"), (0, 4));
+    assert!(!dir.join("a").exists(), "emptied directories are removed");
+    assert_eq!(wc.state().sparse, Some(vec!["c".to_string()]));
+    write(&dir, "c/z.txt", "dirty");
+    assert!(matches!(wc.set_sparse(&c, Sparse::full()).await, Err(Error::Dirty)));
+    write(&dir, "c/z.txt", "z4");
+    assert_eq!(wc.set_sparse(&c, Sparse::full()).await.expect("full"), (6, 0));
+    assert_eq!(read(&dir, "a/x.txt"), "ax");
+    assert_eq!(read(&dir, "a/bc/w.txt"), "w");
+    assert_eq!(wc.state().sparse, None);
+    assert!(wc.status().expect("status").is_clean());
+}
+
+#[tokio::test]
+async fn sparse_settings_on_an_empty_repository() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, sparse(&[]))
+        .await
+        .expect("clone");
+    assert_eq!(wc.set_sparse(&c, sparse(&["src"])).await.expect("set"), (0, 0));
+    assert_eq!(wc.state().sparse, Some(vec!["src".to_string()]));
 }

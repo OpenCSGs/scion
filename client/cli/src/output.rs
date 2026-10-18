@@ -65,7 +65,7 @@ impl CliError {
     /// 稳定的退出码（客户端设计文档 §8.2）。
     pub fn exit_code(&self) -> u8 {
         match self {
-            CliError::Usage(_) => EXIT_USAGE,
+            CliError::Usage(_) | CliError::Wc(scion_wc::Error::Sparse(_)) => EXIT_USAGE,
             CliError::Wc(scion_wc::Error::Conflict(_)) => EXIT_CONFLICT,
             CliError::Wc(_) | CliError::Import(_) => EXIT_GENERAL,
             CliError::Client(e) => match e {

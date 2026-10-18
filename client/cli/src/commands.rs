@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use scion_client::{Client, EntryMode};
-use scion_wc::{Status, SyncOutcome, WorkingCopy};
+use scion_wc::{Sparse, Status, SyncOutcome, WorkingCopy};
 use serde::Serialize;
 
 use crate::output::{CliError, DoctorOut, Render, doctor_out};
@@ -109,11 +109,14 @@ pub struct CloneOut {
     #[serde(rename = "ref")]
     pub reference: String,
     pub base: Option<String>,
+    /// 稀疏检出的目录；全部检出时省略。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<Vec<String>>,
 }
 
 impl Render for CloneOut {
     fn text(&self) -> String {
-        match &self.base {
+        let s = match &self.base {
             Some(b) => format!(
                 "cloned {} ({} at {}) into {}",
                 self.repo,
@@ -125,7 +128,19 @@ impl Render for CloneOut {
                 "cloned empty repository {} into {} ({} does not exist yet)",
                 self.repo, self.path, self.reference
             ),
+        };
+        match &self.sparse {
+            Some(dirs) => format!("{s}\nsparse checkout: {}", sparse_list(dirs)),
+            None => s,
         }
+    }
+}
+
+fn sparse_list(dirs: &[String]) -> String {
+    if dirs.is_empty() {
+        "root files only".to_owned()
+    } else {
+        dirs.join(", ")
     }
 }
 
@@ -134,17 +149,79 @@ pub fn default_dir(repo: &str) -> &str {
     repo.rsplit('/').next().unwrap_or(repo)
 }
 
-pub async fn clone(ctx: &Ctx, repo: &str, dir: Option<&Path>, reference: &str) -> Result<CloneOut, CliError> {
+pub async fn clone(
+    ctx: &Ctx,
+    repo: &str,
+    dir: Option<&Path>,
+    reference: &str,
+    sparse: Option<&[String]>,
+) -> Result<CloneOut, CliError> {
+    let sparse = match sparse {
+        Some(dirs) => Sparse::dirs(dirs)?,
+        None => Sparse::full(),
+    };
     let endpoint = ctx.endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
     let client = connect(&endpoint, Some(repo)).await?;
     let target = ctx.cwd.join(dir.unwrap_or_else(|| Path::new(default_dir(repo))));
-    let wc = WorkingCopy::clone(&client, &endpoint, repo, reference, &target).await?;
+    let wc = WorkingCopy::clone(&client, &endpoint, repo, reference, &target, sparse).await?;
     Ok(CloneOut {
         schema: "scion.cli.clone/v1",
         repo: repo.to_owned(),
         path: target.display().to_string(),
         reference: reference.to_owned(),
         base: wc.state().base.clone(),
+        sparse: wc.state().sparse.clone(),
+    })
+}
+
+// ---------- sparse ----------
+
+#[derive(Debug, Serialize)]
+pub struct SparseOut {
+    pub schema: &'static str,
+    /// 范围内的目录；全部检出时为 null。
+    pub dirs: Option<Vec<String>>,
+    pub written: usize,
+    pub removed: usize,
+}
+
+impl Render for SparseOut {
+    fn text(&self) -> String {
+        let mut s = match &self.dirs {
+            None => "full checkout".to_owned(),
+            Some(d) if d.is_empty() => "sparse checkout: root files only".to_owned(),
+            Some(d) => format!("sparse checkout:\n  {}", d.join("\n  ")),
+        };
+        if self.written + self.removed > 0 {
+            s.push_str(&format!("\n({} written, {} removed)", self.written, self.removed));
+        }
+        s
+    }
+}
+
+pub async fn sparse(ctx: &Ctx, cmd: crate::SparseCmd) -> Result<SparseOut, CliError> {
+    use crate::SparseCmd;
+    let mut wc = WorkingCopy::open(&ctx.cwd)?;
+    let current = wc.sparse()?;
+    let target = match cmd {
+        SparseCmd::Ls => None,
+        SparseCmd::Set { dirs } => Some(Sparse::dirs(&dirs)?),
+        SparseCmd::Add { dirs } => Some(current.add(&dirs)?),
+        SparseCmd::Rm { dirs } => Some(current.remove(&dirs)?),
+        SparseCmd::Disable => Some(Sparse::full()),
+    };
+    let (written, removed) = match target {
+        Some(t) if t != current => {
+            let client = connect(&ctx.endpoint_or(Some(&wc)), Some(&wc.state().repo)).await?;
+            wc.set_sparse(&client, t).await?
+        }
+        _ => (0, 0),
+    };
+    Ok(SparseOut {
+        schema: "scion.cli.sparse/v1",
+        dirs: wc.state().sparse.clone(),
+        written,
+        removed,
     })
 }
 
@@ -542,6 +619,7 @@ mod tests {
             path: "/p".into(),
             reference: "main".into(),
             base: None,
+            sparse: None,
         };
         assert!(c.text().contains("empty repository"));
         let c = CloneOut {
@@ -549,6 +627,18 @@ mod tests {
             ..c
         };
         assert!(c.text().contains("main at c1abcdefghij"));
+        let c = CloneOut {
+            sparse: Some(vec![]),
+            ..c
+        };
+        assert!(c.text().ends_with("sparse checkout: root files only"));
+        let sp = SparseOut {
+            schema: "s",
+            dirs: None,
+            written: 0,
+            removed: 0,
+        };
+        assert_eq!(sp.text(), "full checkout");
 
         let s = StatusOut {
             schema: "s",

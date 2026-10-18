@@ -89,6 +89,8 @@ pub struct ServerConfig {
     pub repo_delete_grace: std::time::Duration,
     /// ref 变化的推送目标与事件保留期。
     pub events: crate::events::EventsConfig,
+    /// 合入前检查（外部 webhook）；`None` 不检查。
+    pub pre_land: Option<crate::prehook::PreLandConfig>,
 }
 
 /// 令牌桶参数：每秒补充 `per_second` 个，最多积攒 `burst` 个。
@@ -120,6 +122,7 @@ impl Default for ServerConfig {
             blob_cache: scion_store::BlobCacheConfig::default(),
             purge_grace: std::time::Duration::from_secs(24 * 3600),
             repo_delete_grace: std::time::Duration::from_secs(24 * 3600),
+            pre_land: None,
             events: crate::events::EventsConfig {
                 retention: std::time::Duration::from_secs(7 * 24 * 3600),
                 ..Default::default()

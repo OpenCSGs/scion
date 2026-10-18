@@ -13,7 +13,7 @@ A server-first source control system: history, merges and rebases are computed o
 **Guides**
 - [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
 - [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
-- [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery
+- [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check
 - [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
 - [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
 - [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks
@@ -56,6 +56,7 @@ A server-first source control system: history, merges and rebases are computed o
   - every ref change is written in the same transaction as an ordered event;
   - consumers poll `EventService.ListRefEvents` by sequence number;
   - or the server pushes the events, with commit and path-level details, to a webhook (HMAC-signed) or NATS JetStream, at least once and in order.
+- **Pre-land check:** before a land or a branch write, the server can POST the commits it would introduce to an external service, which allows or rejects them (fail-closed by default).
 
 Still to come in M5: YugabyteDB, Helm and chaos testing.
 

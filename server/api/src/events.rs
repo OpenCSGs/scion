@@ -105,7 +105,7 @@ pub struct PathChange {
     pub size: Option<u64>,
 }
 
-fn commit_info(id: ObjectId, cs: &Changeset) -> CommitInfo {
+pub(crate) fn commit_info(id: ObjectId, cs: &Changeset) -> CommitInfo {
     let changes = cs
         .delta
         .iter()

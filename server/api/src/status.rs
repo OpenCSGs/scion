@@ -123,6 +123,19 @@ pub fn not_fast_forward(reference: &str, tip: &ObjectId) -> Status {
     )
 }
 
+/// 合入前检查拒绝了这次改动。
+pub fn pre_land_rejected(reference: &str, message: &str) -> Status {
+    with_reason(
+        Code::FailedPrecondition,
+        ErrorReason::PreLandRejected,
+        format!("rejected by the pre-land check: {message}"),
+        HashMap::from([
+            ("ref".to_string(), reference.to_owned()),
+            ("message".to_string(), message.to_owned()),
+        ]),
+    )
+}
+
 pub fn ref_not_found(reference: &str) -> Status {
     with_reason(
         Code::NotFound,

@@ -144,6 +144,7 @@ scion server ... \
 | 响应 | 结果 |
 |---|---|
 | 2xx | 允许；响应体为 `{"allowed": false, "message": "…"}` 时拒绝 |
+| 2xx，但请求被截断 | 拒绝，提示客户端拆小后重试。截断指提交超过 100 个，或某个提交的路径超过 1000 条，请求中 `commits_truncated` 或 `changes_truncated` 为 true。只有响应明确为 `{"allowed": true, "accept_truncated": true}` 时才放行，表示检查服务接受只看到部分内容的结果 |
 | 4xx（408、429 除外） | 拒绝，响应体作为原因 |
 | 其它状态、超时、连接失败 | 检查服务不可用：默认拒绝（`UNAVAILABLE`，客户端可以重试），设置 `--pre-land-fail-open` 时放行 |
 

@@ -2,6 +2,8 @@
 //! POST 给外部服务，由它决定是否允许（例如 starhub 的内容审查、文件类型限制）。
 //!
 //! - 2xx：允许；响应体为 `{"allowed": false, "message": "…"}` 时拒绝；
+//!   请求被截断（提交或路径超过上限）时，只有响应明确 `{"accept_truncated": true}` 才放行，
+//!   否则拒绝并让客户端拆小后重试：检查服务没看到的提交和路径不能算通过；
 //! - 4xx（408、429 除外）：拒绝，响应体作为原因；
 //! - 其它状态、超时、连接失败：检查服务不可用，按 `fail_open` 放行或拒绝（默认拒绝）。
 
@@ -57,7 +59,13 @@ struct CheckRequest {
 struct CheckResponse {
     allowed: Option<bool>,
     message: Option<String>,
+    /// 请求被截断时，检查服务明确接受只看到部分内容的结果。
+    accept_truncated: Option<bool>,
 }
+
+/// 请求被截断、检查服务没有明确接受时的拒绝原因。
+pub const TRUNCATED_MESSAGE: &str = "the change is too large for the pre-land check (at most 100 commits and 1000 \
+paths per commit are sent); land it in smaller pieces";
 
 /// 检查结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +93,8 @@ fn truncate(mut s: String) -> String {
     s
 }
 
-/// 按 HTTP 状态和响应体判断。`Err` 表示检查服务不可用。
-pub fn verdict(status: u16, body: &[u8]) -> Result<Verdict, String> {
+/// 按 HTTP 状态和响应体判断（`truncated`：请求中的提交或路径被截断）。`Err` 表示检查服务不可用。
+pub fn verdict(status: u16, body: &[u8], truncated: bool) -> Result<Verdict, String> {
     let text = || truncate(String::from_utf8_lossy(body).trim().to_owned());
     match status {
         200..=299 => {
@@ -95,6 +103,7 @@ pub fn verdict(status: u16, body: &[u8]) -> Result<Verdict, String> {
                 Some(false) => Verdict::Deny(truncate(
                     r.message.unwrap_or_else(|| "rejected by the pre-land check".into()),
                 )),
+                _ if truncated && r.accept_truncated != Some(true) => Verdict::Deny(TRUNCATED_MESSAGE.into()),
                 _ => Verdict::Allow,
             })
         }
@@ -145,7 +154,7 @@ impl PreLand {
         repo: &str,
         reference: &str,
         tip: ObjectId,
-    ) -> Result<Option<Vec<u8>>, String> {
+    ) -> Result<Option<(Vec<u8>, bool)>, String> {
         let old = self
             .meta
             .get_ref(repo, reference)
@@ -171,6 +180,7 @@ impl PreLand {
                 .map_err(|e| e.to_string())?;
             commits.push(commit_info(r.id, &cs));
         }
+        let truncated = truncated || commits.iter().any(|c| c.changes_truncated);
         let req = CheckRequest {
             kind: "pre-land",
             repo: repo.to_owned(),
@@ -185,7 +195,9 @@ impl PreLand {
             commits,
             commits_truncated: truncated,
         };
-        serde_json::to_vec(&req).map(Some).map_err(|e| e.to_string())
+        serde_json::to_vec(&req)
+            .map(|b| Some((b, truncated)))
+            .map_err(|e| e.to_string())
     }
 
     /// 默认分支的当前提交（`reference` 本身就是默认分支，或默认分支还不存在时为 `None`）。
@@ -204,7 +216,7 @@ impl PreLand {
             .map(|s| s.target))
     }
 
-    async fn ask(&self, body: Vec<u8>) -> Result<Verdict, String> {
+    async fn ask(&self, body: Vec<u8>, truncated: bool) -> Result<Verdict, String> {
         let Some(client) = &self.client else {
             return Err("pre-land client unavailable".into());
         };
@@ -222,14 +234,14 @@ impl PreLand {
             .map_err(|e| format!("POST {}: {e}", self.cfg.url))?;
         let status = resp.status().as_u16();
         let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-        verdict(status, &bytes)
+        verdict(status, &bytes, truncated)
     }
 
     /// 检查一次合入或 ref 修改；拒绝时返回 PRE_LAND_REJECTED，检查服务不可用且不放行时返回 UNAVAILABLE。
     pub async fn check(&self, p: &Principal, repo: &str, reference: &str, tip: ObjectId) -> Result<(), Status> {
         let outcome = match self.request(p, repo, reference, tip).await {
             Ok(None) => return Ok(()),
-            Ok(Some(body)) => self.ask(body).await,
+            Ok(Some((body, truncated))) => self.ask(body, truncated).await,
             Err(e) => Err(e),
         };
         match outcome {
@@ -404,6 +416,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncated_requests_need_explicit_acceptance() {
+        let store = Arc::new(MemStore::new());
+        store.create_repo("r").await.expect("repo");
+        let mut tip = commit(&store, vec![], "f0").await;
+        for i in 1..=MAX_COMMITS {
+            tip = commit(&store, vec![tip], &format!("f{i}")).await;
+        }
+        let (url, seen) = hook(vec![(204, ""), (200, r#"{"allowed": true, "accept_truncated": true}"#)]).await;
+        let h = pre(&store, &url, false);
+        let p = Principal::anonymous();
+        let err = h.check(&p, "r", "main", tip).await.expect_err("truncated");
+        assert!(err.message().contains("smaller pieces"), "{err:?}");
+        h.check(&p, "r", "main", tip).await.expect("accepted");
+        let seen = seen.lock().expect("lock");
+        assert_eq!(seen[0].1["commits_truncated"], true);
+        assert_eq!(seen[0].1["commits"].as_array().map(Vec::len), Some(MAX_COMMITS));
+    }
+
+    #[tokio::test]
     async fn unavailable_checks_follow_the_failure_policy() {
         let store = Arc::new(MemStore::new());
         store.create_repo("r").await.expect("repo");
@@ -439,30 +470,48 @@ mod tests {
 
     #[test]
     fn verdicts_from_status_and_body() {
-        assert_eq!(verdict(204, b""), Ok(Verdict::Allow));
-        assert_eq!(verdict(200, br#"{"allowed": true}"#), Ok(Verdict::Allow));
+        assert_eq!(verdict(204, b"", false), Ok(Verdict::Allow));
+        assert_eq!(verdict(200, br#"{"allowed": true}"#, false), Ok(Verdict::Allow));
         assert_eq!(
-            verdict(200, br#"{"allowed": false, "message": "contains a secret"}"#),
+            verdict(200, br#"{"allowed": false, "message": "contains a secret"}"#, false),
             Ok(Verdict::Deny("contains a secret".into()))
         );
         assert_eq!(
-            verdict(200, br#"{"allowed": false}"#),
+            verdict(200, br#"{"allowed": false}"#, false),
             Ok(Verdict::Deny("rejected by the pre-land check".into()))
         );
         assert_eq!(
-            verdict(403, b"  no binaries  "),
+            verdict(403, b"  no binaries  ", false),
             Ok(Verdict::Deny("no binaries".into()))
         );
         assert_eq!(
-            verdict(422, b""),
+            verdict(422, b"", false),
             Ok(Verdict::Deny("rejected by the pre-land check".into()))
         );
-        assert!(verdict(408, b"").is_err());
-        assert!(verdict(429, b"").is_err());
-        assert!(verdict(500, b"").is_err());
-        assert!(verdict(302, b"").is_err());
+        assert!(verdict(408, b"", false).is_err());
+        assert!(verdict(429, b"", false).is_err());
+        assert!(verdict(500, b"", false).is_err());
+        assert!(verdict(302, b"", false).is_err());
+        // 截断的请求：2xx 不等于整次改动都通过了
+        assert_eq!(verdict(204, b"", true), Ok(Verdict::Deny(TRUNCATED_MESSAGE.into())));
+        assert_eq!(
+            verdict(200, br#"{"allowed": true}"#, true),
+            Ok(Verdict::Deny(TRUNCATED_MESSAGE.into()))
+        );
+        assert_eq!(
+            verdict(200, br#"{"allowed": true, "accept_truncated": true}"#, true),
+            Ok(Verdict::Allow)
+        );
+        assert_eq!(
+            verdict(
+                200,
+                br#"{"allowed": false, "message": "no", "accept_truncated": true}"#,
+                true
+            ),
+            Ok(Verdict::Deny("no".into()))
+        );
         let long = "é".repeat(MAX_MESSAGE);
-        let Ok(Verdict::Deny(m)) = verdict(403, long.as_bytes()) else {
+        let Ok(Verdict::Deny(m)) = verdict(403, long.as_bytes(), false) else {
             panic!("deny");
         };
         assert!(m.len() <= MAX_MESSAGE && m.is_char_boundary(m.len()));

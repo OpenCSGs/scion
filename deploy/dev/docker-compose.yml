@@ -30,7 +30,13 @@ services:
     depends_on:
       s3:
         condition: service_healthy
-    entrypoint: ["/bin/sh", "-c", "echo 's3.bucket.create -name scion-objects' | weed shell -master=s3:9333"]
+    # 幂等：bucket 已存在时创建会报错，以最后确认 bucket 存在为准
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        echo 's3.bucket.create -name scion-objects' | weed shell -master=s3:9333;
+        echo 's3.bucket.list' | weed shell -master=s3:9333 | grep -q scion-objects
 
   # starhub / CSGHub 部署使用的 MinIO 版本（bitnami 镜像，2023.12）
   minio:

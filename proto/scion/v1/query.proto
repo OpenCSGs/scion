@@ -29,6 +29,8 @@ service QueryService {
   rpc GetDerived(GetDerivedRequest) returns (GetDerivedResponse);
   // 批量把提交 id 映射为 git 兼容的提交 sha（第一次查询时计算并缓存）。
   rpc GetGitShas(GetGitShasRequest) returns (GetGitShasResponse);
+  // 把一个版本（或其中的目录）打包成 tar.gz / zip / tar，分块流式返回。
+  rpc Archive(ArchiveRequest) returns (stream ArchiveResponse);
 }
 
 message ReadFileRequest {
@@ -221,4 +223,29 @@ message GetGitShasRequest {
 message GetGitShasResponse {
   // 与 changeset_ids 一一对应的 20 字节 sha。
   repeated bytes git_sha1 = 1;
+}
+
+enum ArchiveFormat {
+  // 等同 TAR_GZ。
+  ARCHIVE_FORMAT_UNSPECIFIED = 0;
+  ARCHIVE_FORMAT_TAR_GZ = 1;
+  ARCHIVE_FORMAT_ZIP = 2;
+  ARCHIVE_FORMAT_TAR = 3;
+}
+
+message ArchiveRequest {
+  string repo = 1;
+  string revision = 2;
+  ArchiveFormat format = 3;
+  // 只打包这个目录（保留它在仓库中的路径）；空表示整个仓库。
+  string path = 4;
+  // 加在归档中每个路径前面，例如 "qwen-main/"；为空或以 "/" 结尾。
+  string prefix = 5;
+}
+
+message ArchiveResponse {
+  // 归档内容的下一段。
+  bytes data = 1;
+  // 只在第一条消息中设置：打包的提交。
+  bytes changeset_id = 2;
 }

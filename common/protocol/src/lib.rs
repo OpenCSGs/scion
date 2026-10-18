@@ -69,6 +69,8 @@ pub mod features {
     pub const EVENTS: &str = "events";
     /// 所有提交都有 git 兼容 sha（GetDerived 的 GIT_SHA1 与 GetGitShas）。
     pub const GIT_SHA1: &str = "git.sha1";
+    /// QueryService.Archive：tar.gz / zip / tar 打包下载。
+    pub const QUERY_ARCHIVE: &str = "query.archive";
 }
 
 #[cfg(test)]

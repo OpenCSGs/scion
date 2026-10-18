@@ -174,6 +174,55 @@ async fn clone_commit_land_sync_workflow() {
         let out = scn_in(&root, &["cat", "src/lib.rs", "--endpoint", &u, "--repo", "team/app"]);
         assert_eq!(out.stdout, b"pub fn f() {}\n");
 
+        // archive：写文件（用系统的 tar / unzip 校验），或写到标准输出
+        let tgz = root.join("app.tar.gz");
+        let v = json_of(&scn_in(
+            &wc,
+            &[
+                "archive",
+                "--prefix",
+                "app-main/",
+                "-o",
+                tgz.to_str().expect("path"),
+                "--json",
+            ],
+        ));
+        assert_eq!(v["schema"], "scion.cli.archive/v1");
+        assert!(v["bytes"].as_u64().expect("bytes") > 0);
+        let listed = std::process::Command::new("tar")
+            .arg("-tzf")
+            .arg(&tgz)
+            .output()
+            .expect("tar");
+        assert_eq!(
+            String::from_utf8_lossy(&listed.stdout),
+            "app-main/src/\napp-main/src/lib.rs\n"
+        );
+        let zip = root.join("src.zip");
+        let out = scn_in(
+            &wc,
+            &[
+                "archive",
+                "main:src",
+                "--format",
+                "zip",
+                "-o",
+                zip.to_str().expect("path"),
+            ],
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).starts_with("wrote "), "{out:?}");
+        let listed = std::process::Command::new("unzip")
+            .arg("-Z1")
+            .arg(&zip)
+            .output()
+            .expect("unzip");
+        assert_eq!(String::from_utf8_lossy(&listed.stdout), "src/lib.rs\n");
+        let out = scn_in(&wc, &["archive", "--format", "tar"]);
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(out.stdout.len() % 512, 0, "a tar stream on stdout");
+        let out = scn_in(&wc, &["archive", "--format", "rar"]);
+        assert_eq!(out.status.code(), Some(2));
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

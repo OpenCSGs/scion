@@ -52,6 +52,7 @@ pub(crate) fn from_query(e: QueryError) -> Status {
         QueryError::NotAFile(p) => Status::failed_precondition(format!("{p:?} is a directory")),
         QueryError::Tree(e) => status::from_tree(e),
         QueryError::MissingObject(id) => Status::failed_precondition(format!("object {id} is missing (purged?)")),
+        QueryError::Archive(msg) => Status::failed_precondition(format!("cannot build the archive: {msg}")),
     }
 }
 

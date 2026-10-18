@@ -55,6 +55,7 @@ impl ServerInfoSvc {
             features::REFS_WRITE,
             features::EVENTS,
             features::GIT_SHA1,
+            features::QUERY_ARCHIVE,
         ]
         .map(String::from)
         .to_vec();

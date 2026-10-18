@@ -14,6 +14,7 @@
 - [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
+- [打包下载](docs/guide/archive.md)：用 `scn archive` 把某个版本或目录打包成 tar.gz、zip 或 tar
 - [git 兼容的提交 sha](docs/guide/git-sha.md)：每个提交都有 40 位 git sha，可以直接当作版本号使用
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
@@ -155,6 +156,7 @@ cargo run -p scion -- server --lite --data-dir ./.scion-data
 # 另一个终端：安装 scn 并检查连接
 cargo install --path client/cli
 scn doctor
+scn archive -o mono.tar.gz          # 打包下载 tar.gz / zip / tar（见 docs/guide/archive.md）
 scn repo create mono                # 仓库与分支：scn repo / scn branch（见 docs/guide/repos.md）
 
 # 日常流程

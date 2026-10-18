@@ -7,9 +7,9 @@ use bytes::Bytes;
 use scion_object::{EntryMode, ObjectId, TreeEntry};
 use scion_proto::v1::query_service_server::QueryService;
 use scion_proto::v1::{
-    self, BlameRequest, BlameResponse, DiffRequest, DiffResponse, GetDerivedRequest, GetDerivedResponse,
-    GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, ListDirRequest, ListDirResponse,
-    LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ReadFileRequest, ReadFileResponse,
+    self, ArchiveRequest, ArchiveResponse, BlameRequest, BlameResponse, DiffRequest, DiffResponse, GetDerivedRequest,
+    GetDerivedResponse, GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, ListDirRequest,
+    ListDirResponse, LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ReadFileRequest, ReadFileResponse,
     ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
 };
 use scion_store::{BlobStore, MetaStore};
@@ -26,6 +26,20 @@ use scion_auth::{Action, Guard, Principal, Request as AuthRequest};
 
 pub type ReadFileStream = Pin<Box<dyn Stream<Item = Result<ReadFileResponse, Status>> + Send>>;
 pub type DiffStream = Pin<Box<dyn Stream<Item = Result<DiffResponse, Status>> + Send>>;
+pub type ArchiveStream = Pin<Box<dyn Stream<Item = Result<ArchiveResponse, Status>> + Send>>;
+
+/// 归档路径前缀：为空，或是以 `/` 结尾的合法相对路径。
+pub(crate) fn check_prefix(prefix: &str) -> Result<(), Status> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    match prefix.strip_suffix('/') {
+        Some(p) if scion_object::validate_path(p).is_ok() => Ok(()),
+        _ => Err(Status::invalid_argument(format!(
+            "invalid prefix {prefix:?}: must be a relative path ending with '/'"
+        ))),
+    }
+}
 
 pub struct QuerySvc {
     config: Arc<ServerConfig>,
@@ -57,6 +71,18 @@ pub(crate) fn check_path(path: &str) -> Result<(), Status> {
         return Ok(());
     }
     scion_object::validate_path(path).map_err(|_| Status::invalid_argument(format!("invalid path {path:?}")))
+}
+
+/// `path`（空串为根目录）在 `root` 下对应的目录树。
+pub(crate) async fn dir_tree(src: &BlobTreeSource, root: ObjectId, path: &str) -> Result<ObjectId, Status> {
+    if path.is_empty() {
+        return Ok(root);
+    }
+    match lookup(src, root, path).await.map_err(status::from_tree)? {
+        Some(e) if e.mode == EntryMode::Tree => Ok(e.id),
+        Some(_) => Err(Status::failed_precondition(format!("{path:?} is not a directory"))),
+        None => Err(status::path_not_found(path)),
+    }
 }
 
 /// 把文件内容从 `start` 开始切成分块。`start == len` 时返回一个空的结尾块。
@@ -119,6 +145,20 @@ impl QuerySvc {
         BlobTreeSource(self.blobs.clone())
     }
 
+    /// 覆盖整棵子树的读（统计、打包）：`path` 为空时需要整个仓库的读权限，否则需要该路径的读权限。
+    async fn authorize_subtree(&self, p: &Principal, repo: &str, path: &str) -> Result<(), Status> {
+        if !path.is_empty() {
+            return authorize(&self.guard, p, AuthRequest::repo(repo, Action::Read).with_path(path)).await;
+        }
+        if self.reads_everything(p, repo).await? {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(format!(
+                "this needs read access to all of {repo:?}"
+            )))
+        }
+    }
+
     /// 读文件内容用的 BlobStore：redact 过的 blob 返回 REDACTED。
     fn contents(&self, repo: &str) -> scion_store::RedactedBlobs {
         scion_store::RedactedBlobs::new(self.blobs.clone(), self.meta.clone(), repo)
@@ -153,15 +193,7 @@ impl QuerySvc {
         check_path(path)?;
         let rec = resolve_revision(self.meta.as_ref(), repo, revision).await?;
         let src = self.source();
-        let tree_id: ObjectId = if path.is_empty() {
-            rec.root_tree
-        } else {
-            match lookup(&src, rec.root_tree, path).await.map_err(status::from_tree)? {
-                Some(e) if e.mode == EntryMode::Tree => e.id,
-                Some(_) => return Err(Status::failed_precondition(format!("{path:?} is not a directory"))),
-                None => return Err(status::path_not_found(path)),
-            }
-        };
+        let tree_id = dir_tree(&src, rec.root_tree, path).await?;
         let tree = src.load_tree(&tree_id).await.map_err(status::from_tree)?;
         Ok(ListDirResponse {
             changeset_id: Bytes::copy_from_slice(&rec.id.to_bytes()),
@@ -307,6 +339,61 @@ impl QueryService for QuerySvc {
         ))
     }
 
+    type ArchiveStream = ArchiveStream;
+
+    async fn archive(&self, request: Request<ArchiveRequest>) -> Result<Response<Self::ArchiveStream>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        check_path(&req.path)?;
+        check_prefix(&req.prefix)?;
+        self.authorize_subtree(&p, &req.repo, &req.path).await?;
+        let format = match v1::ArchiveFormat::try_from(req.format) {
+            Ok(v1::ArchiveFormat::Unspecified | v1::ArchiveFormat::TarGz) => scion_query::ArchiveFormat::TarGz,
+            Ok(v1::ArchiveFormat::Zip) => scion_query::ArchiveFormat::Zip,
+            Ok(v1::ArchiveFormat::Tar) => scion_query::ArchiveFormat::Tar,
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown archive format {}",
+                    req.format
+                )));
+            }
+        };
+        let rec = resolve_revision(self.meta.as_ref(), &req.repo, &req.revision).await?;
+        let tree = dir_tree(&self.source(), rec.root_tree, &req.path).await?;
+        // 与 git archive 相同：条目的修改时间取提交时间
+        let cs = scion_query::load_changeset(self.blobs.as_ref(), rec.id)
+            .await
+            .map_err(history::from_query)?;
+        let opts = scion_query::ArchiveOptions {
+            format,
+            prefix: req.prefix.clone(),
+            mtime: cs.committer.time_ms.div_euclid(1000),
+        };
+        let chunk = usize::try_from(self.config.limits.max_chunk_bytes)
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let blobs = self.contents(&req.repo);
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let first = Bytes::copy_from_slice(&rec.id.to_bytes());
+        tokio::spawn(async move {
+            let sender = tx.clone();
+            let mut first = Some(first);
+            let mut emit = move |data: Bytes| -> Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+                let tx = sender.clone();
+                let changeset_id = first.take().unwrap_or_default();
+                Box::pin(async move { tx.send(Ok(ArchiveResponse { data, changeset_id })).await.is_ok() })
+            };
+            match scion_query::write_archive(&blobs, tree, &req.path, &opts, chunk, &mut emit).await {
+                Ok(bytes) => tracing::info!(repo = %req.repo, bytes, "archive sent"),
+                Err(e) => {
+                    tracing::warn!(repo = %req.repo, error = %e, "archive failed");
+                    let _ = tx.send(Err(history::from_query(e))).await;
+                }
+            }
+        });
+        Ok(Response::new(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))))
+    }
+
     async fn get_git_shas(&self, request: Request<GetGitShasRequest>) -> Result<Response<GetGitShasResponse>, Status> {
         let p = principal(&request);
         let req = request.into_inner();
@@ -362,6 +449,90 @@ mod tests {
         assert_eq!(proto_mode(EntryMode::Executable), v1::EntryMode::Executable);
         assert_eq!(proto_mode(EntryMode::Symlink), v1::EntryMode::Symlink);
         assert_eq!(proto_mode(EntryMode::Tree), v1::EntryMode::Tree);
+    }
+
+    #[test]
+    fn check_prefix_cases() {
+        assert!(check_prefix("").is_ok());
+        assert!(check_prefix("repo-main/").is_ok());
+        assert!(check_prefix("a/b/").is_ok());
+        for bad in ["repo", "/abs/", "../x/", "a//", "/"] {
+            assert_eq!(
+                check_prefix(bad).map_err(|s| s.code()),
+                Err(Code::InvalidArgument),
+                "{bad}"
+            );
+        }
+    }
+
+    async fn archive_bytes(svc: &QuerySvc, req: ArchiveRequest) -> Result<(Vec<u8>, Vec<Bytes>), Status> {
+        let mut stream = QueryService::archive(svc, Request::new(req)).await?.into_inner();
+        let (mut data, mut ids) = (Vec::new(), Vec::new());
+        while let Some(msg) = stream.next().await {
+            let msg = msg?;
+            data.extend_from_slice(&msg.data);
+            ids.push(msg.changeset_id);
+        }
+        Ok((data, ids))
+    }
+
+    #[tokio::test]
+    async fn archive_streams_and_rejects_bad_requests() {
+        let (store, svc, cs) = setup().await;
+        let req = |format: v1::ArchiveFormat, path: &str, prefix: &str| ArchiveRequest {
+            repo: REPO.into(),
+            revision: "main".into(),
+            format: format.into(),
+            path: path.into(),
+            prefix: prefix.into(),
+        };
+        // 默认格式为 tar.gz；只有第一条消息带提交 id
+        let (gz, ids) = archive_bytes(&svc, req(v1::ArchiveFormat::Unspecified, "", "p/"))
+            .await
+            .expect("archive");
+        assert_eq!(&gz[..2], &[0x1f, 0x8b], "gzip magic");
+        assert_eq!(ObjectId::from_bytes(&ids[0]).ok(), Some(cs));
+        assert!(ids[1..].iter().all(Bytes::is_empty));
+        let (tar, ids) = archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "docs", ""))
+            .await
+            .expect("tar");
+        assert!(ids.len() > 1, "max_chunk_bytes = 4 splits the stream");
+        assert!(tar.windows(14).any(|w| w == b"docs/readme.md"));
+        assert!(!tar.windows(3).any(|w| w == b"bin"), "only the requested directory");
+        let (zip, _) = archive_bytes(&svc, req(v1::ArchiveFormat::Zip, "", ""))
+            .await
+            .expect("zip");
+        assert_eq!(&zip[..2], b"PK");
+
+        let code = |r: Result<(Vec<u8>, Vec<Bytes>), Status>| r.map(|_| ()).map_err(|s| s.code());
+        let mut bad_format = req(v1::ArchiveFormat::Tar, "", "");
+        bad_format.format = 99;
+        assert_eq!(code(archive_bytes(&svc, bad_format).await), Err(Code::InvalidArgument));
+        assert_eq!(
+            code(archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "", "noslash")).await),
+            Err(Code::InvalidArgument)
+        );
+        assert_eq!(
+            code(archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "/bad", "")).await),
+            Err(Code::InvalidArgument)
+        );
+        assert_eq!(
+            code(archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "docs/readme.md", "")).await),
+            Err(Code::FailedPrecondition)
+        );
+        assert_eq!(
+            code(archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "nope", "")).await),
+            Err(Code::NotFound)
+        );
+        let mut no_rev = req(v1::ArchiveFormat::Tar, "", "");
+        no_rev.revision = "nope".into();
+        assert_eq!(code(archive_bytes(&svc, no_rev).await), Err(Code::NotFound));
+        // 生成过程中读不到文件：流以错误结束
+        store.delete(&ObjectId::of_blob(b"hello world")).await.expect("delete");
+        assert_eq!(
+            code(archive_bytes(&svc, req(v1::ArchiveFormat::Tar, "docs", "")).await),
+            Err(Code::FailedPrecondition)
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ mod watch;
 
 pub use client::{Auth, Client, ClientBuilder, ReadEndpoints, RedactedObject, RedactedPage, UPSTREAM_HEADER};
 pub use error::{ConflictPath, Error, MergeConflict, Result};
-pub use history::{BlameCommitInfo, BlameInfo, FileChangeInfo, LogItem, LogPage, Revision};
+pub use history::{ArchiveFormat, BlameCommitInfo, BlameInfo, FileChangeInfo, LogItem, LogPage, Revision};
 pub use identity::{DeviceLogin, DeviceLoginPoll, Identity};
 pub use info::{Limits, ProtocolVersion, ReadEndpoint, Role, ServerInfo};
 pub use ops::{

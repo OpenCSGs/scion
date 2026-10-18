@@ -79,6 +79,19 @@ enum Command {
     Cat { spec: String },
     /// 列出目录：[REV:][DIR]。
     Ls { spec: Option<String> },
+    /// 打包下载：[REV:][DIR]（默认当前 ref 的整个仓库），不需要工作副本。
+    Archive {
+        spec: Option<String>,
+        /// tar.gz、zip 或 tar。
+        #[arg(long, default_value = "tar.gz")]
+        format: String,
+        /// 加在归档中每个路径前面，例如 mono-main/。
+        #[arg(long, default_value = "")]
+        prefix: String,
+        /// 输出文件；不指定时写到标准输出。
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
     /// 历史：从 REV（默认当前 ref）开始，按时间从新到旧。
     Log {
         revision: Option<String>,
@@ -317,6 +330,23 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Land => emit(commands::land(&ctx).await, json),
         Command::Sync => emit(commands::sync(&ctx).await, json),
         Command::Ls { spec } => emit(commands::ls(&ctx, spec.as_deref()).await, json),
+        Command::Archive {
+            spec,
+            format,
+            prefix,
+            output,
+        } => {
+            let mut stdout = std::io::stdout();
+            let r = commands::archive(&ctx, spec.as_deref(), &format, &prefix, output.as_deref(), &mut stdout).await;
+            match r {
+                // 写到标准输出时不再输出摘要（会混进归档内容）
+                Ok(_) if output.is_none() => match std::io::Write::flush(&mut stdout) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(e) => fail(&CliError::Usage(format!("write stdout: {e}")), json),
+                },
+                other => emit(other, json),
+            }
+        }
         Command::Log {
             revision,
             path,

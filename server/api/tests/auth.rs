@@ -241,6 +241,18 @@ async fn tokens_and_acl_are_enforced() {
         .map(|e| e.name)
         .collect();
     assert_eq!(src, ["ui"], "core.rs hidden");
+    // 打包：整个仓库需要全部读权限，可读的子目录可以
+    let mut sink = Vec::new();
+    let err = cc
+        .archive("main", "", scion_client::ArchiveFormat::Tar, "", &mut sink)
+        .await
+        .expect_err("whole repo");
+    assert_eq!(code(&err), Some(Code::PermissionDenied));
+    let (_, n) = cc
+        .archive("main", "src/ui", scion_client::ArchiveFormat::Tar, "", &mut sink)
+        .await
+        .expect("readable subtree");
+    assert!(n > 0 && sink.windows(16).any(|w| w == b"src/ui/button.rs"));
     let changed = cc.diff(None, "main", None).await.expect("diff");
     assert!(changed.iter().all(|f| f.path.starts_with("src/ui")), "{changed:?}");
     assert_eq!(cc.log("main", None, 10, None).await.expect("log").entries.len(), 1);

@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use scion_object::ObjectId;
 use scion_proto::v1::{
-    self, BlameRequest, DerivedKind, DiffRequest, GetDerivedRequest, GetGitShasRequest, IsAncestorRequest, LogRequest,
-    MergeBaseRequest, ResolveRevisionRequest, StatRequest, query_service_client::QueryServiceClient,
+    self, ArchiveRequest, BlameRequest, DerivedKind, DiffRequest, GetDerivedRequest, GetGitShasRequest,
+    IsAncestorRequest, LogRequest, MergeBaseRequest, ResolveRevisionRequest, StatRequest,
+    query_service_client::QueryServiceClient,
 };
 
 use crate::client::Client;
@@ -24,6 +25,26 @@ pub struct LogItem {
     pub generation: u64,
     pub root_tree: ObjectId,
     pub extensions: BTreeMap<String, Bytes>,
+}
+
+/// 归档格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveFormat {
+    TarGz,
+    Zip,
+    Tar,
+}
+
+impl ArchiveFormat {
+    /// `tar.gz`（或 `tgz`）、`zip`、`tar`。
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tar.gz" | "tgz" => Some(Self::TarGz),
+            "zip" => Some(Self::Zip),
+            "tar" => Some(Self::Tar),
+            _ => None,
+        }
+    }
 }
 
 /// 一页历史；`next_page_token` 为 None 表示没有更多。
@@ -253,6 +274,43 @@ impl Client {
             return Err(Error::Protocol("GetGitShas returned a malformed response".into()));
         }
         Ok(resp.git_sha1.iter().map(hex::encode).collect())
+    }
+
+    /// 把 `revision` 中的目录 `path`（空串为整个仓库）打包，边接收边写入 `out`。
+    /// 返回打包的提交与写入的字节数。
+    pub async fn archive(
+        &self,
+        revision: &str,
+        path: &str,
+        format: ArchiveFormat,
+        prefix: &str,
+        out: &mut (dyn std::io::Write + Send),
+    ) -> Result<(ObjectId, u64)> {
+        let req = ArchiveRequest {
+            repo: self.repo()?,
+            revision: revision.to_owned(),
+            format: match format {
+                ArchiveFormat::TarGz => v1::ArchiveFormat::TarGz,
+                ArchiveFormat::Zip => v1::ArchiveFormat::Zip,
+                ArchiveFormat::Tar => v1::ArchiveFormat::Tar,
+            }
+            .into(),
+            path: path.to_owned(),
+            prefix: prefix.to_owned(),
+        };
+        let mut stream = self.query().archive(self.request(req)?).await?.into_inner();
+        let mut changeset = None;
+        let mut written = 0u64;
+        while let Some(msg) = stream.message().await? {
+            if changeset.is_none() {
+                changeset = Some(id_from(&msg.changeset_id, "changeset id")?);
+            }
+            out.write_all(&msg.data)
+                .map_err(|e| Error::Protocol(format!("write archive: {e}")))?;
+            written += msg.data.len() as u64;
+        }
+        let changeset = changeset.ok_or_else(|| Error::Protocol("Archive returned no data".into()))?;
+        Ok((changeset, written))
     }
 
     /// 代数与第一父提交链深度（深度 0 表示未知）。

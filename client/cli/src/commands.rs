@@ -507,6 +507,70 @@ pub async fn cat(ctx: &Ctx, spec: &str) -> Result<CatOut, CliError> {
 }
 
 #[derive(Debug, Serialize)]
+pub struct ArchiveOut {
+    pub schema: &'static str,
+    pub revision: String,
+    pub path: String,
+    pub changeset: String,
+    pub format: String,
+    pub bytes: u64,
+    /// 输出文件；为空表示写到了标准输出。
+    pub output: Option<String>,
+}
+
+impl Render for ArchiveOut {
+    fn text(&self) -> String {
+        format!(
+            "wrote {} ({} bytes, {})",
+            self.output.as_deref().unwrap_or("-"),
+            self.bytes,
+            short(&self.changeset)
+        )
+    }
+}
+
+/// 打包下载 `[REV:][DIR]`；`output` 为空时写到 `out`（标准输出）。
+pub async fn archive(
+    ctx: &Ctx,
+    spec: Option<&str>,
+    format: &str,
+    prefix: &str,
+    output: Option<&Path>,
+    out: &mut (dyn std::io::Write + Send),
+) -> Result<ArchiveOut, CliError> {
+    let fmt = scion_client::ArchiveFormat::parse(format)
+        .ok_or_else(|| CliError::Usage(format!("unknown archive format {format:?} (tar.gz, zip or tar)")))?;
+    let (client, default_rev) = query_client(ctx).await?;
+    let (rev, path) = split_spec(spec.unwrap_or(""), &default_rev);
+    let (changeset, bytes) = match output {
+        Some(file) => {
+            let f =
+                std::fs::File::create(file).map_err(|e| CliError::Usage(format!("create {}: {e}", file.display())))?;
+            let mut w = std::io::BufWriter::new(f);
+            let r = client.archive(rev, path, fmt, prefix, &mut w).await;
+            let flushed = std::io::Write::flush(&mut w);
+            if r.is_err() {
+                // 不留下不完整的归档
+                let _ = std::fs::remove_file(file);
+            }
+            let r = r?;
+            flushed.map_err(|e| CliError::Usage(format!("write {}: {e}", file.display())))?;
+            r
+        }
+        None => client.archive(rev, path, fmt, prefix, out).await?,
+    };
+    Ok(ArchiveOut {
+        schema: "scion.cli.archive/v1",
+        revision: rev.to_owned(),
+        path: path.to_owned(),
+        changeset: changeset.to_string(),
+        format: format.to_owned(),
+        bytes,
+        output: output.map(|p| p.display().to_string()),
+    })
+}
+
+#[derive(Debug, Serialize)]
 pub struct LsEntry {
     pub name: String,
     /// file | executable | symlink | dir

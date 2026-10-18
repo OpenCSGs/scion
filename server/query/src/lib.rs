@@ -3,10 +3,12 @@
 //! 只依赖 [`MetaStore`] 里的提交记录（父提交与代数）；log 需要提交说明时再从 [`BlobStore`] 读取提交对象。
 //! 遍历按代数从高到低进行：祖先的代数一定比后代小，因此可以用代数剪枝，并保证分页时不会重复。
 
+mod archive;
 mod blame;
 mod gitsha;
 mod reindex;
 
+pub use archive::{ArchiveFormat, ArchiveOptions, Emit, redacted_placeholder, write_archive};
 pub use blame::{BLAME_KIND, BLAME_VERSION, BlameResult, blame};
 pub use gitsha::{
     GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_SHA1_EXTENSION, GIT_TREE_KIND, GITSHA_KIND, GITSHA_VERSION,
@@ -42,6 +44,9 @@ pub enum QueryError {
     /// 对象不存在（例如文件内容已被清除）。
     #[error("object {0} is missing")]
     MissingObject(ObjectId),
+    /// 生成归档失败（例如条目不能用该格式表示）。
+    #[error("archive: {0}")]
+    Archive(String),
 }
 
 pub type Result<T> = std::result::Result<T, QueryError>;

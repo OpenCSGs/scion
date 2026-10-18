@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bytes.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 scion-tree.workspace = true
@@ -15,6 +16,9 @@ similar = { version = "3", features = ["bytes"] }
 scion-object.workspace = true
 scion-store.workspace = true
 thiserror.workspace = true
+tar = "0.4"
+flate2 = "1"
+zip = { version = "7", default-features = false, features = ["deflate", "deflate-flate2"] }
 
 [dev-dependencies]
 scion-store-sql.workspace = true

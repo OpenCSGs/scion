@@ -727,6 +727,7 @@ SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architectur
 - `scion.<repo>.ref.updated` 事件（包含路径级 delta），发到 NATS，或通过 webhook 推送。
 - 派生数据：`GitSha`、`LastCommitPerEntry`、`LfsPointerIndex`、`TreeStats`、`Sha256`。
   > **GitSha 实现说明**（2026-10-18）：所有提交都有 git 兼容 sha。导入的提交用扩展字段 `git.sha1`；其余提交按需逐层计算 blob/tree/commit（commit 对象多一行 `scion-id` 头保证单射），结果缓存在派生数据 `git-commit`、`git-sha1`（反向）、`git-tree`、`git-blob` 中，未变化的子树直接命中。`GetGitShas` 批量映射，事件与 pre-land 请求带 `old_git_sha`/`new_git_sha`/`git_sha`。S3 的 git-gateway 复用同一套对象格式。详见 [`docs/guide/git-sha.md`](../guide/git-sha.md)。
+  > **Archive 实现说明**（2026-10-18）：`QueryService.Archive` 按目录树深度优先写 tar / tar.gz / zip（zip 用不需要 Seek 的流式写入），每满 `max_chunk_bytes` 发送一块，内存与单个文件相当；条目时间取提交时间，redact 的文件写占位说明。权限要求子树全部可读。详见 [`docs/guide/archive.md`](../guide/archive.md)。
 - `QueryService.Archive`、`ImportService`（从 git 增量导入）。
 - `scion git-gateway` 角色：实现 Gitaly 的 SmartHTTP/SSH 服务子集，让 git CLI 也能访问 Scion 仓库。
 - 对象存储：与 starhub 共用 MinIO 时，使用独立的 bucket 或 `prefix`（见 §4.6）。

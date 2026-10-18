@@ -327,3 +327,72 @@ async fn auth_required_server_with_admin_commands() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `--metrics-listen`：/metrics 输出各 RPC 的计数与延迟、合入批次和对象缓存的指标。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_endpoint_reports_rpcs_and_lands() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_scion"))
+        .args([
+            "--log-format",
+            "json",
+            "server",
+            "--listen",
+            "127.0.0.1:0",
+            "--metrics-listen",
+            "127.0.0.1:0",
+            "--repo",
+            "mono",
+            "--tenant-concurrency",
+            "100",
+        ])
+        .env("SCION_LOG", "info")
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let mut lines = BufReader::new(child.stderr.take().expect("stderr")).lines();
+    let (mut metrics, mut addr) = (None, None);
+    while addr.is_none() {
+        let line = lines.next().expect("exited before listening").expect("read");
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap_or_default();
+        let found = v["fields"]["addr"].as_str().map(str::to_owned);
+        match v["fields"]["message"].as_str() {
+            Some("metrics listening") => metrics = found,
+            Some("scion server listening") => addr = found,
+            _ => {}
+        }
+    }
+    std::thread::spawn(move || for _ in lines {});
+    let proc = ServerProcess(Some(child));
+    let metrics = metrics.expect("metrics address logged before the listener");
+
+    let c = scion_client::Client::builder()
+        .endpoint(format!("http://{}", addr.expect("addr")))
+        .repo("mono")
+        .build()
+        .await
+        .expect("connect");
+    let cs = c.changeset(None).put("a", "a").create().await.expect("create");
+    c.land("main", &cs.id).await.expect("land");
+    c.read_file("main", "a").await.expect("read");
+    drop(c);
+
+    let mut s = tokio::net::TcpStream::connect(&metrics).await.expect("connect metrics");
+    s.write_all(b"GET /metrics HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    let mut text = String::new();
+    s.read_to_string(&mut text).await.expect("read");
+    for want in [
+        "scion_rpc_requests_total{service=\"scion.v1.LandService\",method=\"Land\",code=\"OK\"} 1",
+        "scion_rpc_duration_seconds_count{service=\"scion.v1.QueryService\",method=\"ReadFile\"}",
+        "scion_land_batches_total{outcome=\"landed\"} 1",
+        "scion_land_duration_seconds_count 1",
+        "scion_object_cache_requests_total{layer=\"l3\"",
+        "scion_rpc_in_flight",
+    ] {
+        assert!(text.contains(want), "missing {want} in\n{text}");
+    }
+    stop(proc);
+}

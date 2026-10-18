@@ -199,6 +199,59 @@ pub async fn serve(
     serve_node(listener, node, info, channels, &config, shutdown).await
 }
 
+/// 把节点的统计注册为 Prometheus 指标（抓取时读取）。返回值被释放后不再输出。
+pub fn register_stats(node: &Arc<CacheNode>) -> Vec<Arc<scion_obs::metrics::SampleFn>> {
+    use scion_obs::{Sample, SampleKind, metrics};
+    let sampled = |f: fn(&StatsSnapshot) -> Vec<Sample>| -> Arc<scion_obs::metrics::SampleFn> {
+        let weak = Arc::downgrade(node);
+        Arc::new(move || weak.upgrade().map(|n| f(&n.stats())).unwrap_or_default())
+    };
+    let sources = [
+        (
+            "scion_l2_lookups",
+            "Object lookups in the regional cache, by result",
+            sampled(|s| {
+                vec![
+                    Sample::new(&[("result", "hit")], s.hits as f64),
+                    Sample::new(&[("result", "miss")], s.misses as f64),
+                ]
+            }),
+        ),
+        (
+            "scion_l2_fetched_objects",
+            "Objects the regional cache fetched, by source",
+            sampled(|s| {
+                vec![
+                    Sample::new(&[("from", "peer")], s.peer_objects as f64),
+                    Sample::new(&[("from", "upstream")], s.upstream_objects as f64),
+                ]
+            }),
+        ),
+        (
+            "scion_l2_upstream_requests",
+            "Requests the regional cache sent to the servers",
+            sampled(|s| vec![Sample::new(&[], s.upstream_requests as f64)]),
+        ),
+        (
+            "scion_l2_checks",
+            "Visibility and access checks sent to the servers",
+            sampled(|s| {
+                vec![
+                    Sample::new(&[("kind", "visibility")], s.visibility_checks as f64),
+                    Sample::new(&[("kind", "access")], s.access_checks as f64),
+                ]
+            }),
+        ),
+    ];
+    sources
+        .into_iter()
+        .map(|(name, help, f)| {
+            metrics().register_sampled(name, help, SampleKind::Counter, Arc::downgrade(&f));
+            f
+        })
+        .collect()
+}
+
 /// 用已组装好的节点提供服务（测试与基准测试可以先拿到节点再启动）。
 pub async fn serve_node(
     listener: TcpListener,
@@ -234,7 +287,13 @@ pub async fn serve_node(
     let objects = ObjectServiceServer::new(CacheObjectSvc::new(node.clone(), limits, channels))
         .max_encoding_message_size(max_msg);
     let infos = ServerInfoServiceServer::new(CacheInfoSvc::from_upstream(&info));
+    // 抓取 /metrics 时读取本节点的统计；serve_node 返回后不再输出
+    let _stats = register_stats(&node);
     let result = tonic::transport::Server::builder()
+        .layer(scion_obs::trace::TraceLayer)
+        .layer(scion_obs::grpc::MetricsLayer)
+        // 不设上限，只把客户端的 deadline 交给回源请求
+        .layer(scion_obs::deadline::DeadlineLayer::new(None))
         .add_service(health_svc)
         .add_service(infos)
         .add_service(objects)

@@ -783,6 +783,7 @@ mod tests {
         assert_eq!(err.code(), Code::Unauthenticated);
         let alice = RequestCtx {
             authorization: Some(tonic::metadata::MetadataValue::from_static("Bearer alice")),
+            ..RequestCtx::default()
         };
         let err = n.get_many("secret", &[id(A)], &alice, false).await.expect_err("denied");
         assert_eq!(err.code(), Code::PermissionDenied);
@@ -796,6 +797,7 @@ mod tests {
         assert_eq!(n.stats().access_checks, 4);
         let invalid = RequestCtx {
             authorization: Some(tonic::metadata::MetadataValue::from_static("Bearer invalid")),
+            ..RequestCtx::default()
         };
         assert_eq!(
             n.get_many("open", &[id(A)], &invalid, false)

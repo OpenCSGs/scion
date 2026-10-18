@@ -6,6 +6,7 @@ members = [
     "common/object",
     "common/flight",
     # 服务端
+    "server/obs",
     "server/store",
     "server/store-sql",
     "server/store-blob",
@@ -37,6 +38,7 @@ license = "Apache-2.0"
 scion-proto = { path = "common/protocol" }
 scion-object = { path = "common/object" }
 scion-flight = { path = "common/flight" }
+scion-obs = { path = "server/obs" }
 scion-store = { path = "server/store" }
 scion-store-sql = { path = "server/store-sql" }
 scion-store-blob = { path = "server/store-blob" }

@@ -114,6 +114,17 @@ async fn reads_through_and_then_hits() {
     assert!(via_cache.get_object(&cs.root_tree).await.is_ok());
     let st = node.stats();
     assert_eq!((st.hits, st.misses, st.upstream_objects), (1, 2, 2));
+    // 统计同时以 Prometheus 指标输出
+    let text = scion_obs::metrics().encode();
+    for want in [
+        "scion_l2_lookups_total{result=\"hit\"}",
+        "scion_l2_fetched_objects_total{from=\"upstream\"}",
+        "scion_l2_upstream_requests_total",
+        "scion_l2_checks_total{kind=\"access\"}",
+        "scion_rpc_requests_total{service=\"scion.v1.ObjectService\",method=\"GetObjects\",code=\"OK\"}",
+    ] {
+        assert!(text.contains(want), "missing {want} in\n{text}");
+    }
 
     // 不存在的对象：L3 的错误原样返回，且不影响缓存
     let err = via_cache

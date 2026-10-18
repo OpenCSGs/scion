@@ -34,6 +34,7 @@ fn area_of(rel_dir: &Path) -> Option<Area> {
 /// 服务端内部分层：只能依赖层级更低的 crate。新增服务端 crate 时在这里登记。
 fn server_rank(name: &str) -> Option<u32> {
     Some(match name {
+        "scion-obs" => 0,
         "scion-store" => 1,
         "scion-store-sql" | "scion-store-blob" | "scion-cache" | "scion-auth" => 2,
         "scion-tree" => 3,

@@ -15,6 +15,7 @@
 - [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
 - [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查
 - [多节点部署与合入](docs/guide/cluster.md)：合入语义（rebase、恰好一次）、`--advertise-url` 集群模式、故障切换与过载保护
+- [指标与追踪](docs/guide/observability.md)：Prometheus 指标、OpenTelemetry 追踪与常用查询
 - [缓存](docs/guide/cache.md)：区域缓存 `scion cache`（分片、对冲、预热）与本机 daemon `scn daemon`
 - [认证与鉴权](docs/guide/auth.md)：令牌、访问控制策略、OIDC 登录、外部签发方、OPA 兼容的鉴权回调、接入 starhub-server
 - [Redaction 与数据校验](docs/guide/redaction.md)：清除泄露的内容（redact、purge）、`scion admin fsck`、`scion admin lease ls`
@@ -38,7 +39,13 @@
 - **运维**：`scion admin fsck` 对照对象索引与对象存储校验 ref、提交、目录树和文件；`scion admin lease ls` 列出租约。
 - **稀疏检出**：`scn clone --sparse a/,b/` 与 `scn sparse add|rm|set|disable`。范围外的子树不会被拉取，提交、合入和 rebase 都不影响服务端上范围外的内容。
 
-M5 后续还有可观测性、YugabyteDB、Helm 与混沌测试。
+- **可观测性与限流**：
+  - `--metrics-listen` 提供 Prometheus 指标：各 RPC 的请求数、状态码与延迟，合入批次与延迟，L2 和 L3 的缓存命中率，被拒绝的请求；
+  - OpenTelemetry 追踪（OTLP），合入转发和缓存回源时接续调用方的 `traceparent`；
+  - 按调用者的速率与在途请求上限（`--tenant-rate`、`--tenant-concurrency`）；
+  - deadline：取客户端 `grpc-timeout` 与 `--max-request-timeout` 中较小的一个，并传给 leader 和服务端。
+
+M5 后续还有 YugabyteDB、Helm 与混沌测试。
 
 **M4 缓存层**已完成：
 - **区域缓存 `scion cache`（L2）**：
@@ -64,7 +71,7 @@ M5 后续还有可观测性、YugabyteDB、Helm 与混沌测试。
 - M2 实现了历史查询（10 万提交 p99 低于 20 ms）；
 - M1 实现了写入路径、Lite 模式、`scn` 工作副本与 git 导入。
 
-M5 剩余工作：OpenTelemetry 与指标、YugabyteDB 档、Helm 与发布构建。
+M5 剩余工作：YugabyteDB 档、Helm 与发布构建。
 
 ## 性能
 

@@ -90,12 +90,18 @@ impl LandSvc {
         leader: &str,
         req: LandRequest,
         auth: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
+        deadline: Option<scion_obs::deadline::Deadline>,
     ) -> Result<Response<LandResponse>, Status> {
         let mut fwd = Request::new(req);
         fwd.metadata_mut()
             .insert(FORWARDED_HEADER, tonic::metadata::MetadataValue::from_static("1"));
         if let Some(a) = auth {
             fwd.metadata_mut().insert("authorization", a);
+        }
+        // leader 接续同一个 trace，并沿用本请求剩余的 deadline
+        scion_obs::trace::inject(fwd.metadata_mut());
+        if let Some(d) = deadline {
+            fwd.set_timeout(d.remaining());
         }
         tracing::debug!(leader, "forwarding land to the ref's leader");
         let resp = LandServiceClient::new(self.peer(leader)?).land(fwd).await?;
@@ -173,6 +179,7 @@ impl LandService for LandSvc {
     async fn land(&self, request: Request<LandRequest>) -> Result<Response<LandResponse>, Status> {
         let forwarded = request.metadata().contains_key(FORWARDED_HEADER);
         let auth = request.metadata().get("authorization").cloned();
+        let deadline = request.extensions().get::<scion_obs::deadline::Deadline>().copied();
         let p = principal(&request);
         let req = request.into_inner();
         authorize(
@@ -193,7 +200,7 @@ impl LandService for LandSvc {
             Ok(out) => out,
             // 别的节点是 leader：转给它（转发来的请求不再转发，由客户端重试）
             Err(LandError::NotLeader { leader }) if !forwarded => {
-                let resp = self.forward(&leader, req.clone(), auth).await?;
+                let resp = self.forward(&leader, req.clone(), auth, deadline).await?;
                 if let Ok(target) = ObjectId::from_bytes(&resp.get_ref().tip) {
                     let state = RefState {
                         target,

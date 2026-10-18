@@ -231,9 +231,18 @@ pub async fn serve(
     let admin_svc =
         AdminServiceServer::new(AdminSvc::new(guard.clone()).with_redactor(redactor, app.config.purge_grace));
 
+    let tenant = limit::TenantLimitLayer::new(
+        app.config.tenant_rate.map(|r| (r.per_second, r.burst)),
+        app.config.max_concurrent_per_tenant,
+    );
+    // 从外到内：追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务（§5.3）
     let result = tonic::transport::Server::builder()
+        .layer(scion_obs::trace::TraceLayer)
+        .layer(scion_obs::grpc::MetricsLayer)
         .layer(limit::ConcurrencyLimitLayer::new(app.config.max_concurrent_requests))
         .layer(auth::AuthLayer::new(guard))
+        .layer(tenant)
+        .layer(scion_obs::deadline::DeadlineLayer::new(app.config.max_request_timeout))
         .add_service(health_svc)
         .add_service(info)
         .add_service(objects)

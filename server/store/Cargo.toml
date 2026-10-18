@@ -11,6 +11,7 @@ license.workspace = true
 testsuite = []
 
 [dependencies]
+scion-obs.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
 moka.workspace = true

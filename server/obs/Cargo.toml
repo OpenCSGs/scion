@@ -1,0 +1,31 @@
+[package]
+name = "scion-obs"
+description = "Scion observability: Prometheus metrics, OpenTelemetry tracing, gRPC deadlines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+http.workspace = true
+http-body = "1"
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
+pin-project-lite = "0.2"
+prometheus-client = "0.25"
+tokio.workspace = true
+tonic.workspace = true
+tower.workspace = true
+tracing.workspace = true
+tracing-opentelemetry = { version = "0.34", default-features = false }
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "io-util"] }
+bytes.workspace = true
+http-body-util = "0.1"
+
+[lints]
+workspace = true

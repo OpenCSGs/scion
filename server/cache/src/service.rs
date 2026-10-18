@@ -53,6 +53,8 @@ fn parse_id(raw: &[u8]) -> Result<ObjectId, Status> {
 fn ctx_of<T>(req: &Request<T>) -> (RequestCtx, bool) {
     let ctx = RequestCtx {
         authorization: req.metadata().get("authorization").cloned(),
+        traceparent: req.metadata().get("traceparent").cloned(),
+        deadline: req.extensions().get::<scion_obs::deadline::Deadline>().copied(),
     };
     (ctx, req.metadata().contains_key(CACHE_FORWARDED_HEADER))
 }
@@ -145,7 +147,7 @@ impl ObjectService for CacheObjectSvc {
 }
 
 impl CacheObjectSvc {
-    /// 选一个上游，把请求连同调用者的 `authorization` 转过去。
+    /// 选一个上游，把请求连同调用者的 `authorization`、trace 上下文与 deadline 转过去。
     fn forward<T>(&self, request: Request<T>) -> Result<(Channel, Request<T>), Status> {
         if self.upstreams.is_empty() {
             return Err(Status::unavailable("no upstream configured"));
@@ -153,9 +155,7 @@ impl CacheObjectSvc {
         let (ctx, _) = ctx_of(&request);
         let i = self.next.fetch_add(1, Ordering::Relaxed) % self.upstreams.len();
         let mut fwd = Request::new(request.into_inner());
-        if let Some(a) = ctx.authorization {
-            fwd.metadata_mut().insert("authorization", a);
-        }
+        ctx.apply(&mut fwd);
         Ok((self.upstreams[i].clone(), fwd))
     }
 }

@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+scion-obs.workspace = true
 bytes.workspace = true
 scion-object.workspace = true
 scion-proto.workspace = true
@@ -24,6 +25,7 @@ tonic-health.workspace = true
 tonic-types.workspace = true
 tower.workspace = true
 http.workspace = true
+moka.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

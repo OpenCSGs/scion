@@ -54,8 +54,15 @@ scion server --listen 0.0.0.0:7080 --advertise-url http://10.0.0.12:7080 \
 |---|---|---|---|
 | `--max-concurrent-requests N` | `SCION_MAX_CONCURRENT_REQUESTS` | 10000 | 每个节点的在途请求上限。超过时立即拒绝（`RESOURCE_EXHAUSTED` / `RATE_LIMITED`，带 `retry_after_ms`），不排队。健康检查不受限制。 |
 | `--repo-write-rate RATE[/BURST]` | `SCION_REPO_WRITE_RATE` | 不限制 | 每个节点、每个仓库的写入速率（上传、创建提交、合入各算一次），超过时返回 `RATE_LIMITED`。 |
+| `--tenant-rate RATE[/BURST]` | `SCION_TENANT_RATE` | 不限制 | 每个节点、每个调用者的请求速率，所有 RPC 各算一次。调用者是认证出的主体；匿名请求按来源 IP 计。 |
+| `--tenant-concurrency N` | `SCION_TENANT_CONCURRENCY` | 不限制 | 每个节点、每个调用者的在途请求上限，避免一个调用者占满全局名额。 |
+| `--max-request-timeout DURATION` | `SCION_MAX_REQUEST_TIMEOUT` | 60s | 请求处理时间上限，与客户端的 deadline（`grpc-timeout`）取较小者，超时返回 `DEADLINE_EXCEEDED`。流式响应只限制到开始返回为止。`0s` 只按客户端的 deadline。 |
 
 另外，每个 ref 的合入队列最多 1024 个请求，排满时同样返回 `RATE_LIMITED`。
+
+- **按调用者的限制**：健康检查不计入；集群内转发的请求已在第一个节点计过，也不再计。
+- **deadline 的传递**：转发给 leader 的合入沿用剩余的 deadline。区域缓存回源时同样沿用调用者剩余的时间。
+- **被拒绝的请求**：计入指标 `scion_rejected_requests_total{reason}`，见 [observability.md](observability.md)。
 
 ## 性能参考
 

@@ -715,6 +715,7 @@ impl MetaStore for PgMetaStore {
 
     async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
         let repo_id = self.repo_id(repo).await?;
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
         let done = match expect {
             Some(v) => sqlx::query("DELETE FROM refs WHERE repo_id = $1 AND name = $2 AND version = $3")
                 .bind(repo_id)
@@ -724,16 +725,24 @@ impl MetaStore for PgMetaStore {
                 .bind(repo_id)
                 .bind(name),
         }
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| backend("delete ref", e))?;
         if done.rows_affected() == 0 {
+            tx.rollback().await.map_err(|e| backend("rollback", e))?;
             return Err(Error::RefVersionMismatch {
                 name: name.to_owned(),
                 current: self.current_version(repo_id, name).await?,
             });
         }
-        Ok(())
+        // 重新创建的 ref 版本从 1 开始，旧的审计记录会与之冲突：随 ref 一起删除
+        sqlx::query("DELETE FROM ref_log WHERE repo_id = $1 AND name = $2")
+            .bind(repo_id)
+            .bind(name)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| backend("delete ref log", e))?;
+        tx.commit().await.map_err(|e| backend("commit", e))
     }
 
     async fn release_lease(&self, scope: &str, holder: &str) -> Result<()> {

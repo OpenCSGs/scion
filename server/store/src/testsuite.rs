@@ -1155,6 +1155,16 @@ pub async fn repo_admin<S: MetaStore + ?Sized>(s: &S) {
         })
     );
     s.delete_ref("adm/fork", "main", None).await.expect("unconditional");
+    // 删除后重新创建：版本从 1 开始，之后照常前进（审计日志不能因旧版本号冲突）
+    let again = s
+        .cas_ref("adm/fork", "dev", RefExpect::Absent, root.id)
+        .await
+        .expect("recreate");
+    assert_eq!(again.version, 1);
+    s.cas_ref("adm/fork", "dev", RefExpect::Version(1), root.id)
+        .await
+        .expect("advance");
+    s.delete_ref("adm/fork", "dev", None).await.expect("delete again");
     assert_eq!(
         s.get_ref("adm/src", "main")
             .await

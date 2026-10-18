@@ -1,26 +1,31 @@
-//! RefService：解析、列出与订阅 ref。
+//! RefService：解析、列出与订阅 ref，以及直接创建、修改、删除 ref（分支管理）。
+//!
+//! 平时前进 ref 走 LandService（服务端 rebase、批处理、幂等）；这里的写操作是对单个 ref 的 CAS，
+//! 不 rebase，用于建分支、删分支和强制回退。删除后重新创建的 ref 版本从 1 开始。
 
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use scion_object::ObjectId;
 use scion_proto::v1::ref_service_server::RefService;
 use scion_proto::v1::{
-    ListRefsRequest, ListRefsResponse, RefEvent, RefInfo, ResolveRefRequest, ResolveRefResponse, WatchRefsRequest,
+    CreateRefRequest, CreateRefResponse, DeleteRefRequest, DeleteRefResponse, ListRefsRequest, ListRefsResponse,
+    RefEvent, RefInfo, ResolveRefRequest, ResolveRefResponse, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest,
     WatchRefsResponse,
 };
-use scion_store::MetaStore;
+use scion_store::{MetaStore, RefExpect, RefState};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
-use crate::auth::{authorize_any, principal};
-use crate::service::support::{check_repo, resolve_revision};
+use crate::auth::{authorize, authorize_any, principal};
+use crate::service::support::{check_repo, parse_id, resolve_revision};
 use crate::status;
 use crate::watch::{RefHub, RefUpdate};
-use scion_auth::{Action, Guard};
+use scion_auth::{Action, Guard, Principal, Request as AuthRequest};
 
 pub type WatchRefsStream = Pin<Box<dyn Stream<Item = Result<WatchRefsResponse, Status>> + Send>>;
 
@@ -42,6 +47,44 @@ impl RefSvc {
     pub fn with_guard(mut self, guard: Arc<Guard>) -> Self {
         self.guard = guard;
         self
+    }
+
+    /// 写 ref 前的检查：land 权限、ref 名、目标是仓库中的提交。
+    async fn writable(&self, p: &Principal, repo: &str, reference: &str, target: &[u8]) -> Result<ObjectId, Status> {
+        authorize(
+            &self.guard,
+            p,
+            AuthRequest::repo(repo, Action::Land).with_ref(reference),
+        )
+        .await?;
+        scion_land::validate_ref_name(reference).map_err(status::from_land)?;
+        let id = parse_id(target)?;
+        if self
+            .meta
+            .get_changeset(repo, &id)
+            .await
+            .map_err(status::from_store)?
+            .is_none()
+        {
+            return Err(status::object_missing(&[id]));
+        }
+        Ok(id)
+    }
+
+    /// CAS 成功后通知订阅者并记日志。
+    async fn written(&self, p: &Principal, repo: &str, reference: &str, state: RefState, what: &str) -> RefInfo {
+        tracing::info!(%repo, r#ref = %reference, target = %state.target, version = state.version,
+            by = %p.subject, "ref {what}");
+        self.hub.publish(repo, reference, state).await;
+        ref_info(reference.to_owned(), state)
+    }
+}
+
+fn ref_info(name: String, s: RefState) -> RefInfo {
+    RefInfo {
+        name,
+        changeset_id: Bytes::copy_from_slice(&s.target.to_bytes()),
+        version: s.version,
     }
 }
 
@@ -163,15 +206,79 @@ impl RefService for RefSvc {
         check_repo(self.meta.as_ref(), &req.repo).await?;
         let refs = self.meta.list_refs(&req.repo).await.map_err(status::from_store)?;
         Ok(Response::new(ListRefsResponse {
-            refs: refs
-                .into_iter()
-                .map(|(name, s)| RefInfo {
-                    name,
-                    changeset_id: Bytes::copy_from_slice(&s.target.to_bytes()),
-                    version: s.version,
-                })
-                .collect(),
+            refs: refs.into_iter().map(|(name, s)| ref_info(name, s)).collect(),
         }))
+    }
+
+    async fn create_ref(&self, request: Request<CreateRefRequest>) -> Result<Response<CreateRefResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        let target = self.writable(&p, &req.repo, &req.r#ref, &req.changeset_id).await?;
+        let state = self
+            .meta
+            .cas_ref(&req.repo, &req.r#ref, RefExpect::Absent, target)
+            .await
+            .map_err(status::from_store)?;
+        let info = self.written(&p, &req.repo, &req.r#ref, state, "created").await;
+        Ok(Response::new(CreateRefResponse { r#ref: Some(info) }))
+    }
+
+    async fn update_ref(&self, request: Request<UpdateRefRequest>) -> Result<Response<UpdateRefResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        let target = self.writable(&p, &req.repo, &req.r#ref, &req.changeset_id).await?;
+        let expect = match req.expected_version {
+            0 => {
+                self.meta
+                    .get_ref(&req.repo, &req.r#ref)
+                    .await
+                    .map_err(status::from_store)?
+                    .ok_or_else(|| status::ref_not_found(&req.r#ref))?
+                    .version
+            }
+            v => v,
+        };
+        let state = self
+            .meta
+            .cas_ref(&req.repo, &req.r#ref, RefExpect::Version(expect), target)
+            .await
+            .map_err(status::from_store)?;
+        let info = self.written(&p, &req.repo, &req.r#ref, state, "updated").await;
+        Ok(Response::new(UpdateRefResponse { r#ref: Some(info) }))
+    }
+
+    async fn delete_ref(&self, request: Request<DeleteRefRequest>) -> Result<Response<DeleteRefResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        authorize(
+            &self.guard,
+            &p,
+            AuthRequest::repo(&req.repo, Action::Land).with_ref(&req.r#ref),
+        )
+        .await?;
+        let repo = self
+            .meta
+            .get_repo(&req.repo)
+            .await
+            .map_err(status::from_store)?
+            .filter(|r| r.deleted_at_ms.is_none())
+            .ok_or_else(|| status::repo_not_found(&req.repo))?;
+        if repo.default_branch == req.r#ref {
+            return Err(Status::failed_precondition(format!(
+                "{:?} is the default branch of {}; change the default branch first",
+                req.r#ref, req.repo
+            )));
+        }
+        let expect = Some(req.expected_version).filter(|v| *v != 0);
+        match self.meta.delete_ref(&req.repo, &req.r#ref, expect).await {
+            Ok(()) => {}
+            Err(scion_store::Error::RefVersionMismatch { current: None, .. }) => {
+                return Err(status::ref_not_found(&req.r#ref));
+            }
+            Err(e) => return Err(status::from_store(e)),
+        }
+        tracing::info!(repo = %req.repo, r#ref = %req.r#ref, by = %p.subject, "ref deleted");
+        Ok(Response::new(DeleteRefResponse {}))
     }
 
     async fn watch_refs(&self, request: Request<WatchRefsRequest>) -> Result<Response<Self::WatchRefsStream>, Status> {
@@ -200,7 +307,6 @@ mod tests {
     use crate::service::land::LandSvc;
     use crate::service::write::spec_to_changeset;
     use crate::service::write::tests::{REPO, spec, svc};
-    use scion_object::ObjectId;
     use tonic::Code;
 
     #[tokio::test]
@@ -238,6 +344,123 @@ mod tests {
             .into_inner();
         assert_eq!(l.refs.len(), 1);
         assert_eq!(l.refs[0].name, "main");
+    }
+
+    #[tokio::test]
+    async fn create_update_and_delete_refs() {
+        let (store, w) = svc().await;
+        let refs = RefSvc::new(
+            store.clone(),
+            RefHub::new(store.clone(), std::time::Duration::from_secs(3600)),
+        );
+        let a = w
+            .create(REPO, &spec_to_changeset(spec(&[], vec![]), 10).expect("s"))
+            .await
+            .expect("a");
+        let b = w
+            .create(REPO, &spec_to_changeset(spec(&[a.id], vec![]), 11).expect("s"))
+            .await
+            .expect("b");
+        let id = |x: ObjectId| Bytes::copy_from_slice(&x.to_bytes());
+        let create = |name: &str, target: ObjectId| CreateRefRequest {
+            repo: REPO.into(),
+            r#ref: name.into(),
+            changeset_id: id(target),
+        };
+        let made = refs
+            .create_ref(Request::new(create("feature/x", b.id)))
+            .await
+            .expect("create")
+            .into_inner()
+            .r#ref
+            .expect("ref");
+        assert_eq!((made.name.as_str(), made.version), ("feature/x", 1));
+        let err = refs
+            .create_ref(Request::new(create("feature/x", a.id)))
+            .await
+            .expect_err("exists");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        let err = refs
+            .create_ref(Request::new(create("../x", a.id)))
+            .await
+            .expect_err("bad name");
+        assert_eq!(err.code(), Code::InvalidArgument);
+        let missing = ObjectId::hash(scion_object::ObjectKind::Changeset, b"nope");
+        let err = refs
+            .create_ref(Request::new(create("y", missing)))
+            .await
+            .expect_err("missing");
+        assert_eq!(err.code(), Code::NotFound, "OBJECT_MISSING");
+
+        // 强制回退（不是快进）；带版本时检查版本
+        let update = |target: ObjectId, expected_version: u64| UpdateRefRequest {
+            repo: REPO.into(),
+            r#ref: "feature/x".into(),
+            changeset_id: id(target),
+            expected_version,
+        };
+        let moved = refs
+            .update_ref(Request::new(update(a.id, 0)))
+            .await
+            .expect("update")
+            .into_inner()
+            .r#ref
+            .expect("ref");
+        assert_eq!(
+            (ObjectId::from_bytes(&moved.changeset_id), moved.version),
+            (Ok(a.id), 2)
+        );
+        let err = refs.update_ref(Request::new(update(b.id, 1))).await.expect_err("stale");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        refs.update_ref(Request::new(update(b.id, 2))).await.expect("versioned");
+        let err = refs
+            .update_ref(Request::new(UpdateRefRequest {
+                r#ref: "nope".into(),
+                ..update(a.id, 0)
+            }))
+            .await
+            .expect_err("no such ref");
+        assert_eq!(err.code(), Code::NotFound);
+
+        // 删除：默认分支受保护；版本不符、ref 不存在
+        refs.create_ref(Request::new(create("main", b.id))).await.expect("main");
+        let delete = |name: &str, expected_version: u64| DeleteRefRequest {
+            repo: REPO.into(),
+            r#ref: name.into(),
+            expected_version,
+        };
+        let err = refs
+            .delete_ref(Request::new(delete("main", 0)))
+            .await
+            .expect_err("default branch");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        let err = refs
+            .delete_ref(Request::new(delete("feature/x", 1)))
+            .await
+            .expect_err("stale");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        refs.delete_ref(Request::new(delete("feature/x", 3)))
+            .await
+            .expect("delete");
+        let err = refs
+            .delete_ref(Request::new(delete("feature/x", 0)))
+            .await
+            .expect_err("gone");
+        assert_eq!(err.code(), Code::NotFound);
+        let err = refs
+            .delete_ref(Request::new(DeleteRefRequest {
+                repo: "nope".into(),
+                ..delete("x", 0)
+            }))
+            .await
+            .expect_err("no repo");
+        assert_eq!(err.code(), Code::NotFound);
+        let left = refs
+            .list_refs(Request::new(ListRefsRequest { repo: REPO.into() }))
+            .await
+            .expect("list")
+            .into_inner();
+        assert_eq!(left.refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["main"]);
     }
 
     #[tokio::test]

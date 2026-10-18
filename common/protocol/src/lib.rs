@@ -61,6 +61,10 @@ pub mod features {
     pub const ADMIN: &str = "admin";
     /// redaction：读取 redact 过的对象返回 REDACTED，`ListRedactedObjects` 与 AdminService 的 redaction 接口可用。
     pub const REDACTION: &str = "redaction";
+    /// RepoService：创建、列出、修改、删除、恢复、fork 仓库。
+    pub const REPOS_ADMIN: &str = "repos.admin";
+    /// RefService 的 CreateRef / UpdateRef / DeleteRef。
+    pub const REFS_WRITE: &str = "refs.write";
 }
 
 #[cfg(test)]

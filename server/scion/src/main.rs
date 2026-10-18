@@ -195,6 +195,10 @@ struct ServerArgs {
     #[arg(long, value_name = "DURATION", default_value = "1s", value_parser = parse_duration,
         env = "SCION_REF_POLL_INTERVAL")]
     ref_poll_interval: std::time::Duration,
+    /// 删除的仓库保留多久（期间可以恢复），之后清除数据、释放名字（不小于 2h）。
+    #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = parse_duration,
+        env = "SCION_REPO_DELETE_GRACE")]
+    repo_delete_grace: std::time::Duration,
     /// redaction 清除的默认宽限期（AdminService.Purge 未指定时），期间可以撤销。
     #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = parse_duration,
         env = "SCION_PURGE_GRACE")]
@@ -476,6 +480,10 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
     for repo in &args.repos {
         match meta.create_repo(repo).await {
             Ok(()) | Err(scion_store::Error::RepoAlreadyExists(_)) => {}
+            // 通过接口删除、等待清除的仓库：不自动恢复
+            Err(scion_store::Error::RepoDeleted(_)) => {
+                tracing::warn!(%repo, "--repo names a deleted repository; restore it with `scn repo restore`");
+            }
             Err(e) => return Err(e).with_context(|| format!("create repository {repo:?}")),
         }
     }
@@ -492,6 +500,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             auth,
             ref_poll_interval: args.ref_poll_interval,
             purge_grace: args.purge_grace,
+            repo_delete_grace: args.repo_delete_grace,
             ..ServerConfig::default()
         }),
         meta,
@@ -1020,6 +1029,7 @@ mod tests {
         assert_eq!(app.config.max_concurrent_per_tenant, Some(8));
         assert_eq!(app.config.max_request_timeout, None, "0s means client deadlines only");
         assert_eq!(app.config.cluster_secret, None);
+        assert_eq!(app.config.repo_delete_grace, std::time::Duration::from_secs(24 * 3600));
         let (app, _) = build_app(
             &args(&["--advertise-url", "http://10.0.0.5:7080", "--cluster-secret", "s3cret"]),
             no_env,
@@ -1084,6 +1094,21 @@ mod tests {
     async fn build_app_defaults_to_memory() {
         let (_, backends) = build_app(&args(&[]), no_env).await.expect("app");
         assert_eq!(backends, "meta=mem blobs=mem");
+    }
+
+    #[tokio::test]
+    async fn startup_skips_deleted_repositories() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let d = dir.path().to_str().expect("utf8");
+        let flags = ["--lite", "--data-dir", d, "--repo", "mono", "--repo-delete-grace", "3h"];
+        let (app, _) = build_app(&args(&flags), no_env).await.expect("first start");
+        assert_eq!(app.config.repo_delete_grace, std::time::Duration::from_secs(3 * 3600));
+        app.meta.delete_repo("mono", 1).await.expect("delete");
+        drop(app);
+        let (app, _) = build_app(&args(&flags), no_env)
+            .await
+            .expect("restart with a deleted --repo");
+        assert!(!app.meta.repo_exists("mono").await.expect("exists"), "not resurrected");
     }
 
     #[tokio::test]

@@ -492,6 +492,11 @@ impl Client {
         self.server_info().has_feature(feature)
     }
 
+    /// 默认仓库（[`ClientBuilder::repo`] / [`Client::with_repo`]）。
+    pub fn repo_name(&self) -> Option<&str> {
+        self.repo.as_deref()
+    }
+
     pub(crate) fn repo(&self) -> Result<String> {
         self.repo.clone().ok_or(Error::MissingRepo)
     }

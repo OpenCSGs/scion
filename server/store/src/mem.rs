@@ -11,11 +11,13 @@ use crate::error::{Error, Result};
 use crate::repo::validate_repo_name;
 use crate::{
     BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, TokenRecord, path_within,
+    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, TokenRecord,
+    path_within, prefix_upper_bound,
 };
 
-#[derive(Default)]
+#[derive(Clone)]
 struct RepoData {
+    info: RepoInfo,
     refs: HashMap<String, RefState>,
     objects: HashMap<ObjectId, u64>,
     changesets: HashMap<ObjectId, ChangesetRecord>,
@@ -28,6 +30,25 @@ struct RepoData {
     idempotency: HashMap<String, IdempotencyRecord>,
 }
 
+impl RepoData {
+    fn new(info: RepoInfo) -> Self {
+        Self {
+            info,
+            refs: HashMap::new(),
+            objects: HashMap::new(),
+            changesets: HashMap::new(),
+            derived: HashMap::new(),
+            paths: BTreeMap::new(),
+            landed: HashMap::new(),
+            idempotency: HashMap::new(),
+        }
+    }
+
+    fn live(&self) -> bool {
+        self.info.deleted_at_ms.is_none()
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     repos: BTreeMap<String, RepoData>,
@@ -37,6 +58,16 @@ struct Inner {
     settings: HashMap<String, Vec<u8>>,
     redactions: BTreeMap<(String, ObjectId), Redaction>,
     redaction_seq: u64,
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 /// 同时实现 [`MetaStore`] 与 [`BlobStore`] 的内存存储。
@@ -63,10 +94,12 @@ impl MemStore {
     }
 }
 
+/// 正常（未删除）的仓库。
 fn repo_mut<'a>(inner: &'a mut Inner, repo: &str) -> Result<&'a mut RepoData> {
     inner
         .repos
         .get_mut(repo)
+        .filter(|d| d.live())
         .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))
 }
 
@@ -74,27 +107,173 @@ fn repo_ref<'a>(inner: &'a Inner, repo: &str) -> Result<&'a RepoData> {
     inner
         .repos
         .get(repo)
+        .filter(|d| d.live())
         .ok_or_else(|| Error::RepoNotFound(repo.to_owned()))
+}
+
+/// 名字已被占用时的错误。
+fn taken(inner: &Inner, repo: &str) -> Option<Error> {
+    inner.repos.get(repo).map(|d| {
+        if d.live() {
+            Error::RepoAlreadyExists(repo.to_owned())
+        } else {
+            Error::RepoDeleted(repo.to_owned())
+        }
+    })
 }
 
 #[async_trait]
 impl MetaStore for MemStore {
     async fn create_repo(&self, repo: &str) -> Result<()> {
-        validate_repo_name(repo)?;
-        let mut inner = self.write()?;
-        if inner.repos.contains_key(repo) {
-            return Err(Error::RepoAlreadyExists(repo.to_owned()));
-        }
-        inner.repos.insert(repo.to_owned(), RepoData::default());
-        Ok(())
+        self.create_repo_with(&RepoInfo::new(repo, now_ms())).await
     }
 
     async fn repo_exists(&self, repo: &str) -> Result<bool> {
-        Ok(self.read()?.repos.contains_key(repo))
+        Ok(self.read()?.repos.get(repo).is_some_and(RepoData::live))
     }
 
     async fn list_repos(&self) -> Result<Vec<String>> {
-        Ok(self.read()?.repos.keys().cloned().collect())
+        Ok(self
+            .read()?
+            .repos
+            .iter()
+            .filter(|(_, d)| d.live())
+            .map(|(n, _)| n.clone())
+            .collect())
+    }
+
+    async fn create_repo_with(&self, info: &RepoInfo) -> Result<()> {
+        validate_repo_name(&info.name)?;
+        let mut inner = self.write()?;
+        if let Some(e) = taken(&inner, &info.name) {
+            return Err(e);
+        }
+        let info = RepoInfo {
+            deleted_at_ms: None,
+            ..info.clone()
+        };
+        inner.repos.insert(info.name.clone(), RepoData::new(info));
+        Ok(())
+    }
+
+    async fn get_repo(&self, repo: &str) -> Result<Option<RepoInfo>> {
+        Ok(self.read()?.repos.get(repo).map(|d| d.info.clone()))
+    }
+
+    async fn list_repo_infos(&self, filter: &RepoFilter) -> Result<Vec<RepoInfo>> {
+        let inner = self.read()?;
+        let upper = prefix_upper_bound(&filter.prefix);
+        let lower = match &filter.after {
+            Some(a) if a.as_str() >= filter.prefix.as_str() => std::ops::Bound::Excluded(a.clone()),
+            _ => std::ops::Bound::Included(filter.prefix.clone()),
+        };
+        Ok(inner
+            .repos
+            .range((lower, std::ops::Bound::Excluded(upper)))
+            .filter(|(_, d)| d.live() != filter.deleted)
+            .take(filter.limit)
+            .map(|(_, d)| d.info.clone())
+            .collect())
+    }
+
+    async fn update_repo(&self, repo: &str, patch: &RepoPatch) -> Result<RepoInfo> {
+        let mut inner = self.write()?;
+        let data = repo_mut(&mut inner, repo)?;
+        if let Some(b) = &patch.default_branch {
+            data.info.default_branch = b.clone();
+        }
+        if let Some(d) = &patch.description {
+            data.info.description = d.clone();
+        }
+        Ok(data.info.clone())
+    }
+
+    async fn delete_repo(&self, repo: &str, now_ms: i64) -> Result<()> {
+        let mut inner = self.write()?;
+        repo_mut(&mut inner, repo)?.info.deleted_at_ms = Some(now_ms);
+        Ok(())
+    }
+
+    async fn restore_repo(&self, repo: &str) -> Result<()> {
+        let mut inner = self.write()?;
+        match inner.repos.get_mut(repo) {
+            Some(d) if !d.live() => {
+                d.info.deleted_at_ms = None;
+                Ok(())
+            }
+            _ => Err(Error::RepoNotFound(repo.to_owned())),
+        }
+    }
+
+    async fn purge_repo(&self, repo: &str, _batch: usize) -> Result<bool> {
+        let mut inner = self.write()?;
+        if !inner.repos.get(repo).is_some_and(|d| !d.live()) {
+            return Err(Error::RepoNotFound(repo.to_owned()));
+        }
+        inner.repos.remove(repo);
+        inner.redactions.retain(|(r, _), _| r != repo);
+        Ok(true)
+    }
+
+    async fn fork_repo(&self, source: &str, target: &str, now_ms: i64) -> Result<()> {
+        validate_repo_name(target)?;
+        let mut inner = self.write()?;
+        let src = repo_ref(&inner, source)?.clone();
+        if let Some(e) = taken(&inner, target) {
+            return Err(e);
+        }
+        let info = RepoInfo {
+            name: target.to_owned(),
+            created_at_ms: now_ms,
+            deleted_at_ms: None,
+            forked_from: Some(source.to_owned()),
+            ..src.info.clone()
+        };
+        inner.repos.insert(
+            target.to_owned(),
+            RepoData {
+                info,
+                landed: HashMap::new(),
+                idempotency: HashMap::new(),
+                ..src
+            },
+        );
+        let copied: Vec<Redaction> = inner
+            .redactions
+            .values()
+            .filter(|r| r.repo == source && r.active)
+            .cloned()
+            .collect();
+        for r in copied {
+            inner.redaction_seq += 1;
+            let rec = Redaction {
+                repo: target.to_owned(),
+                seq: inner.redaction_seq,
+                ..r
+            };
+            inner.redactions.insert((target.to_owned(), rec.id), rec);
+        }
+        Ok(())
+    }
+
+    async fn delete_ref(&self, repo: &str, name: &str, expect: Option<u64>) -> Result<()> {
+        let mut inner = self.write()?;
+        let data = repo_mut(&mut inner, repo)?;
+        let current = data.refs.get(name).map(|r| r.version);
+        match (current, expect) {
+            (Some(cur), Some(want)) if cur != want => Err(Error::RefVersionMismatch {
+                name: name.to_owned(),
+                current,
+            }),
+            (Some(_), _) => {
+                data.refs.remove(name);
+                Ok(())
+            }
+            (None, _) => Err(Error::RefVersionMismatch {
+                name: name.to_owned(),
+                current: None,
+            }),
+        }
     }
 
     async fn get_ref(&self, repo: &str, name: &str) -> Result<Option<RefState>> {
@@ -267,7 +446,7 @@ impl MetaStore for MemStore {
             .read()?
             .repos
             .iter()
-            .filter(|(_, d)| d.objects.contains_key(id))
+            .filter(|(_, d)| d.live() && d.objects.contains_key(id))
             .map(|(name, _)| name.clone())
             .collect())
     }
@@ -513,6 +692,7 @@ mod tests {
         testsuite::leases(&MemStore::new()).await;
         testsuite::tokens_and_settings(&MemStore::new()).await;
         testsuite::redactions(&MemStore::new()).await;
+        testsuite::repo_admin(&MemStore::new()).await;
     }
 
     #[tokio::test]

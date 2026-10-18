@@ -63,6 +63,24 @@ pub const ACCESS_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// 服务端不可达（而不是拒绝）时，这段时间内确认过的读权限仍然有效，daemon 可以离线读本地缓存。
 pub const OFFLINE_GRACE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
+/// 按仓库名保存的状态（可见集、redaction）的最长保留时间。服务端删除的仓库名至少 2 小时后才能重新使用，
+/// 所以重新创建的同名仓库不会沿用旧仓库的状态。
+pub const REPO_STATE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+pub fn new_visible_cache() -> Visible {
+    moka::sync::Cache::builder()
+        .max_capacity(1_000_000)
+        .time_to_live(REPO_STATE_TTL)
+        .build()
+}
+
+pub fn new_redaction_cache() -> Redactions {
+    moka::sync::Cache::builder()
+        .max_capacity(100_000)
+        .time_to_live(REPO_STATE_TTL)
+        .build()
+}
+
 pub fn new_access_cache() -> Access {
     moka::sync::Cache::builder()
         .max_capacity(100_000)

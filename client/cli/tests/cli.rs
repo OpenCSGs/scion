@@ -651,3 +651,101 @@ async fn sparse_checkout_commands() {
     .expect("join");
     let _ = tx.send(());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repo_and_branch_commands() {
+    let store = Arc::new(MemStore::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, async {
+        let _ = rx.await;
+    }));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || {
+        let e = ["--endpoint", u.as_str()];
+        let run = |args: &[&str]| {
+            let mut v: Vec<&str> = args.to_vec();
+            v.extend_from_slice(&e);
+            scn_in(&root, &v)
+        };
+        let v = json_of(&run(&[
+            "repo",
+            "create",
+            "org/app",
+            "--description",
+            "the app",
+            "--json",
+        ]));
+        assert_eq!(
+            (v["schema"].as_str(), v["default_branch"].as_str()),
+            (Some("scion.cli.repo/v1"), Some("main"))
+        );
+        let out = run(&["repo", "create", "org/app"]);
+        assert_eq!(out.status.code(), Some(1), "already exists");
+        json_of(&run(&["repo", "create", "org/lib", "--json"]));
+        let v = json_of(&run(&["repo", "ls", "org/", "--limit", "1", "--json"]));
+        assert_eq!(v["repos"].as_array().map(Vec::len), Some(1));
+        assert_eq!(v["truncated"], true);
+        let out = run(&["repo", "ls"]);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "org/app  (default branch main)\norg/lib  (default branch main)"
+        );
+        let v = json_of(&run(&["repo", "set", "org/app", "--description", "renamed", "--json"]));
+        assert_eq!(v["description"], "renamed");
+        assert_eq!(
+            run(&["repo", "set", "org/app"]).status.code(),
+            Some(2),
+            "nothing to change"
+        );
+
+        // 提交后建分支、列出、删除
+        json_of(&run(&["clone", "org/app", "--json"]));
+        let wc = root.join("app");
+        std::fs::write(wc.join("a.txt"), "a").expect("write");
+        json_of(&scn_in(&wc, &["commit", "-m", "a", "--json"]));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let v = json_of(&scn_in(&wc, &["branch", "create", "dev", "--json"]));
+        assert_eq!(
+            (v["action"].as_str(), v["version"].as_u64()),
+            (Some("created"), Some(1))
+        );
+        let out = scn_in(&wc, &["branch", "ls"]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.contains("* main") && text.contains("  dev"), "{text}");
+        assert_eq!(
+            scn_in(&wc, &["branch", "rm", "main"]).status.code(),
+            Some(1),
+            "default branch"
+        );
+        let v = json_of(&scn_in(&wc, &["branch", "rm", "dev", "--json"]));
+        assert_eq!(v["action"], "deleted");
+        let v = json_of(&run(&["branch", "ls", "--repo", "org/app", "--json"]));
+        assert_eq!(v["branches"].as_array().map(Vec::len), Some(1));
+
+        // fork、删除、恢复
+        let v = json_of(&run(&["repo", "fork", "org/app", "me/app", "--json"]));
+        assert_eq!(v["forked_from"], "org/app");
+        let v = json_of(&run(&["repo", "rm", "org/app", "--json"]));
+        assert!(v["purge_after_ms"].as_i64().is_some_and(|p| p > 0));
+        let out = run(&["repo", "ls", "--deleted"]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("deleted, purged after"));
+        let v = json_of(&run(&["repo", "info", "org/app", "--json"]));
+        assert!(v["deleted_at_ms"].is_i64());
+        let v = json_of(&run(&["repo", "restore", "org/app", "--json"]));
+        assert!(v["deleted_at_ms"].is_null());
+        let out = run(&["repo", "info", "org/app"]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("renamed"));
+    })
+    .await
+    .expect("join");
+    let _ = tx.send(());
+}

@@ -51,6 +51,8 @@ impl ServerInfoSvc {
             features::AUTH,
             features::ADMIN,
             features::REDACTION,
+            features::REPOS_ADMIN,
+            features::REFS_WRITE,
         ]
         .map(String::from)
         .to_vec();

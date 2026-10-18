@@ -7,7 +7,8 @@ use std::sync::Arc;
 use scion_proto::v1::ref_service_client::RefServiceClient;
 use scion_proto::v1::ref_service_server::RefService;
 use scion_proto::v1::{
-    ListRefsRequest, ListRefsResponse, ResolveRefRequest, ResolveRefResponse, WatchRefsRequest, WatchRefsResponse,
+    CreateRefRequest, CreateRefResponse, DeleteRefRequest, DeleteRefResponse, ListRefsRequest, ListRefsResponse,
+    ResolveRefRequest, ResolveRefResponse, UpdateRefRequest, UpdateRefResponse, WatchRefsRequest, WatchRefsResponse,
 };
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
@@ -48,6 +49,30 @@ impl RefService for DaemonRefSvc {
         let up = self.daemon.upstreams.get(&upstream_of(&request)?)?;
         let fwd = forward(&request, request.get_ref().clone());
         let resp = RefServiceClient::new(up.raw.clone()).list_refs(fwd).await?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn create_ref(&self, request: Request<CreateRefRequest>) -> Result<Response<CreateRefResponse>, Status> {
+        self.daemon.touch();
+        let up = self.daemon.upstreams.get(&upstream_of(&request)?)?;
+        let fwd = forward(&request, request.get_ref().clone());
+        let resp = RefServiceClient::new(up.raw.clone()).create_ref(fwd).await?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn update_ref(&self, request: Request<UpdateRefRequest>) -> Result<Response<UpdateRefResponse>, Status> {
+        self.daemon.touch();
+        let up = self.daemon.upstreams.get(&upstream_of(&request)?)?;
+        let fwd = forward(&request, request.get_ref().clone());
+        let resp = RefServiceClient::new(up.raw.clone()).update_ref(fwd).await?;
+        Ok(Response::new(resp.into_inner()))
+    }
+
+    async fn delete_ref(&self, request: Request<DeleteRefRequest>) -> Result<Response<DeleteRefResponse>, Status> {
+        self.daemon.touch();
+        let up = self.daemon.upstreams.get(&upstream_of(&request)?)?;
+        let fwd = forward(&request, request.get_ref().clone());
+        let resp = RefServiceClient::new(up.raw.clone()).delete_ref(fwd).await?;
         Ok(Response::new(resp.into_inner()))
     }
 

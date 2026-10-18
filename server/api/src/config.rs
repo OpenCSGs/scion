@@ -85,6 +85,8 @@ pub struct ServerConfig {
     pub policy_poll_interval: std::time::Duration,
     /// Purge 未指定宽限期时，从安排到物理删除对象字节的等待时间（期间可以撤销）。
     pub purge_grace: std::time::Duration,
+    /// 删除的仓库保留多久（期间可以恢复），之后 janitor 清除数据、释放名字。不小于 2 小时。
+    pub repo_delete_grace: std::time::Duration,
 }
 
 /// 令牌桶参数：每秒补充 `per_second` 个，最多积攒 `burst` 个。
@@ -115,6 +117,7 @@ impl Default for ServerConfig {
             ref_poll_interval: std::time::Duration::from_secs(1),
             blob_cache: scion_store::BlobCacheConfig::default(),
             purge_grace: std::time::Duration::from_secs(24 * 3600),
+            repo_delete_grace: std::time::Duration::from_secs(24 * 3600),
             auth: scion_auth::GuardConfig::default(),
             policy_poll_interval: std::time::Duration::from_secs(30),
         }

@@ -54,6 +54,10 @@ enum ErrorReason {
   ERROR_REASON_TOKEN_EXPIRED = 15;
   // 没有权限（PERMISSION_DENIED）。metadata：repo、action（read / write / land / admin），以及 ref、path（如有）。
   ERROR_REASON_PERMISSION_DENIED = 16;
+  // 仓库名已被使用（ALREADY_EXISTS）。metadata.repo。
+  ERROR_REASON_REPO_ALREADY_EXISTS = 17;
+  // 仓库已删除、尚未清除，名字暂不能使用（ALREADY_EXISTS）。metadata.repo，可以用 RestoreRepo 恢复。
+  ERROR_REASON_REPO_DELETED = 18;
 }
 
 // 目录条目类型，取值与 SPEC.md §4 的 mode 字节一致。

@@ -23,12 +23,66 @@ use bytes::Bytes;
 use scion_object::ObjectId;
 
 pub use blobcache::{BlobCacheConfig, CachedBlobs};
-pub use cached::CachedMeta;
+pub use cached::{CachedMeta, RECORD_TTL};
 pub use error::{Error, Result};
 pub use mem::MemStore;
 pub use redacted::{RedactedBlobs, redactable, redacted_error};
 
 pub use repo::{MAX_REPO_NAME_LEN, validate_repo_name};
+
+/// 仓库的默认分支。
+pub const DEFAULT_BRANCH: &str = "main";
+
+/// 仓库的属性（`repos` 表）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoInfo {
+    pub name: String,
+    pub default_branch: String,
+    pub description: String,
+    pub created_at_ms: i64,
+    /// 软删除的时间；`None` 为正常的仓库。
+    pub deleted_at_ms: Option<i64>,
+    /// fork 的来源仓库。
+    pub forked_from: Option<String>,
+}
+
+impl RepoInfo {
+    /// 新仓库：默认分支为 [`DEFAULT_BRANCH`]。
+    pub fn new(name: &str, created_at_ms: i64) -> Self {
+        Self {
+            name: name.to_owned(),
+            default_branch: DEFAULT_BRANCH.to_owned(),
+            description: String::new(),
+            created_at_ms,
+            deleted_at_ms: None,
+            forked_from: None,
+        }
+    }
+}
+
+/// 修改仓库属性：`None` 的字段不变。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoPatch {
+    pub default_branch: Option<String>,
+    pub description: Option<String>,
+}
+
+/// 列出仓库的条件。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepoFilter {
+    /// 名字前缀（例如 `opencsg/`）。
+    pub prefix: String,
+    /// 只返回名字大于它的仓库（分页游标）。
+    pub after: Option<String>,
+    pub limit: usize,
+    /// true 时只列出已删除（等待清除）的仓库。
+    pub deleted: bool,
+}
+
+/// `prefix` 的上界：仓库名只含 ASCII 字符（[`validate_repo_name`]），追加 0x7F 后大于所有以它开头的名字。
+pub fn prefix_upper_bound(prefix: &str) -> String {
+    format!("{prefix}\u{7f}")
+}
 
 /// ref 的当前状态。`version` 每次更新加 1，作为 CAS 条件和 fencing token。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -278,6 +332,55 @@ pub trait MetaStore: Send + Sync + 'static {
     /// 列出全部租约（含已过期的），按 scope 排序。
     async fn list_leases(&self) -> Result<Vec<(String, Lease)>> {
         Err(unsupported("lease listings"))
+    }
+
+    /// 按给定属性创建仓库（`deleted_at_ms` 忽略）。名字已被使用时返回 [`Error::RepoAlreadyExists`]，
+    /// 被已删除、尚未清除的仓库占用时返回 [`Error::RepoDeleted`]。
+    async fn create_repo_with(&self, _info: &RepoInfo) -> Result<()> {
+        Err(unsupported("repository attributes"))
+    }
+
+    /// 仓库属性，包括已删除、尚未清除的仓库。
+    async fn get_repo(&self, _repo: &str) -> Result<Option<RepoInfo>> {
+        Err(unsupported("repository attributes"))
+    }
+
+    /// 按名字字节序列出仓库。
+    async fn list_repo_infos(&self, _filter: &RepoFilter) -> Result<Vec<RepoInfo>> {
+        Err(unsupported("repository attributes"))
+    }
+
+    /// 修改仓库属性，返回修改后的属性。
+    async fn update_repo(&self, _repo: &str, _patch: &RepoPatch) -> Result<RepoInfo> {
+        Err(unsupported("repository attributes"))
+    }
+
+    /// 软删除：之后按名字找不到这个仓库，数据保留到 [`MetaStore::purge_repo`]。
+    async fn delete_repo(&self, _repo: &str, _now_ms: i64) -> Result<()> {
+        Err(unsupported("repository deletion"))
+    }
+
+    /// 恢复软删除的仓库。没有这个名字的已删除仓库时返回 [`Error::RepoNotFound`]。
+    async fn restore_repo(&self, _repo: &str) -> Result<()> {
+        Err(unsupported("repository deletion"))
+    }
+
+    /// 物理清除已删除仓库的数据，每次最多删除约 `batch` 行；返回 true 表示已全部清除（名字可以重新使用）。
+    /// 对象字节在仓库之间共享，不在这里删除。
+    async fn purge_repo(&self, _repo: &str, _batch: usize) -> Result<bool> {
+        Err(unsupported("repository deletion"))
+    }
+
+    /// fork：在一个事务里创建 `target`，复制 `source` 的属性、对象索引、提交记录、派生数据、路径历史、
+    /// 全部 ref 和有效的 redaction（重新分配 seq）。合入记录和请求结果不复制。
+    async fn fork_repo(&self, _source: &str, _target: &str, _now_ms: i64) -> Result<()> {
+        Err(unsupported("repository forks"))
+    }
+
+    /// 删除 ref。`expect` 为 `Some(v)` 时要求当前版本等于 v。ref 不存在或版本不符时返回
+    /// [`Error::RefVersionMismatch`]（`current` 为当前版本）。
+    async fn delete_ref(&self, _repo: &str, _name: &str, _expect: Option<u64>) -> Result<()> {
+        Err(unsupported("ref deletion"))
     }
 }
 

@@ -101,7 +101,10 @@ impl CliError {
                  (fresh `scn clone`), commit and land again",
             ),
             CliError::Client(e) if e.reason() == Some(ErrorReason::RepoNotFound) => {
-                Some("check the repository name, or create it with `scion server --repo NAME`")
+                Some("check the repository name, or create it with `scn repo create NAME`")
+            }
+            CliError::Client(e) if e.reason() == Some(ErrorReason::RepoDeleted) => {
+                Some("the repository was deleted; restore it with `scn repo restore NAME`, or wait until it is purged")
             }
             CliError::Wc(scion_wc::Error::Dirty) => Some("run `scn commit -m <message>` first"),
             CliError::Wc(scion_wc::Error::NothingToLand) => Some("run `scn commit -m <message>` first"),
@@ -361,6 +364,11 @@ mod tests {
                 .contains("scn sync")
         );
         assert!(rpc(Code::NotFound, Some(ErrorReason::RepoNotFound)).hint().is_some());
+        assert!(
+            rpc(Code::AlreadyExists, Some(ErrorReason::RepoDeleted))
+                .hint()
+                .is_some_and(|h| h.contains("scn repo restore"))
+        );
         for e in [
             scion_wc::Error::Dirty,
             scion_wc::Error::NothingToLand,

@@ -12,6 +12,7 @@ A server-first source control system: history, merges and rebases are computed o
 
 **Guides**
 - [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
+- [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
 - [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks
 - [Clusters and landing](docs/guide/cluster.md) (Chinese): land semantics (rebase, exactly once), multi-node mode with `--advertise-url`, failover and overload protection
 - [Caching](docs/guide/cache.md) (Chinese): the regional cache `scion cache` (sharding, hedging, warm-up) and the local daemon `scn daemon`
@@ -37,6 +38,7 @@ A server-first source control system: history, merges and rebases are computed o
   - land never merges redacted content into new commits;
   - purge deletes the bytes after a grace period, once every repository that holds the object has redacted it.
 - **Operations:** `scion admin fsck` checks refs, commits, trees and files against the object index and object store; `scion admin lease ls` lists leases.
+- **Sparse checkout:** `scn clone --sparse a/,b/` and `scn sparse add|rm|set|disable`. Subtrees outside the scope are never fetched; commits, lands and rebases leave them untouched on the server.
 
 Still to come in M5: observability, YugabyteDB, Helm and chaos testing.
 
@@ -106,6 +108,7 @@ scn log --path src -n 10            # history, newest first, optionally limited 
 scn diff                            # uncommitted local changes (unified diff)
 scn diff main                       # what the tip of main changed; `scn diff A B` compares two revisions
 scn blame src/lib.rs                # the commit that last changed each line
+scn clone mono part --sparse src/   # sparse checkout: only src/ and files at the root; `scn sparse add docs/` later
 
 # scn talks to the server through a local daemon (scn daemon), started on demand; SCION_NO_DAEMON=1 opts out
 scn daemon status

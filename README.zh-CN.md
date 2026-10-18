@@ -12,6 +12,7 @@
 
 **使用指南**
 - [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
+- [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
 - [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查
 - [多节点部署与合入](docs/guide/cluster.md)：合入语义（rebase、恰好一次）、`--advertise-url` 集群模式、故障切换与过载保护
 - [缓存](docs/guide/cache.md)：区域缓存 `scion cache`（分片、对冲、预热）与本机 daemon `scn daemon`
@@ -35,6 +36,7 @@
   - 合入时不会把 redact 过的内容合并进新提交；
   - purge 在宽限期后物理删除字节，前提是所有含该对象的仓库都已 redact。
 - **运维**：`scion admin fsck` 对照对象索引与对象存储校验 ref、提交、目录树和文件；`scion admin lease ls` 列出租约。
+- **稀疏检出**：`scn clone --sparse a/,b/` 与 `scn sparse add|rm|set|disable`。范围外的子树不会被拉取，提交、合入和 rebase 都不影响服务端上范围外的内容。
 
 M5 后续还有可观测性、YugabyteDB、Helm 与混沌测试。
 
@@ -144,6 +146,7 @@ scn log --path src -n 10            # 历史，从新到旧，可按路径过滤
 scn diff                            # 本地未提交的改动（unified diff）
 scn diff main                       # main 最新提交引入的改动；`scn diff A B` 比较两个版本
 scn blame src/lib.rs                # 每一行最后被哪个提交改动
+scn clone mono part --sparse src/   # 稀疏检出：只检出 src/ 和根目录下的文件；之后可以 `scn sparse add docs/`
 
 # scn 经本机 daemon（scn daemon）连接服务端，按需自动拉起；SCION_NO_DAEMON=1 关闭
 scn daemon status

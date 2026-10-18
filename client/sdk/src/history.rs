@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use scion_object::ObjectId;
 use scion_proto::v1::{
-    self, BlameRequest, DerivedKind, DiffRequest, GetDerivedRequest, IsAncestorRequest, LogRequest, MergeBaseRequest,
-    ResolveRevisionRequest, StatRequest, query_service_client::QueryServiceClient,
+    self, BlameRequest, DerivedKind, DiffRequest, GetDerivedRequest, GetGitShasRequest, IsAncestorRequest, LogRequest,
+    MergeBaseRequest, ResolveRevisionRequest, StatRequest, query_service_client::QueryServiceClient,
 };
 
 use crate::client::Client;
@@ -227,7 +227,8 @@ impl Client {
         entry(r.entry)?.ok_or_else(|| Error::Protocol("Stat returned no entry".into()))
     }
 
-    /// 提交对应的 git sha（40 位十六进制）；不是从 git 导入的提交返回 None。
+    /// 提交对应的 git sha（40 位十六进制）。服务端不支持 [`scion_proto::features::GIT_SHA1`] 时，
+    /// 不是从 git 导入的提交返回 None。
     pub async fn git_sha(&self, revision: &str) -> Result<Option<String>> {
         let req = GetDerivedRequest {
             repo: self.repo()?,
@@ -239,6 +240,19 @@ impl Client {
             None => Ok(None),
             Some(_) => Err(Error::Protocol("GetDerived returned another kind".into())),
         }
+    }
+
+    /// 批量取提交的 git sha（40 位十六进制），与 `ids` 一一对应。
+    pub async fn git_shas(&self, ids: &[ObjectId]) -> Result<Vec<String>> {
+        let req = GetGitShasRequest {
+            repo: self.repo()?,
+            changeset_ids: ids.iter().map(|id| Bytes::copy_from_slice(&id.to_bytes())).collect(),
+        };
+        let resp = self.query().get_git_shas(self.request(req)?).await?.into_inner();
+        if resp.git_sha1.len() != ids.len() || resp.git_sha1.iter().any(|s| s.len() != 20) {
+            return Err(Error::Protocol("GetGitShas returned a malformed response".into()));
+        }
+        Ok(resp.git_sha1.iter().map(hex::encode).collect())
     }
 
     /// 代数与第一父提交链深度（深度 0 表示未知）。

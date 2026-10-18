@@ -132,4 +132,15 @@ async fn lands_produce_events_for_webhooks_and_pollers() {
     assert_eq!(got[1]["commits"][0]["message"], "second");
     assert_eq!(got[1]["commits"][0]["changes"][0]["path"], "src/lib.rs");
     assert_eq!(got[1]["commits"].as_array().map(Vec::len), Some(1));
+
+    // git 兼容 sha：事件中的与查询接口一致，且能直接当作版本号使用
+    assert!(c.has_feature(scion_proto::features::GIT_SHA1));
+    let shas = c.git_shas(&[a.id, b.id]).await.expect("git shas");
+    assert_eq!(got[1]["old_git_sha"], shas[0]);
+    assert_eq!(got[1]["new_git_sha"], shas[1]);
+    assert_eq!(got[1]["commits"][0]["git_sha"], shas[1]);
+    assert_eq!(got[0]["commits"][0]["git_sha"], shas[0]);
+    assert!(got[0]["old_git_sha"].is_null());
+    assert_eq!(c.git_sha("main").await.expect("derived"), Some(shas[1].clone()));
+    assert_eq!(c.resolve_revision(&shas[0]).await.expect("resolve").id, a.id);
 }

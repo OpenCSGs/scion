@@ -27,6 +27,8 @@ service QueryService {
   rpc Stat(StatRequest) returns (StatResponse);
   // 按种类读取派生数据（公开的结构化格式，不暴露内部存储格式）。
   rpc GetDerived(GetDerivedRequest) returns (GetDerivedResponse);
+  // 批量把提交 id 映射为 git 兼容的提交 sha（第一次查询时计算并缓存）。
+  rpc GetGitShas(GetGitShasRequest) returns (GetGitShasResponse);
 }
 
 message ReadFileRequest {
@@ -183,7 +185,7 @@ message StatResponse {
 
 enum DerivedKind {
   DERIVED_KIND_UNSPECIFIED = 0;
-  // 提交对应的 git sha（仅从 git 导入的提交有）。
+  // 提交对应的 git sha：导入的提交为原始 sha，其余按 git 对象格式计算（见 docs/guide/git-sha.md）。
   DERIVED_KIND_GIT_SHA1 = 1;
   // 代数与第一父提交链深度。
   DERIVED_KIND_GENERATION = 2;
@@ -203,9 +205,20 @@ message Generation {
 
 message GetDerivedResponse {
   bytes changeset_id = 1;
-  // 该提交没有这种派生数据时不设置（例如非 git 导入的提交没有 git sha）。
+  // 该提交没有这种派生数据时不设置。
   oneof value {
     bytes git_sha1 = 2;
     Generation generation = 3;
   }
+}
+
+message GetGitShasRequest {
+  string repo = 1;
+  // 提交 id（二进制），最多 1000 个。
+  repeated bytes changeset_ids = 2;
+}
+
+message GetGitShasResponse {
+  // 与 changeset_ids 一一对应的 20 字节 sha。
+  repeated bytes git_sha1 = 1;
 }

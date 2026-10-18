@@ -14,6 +14,7 @@ A server-first source control system: history, merges and rebases are computed o
 - [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
 - [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
 - [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check
+- [Git-compatible commit SHAs](docs/guide/git-sha.md) (Chinese): a 40-hex git SHA-1 for every commit, accepted wherever a revision is
 - [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
 - [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
 - [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks

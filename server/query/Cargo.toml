@@ -10,6 +10,7 @@ license.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 scion-tree.workspace = true
+sha1 = "0.10"
 similar = { version = "3", features = ["bytes"] }
 scion-object.workspace = true
 scion-store.workspace = true

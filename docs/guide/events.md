@@ -50,11 +50,14 @@ scion server ... \
   "ref": "main",
   "old": "c1…",
   "new": "c1…",
+  "old_git_sha": "3f7a…",
+  "new_git_sha": "9c21…",
   "version": 17,
   "time_ms": 1760000000000,
   "commits": [
     {
       "id": "c1…",
+      "git_sha": "9c21…",
       "parents": ["c1…"],
       "author": {"name": "Ada", "email": "ada@example.com", "time_ms": 1760000000000},
       "message": "update weights",
@@ -67,6 +70,7 @@ scion server ... \
 ```
 
 - **`type`**：`ref.created`、`ref.updated` 或 `ref.deleted`。
+- **`old_git_sha`、`new_git_sha`、`git_sha`**：对应提交的 git 兼容 sha（40 位十六进制，见 [git 兼容的提交 sha](git-sha.md)）；算不出来（文件内容已被清除）时为 `null`。
 - **`commits`**：本次变化引入的提交，即从 `new` 可达、从 `old` 不可达的提交，从新到旧。
   - 最多 100 个，超过时 `commits_truncated` 为 true；
   - 删除时为空；
@@ -125,13 +129,15 @@ scion server ... \
   "ref": "main",
   "old": "c1…",
   "new": "c1…",
+  "old_git_sha": "3f7a…",
+  "new_git_sha": "9c21…",
   "pusher": {"subject": "alice", "groups": ["dev"], "authenticated": true},
   "commits": [ … ],
   "commits_truncated": false
 }
 ```
 
-- **`old` 与 `new`**：`old` 为 ref 当前的提交（ref 不存在时为空），`new` 为客户端提交的版本。
+- **`old` 与 `new`**：`old` 为 ref 当前的提交（ref 不存在时为空），`new` 为客户端提交的版本。`old_git_sha` 与 `new_git_sha` 是它们的 git 兼容 sha。
 - **`commits`**：要引入的提交，格式与事件推送相同（路径级改动，不含文件内容）。
   - 范围：从 `new` 可达、从 `old` 不可达的提交；
   - 新建分支时以默认分支为基准，默认分支上已有的内容合入时已经检查过；

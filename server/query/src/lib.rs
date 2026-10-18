@@ -9,7 +9,9 @@ mod reindex;
 
 pub use blame::{BLAME_KIND, BLAME_VERSION, BlameResult, blame};
 pub use gitsha::{
-    GIT_SHA1_EXTENSION, GITSHA_KIND, GITSHA_VERSION, git_sha_of, index_git_sha, lookup_git_sha, parse_git_sha,
+    GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_SHA1_EXTENSION, GIT_TREE_KIND, GITSHA_KIND, GITSHA_VERSION,
+    SCION_ID_HEADER, cached_git_shas, derive_git_sha, git_commit_body, git_hash, git_sha_of, git_tree_body,
+    index_git_sha, lookup_git_sha, parse_git_sha,
 };
 pub use reindex::{ReindexStats, all_records, describe, reindex};
 
@@ -37,6 +39,9 @@ pub enum QueryError {
     /// 目录树缺失或损坏，或读取目录树时存储出错。
     #[error(transparent)]
     Tree(#[from] scion_tree::TreeError),
+    /// 对象不存在（例如文件内容已被清除）。
+    #[error("object {0} is missing")]
+    MissingObject(ObjectId),
 }
 
 pub type Result<T> = std::result::Result<T, QueryError>;

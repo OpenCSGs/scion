@@ -8,9 +8,9 @@ use scion_object::{EntryMode, ObjectId, TreeEntry};
 use scion_proto::v1::query_service_server::QueryService;
 use scion_proto::v1::{
     self, BlameRequest, BlameResponse, DiffRequest, DiffResponse, GetDerivedRequest, GetDerivedResponse,
-    IsAncestorRequest, IsAncestorResponse, ListDirRequest, ListDirResponse, LogRequest, LogResponse, MergeBaseRequest,
-    MergeBaseResponse, ReadFileRequest, ReadFileResponse, ResolveRevisionRequest, ResolveRevisionResponse, StatRequest,
-    StatResponse,
+    GetGitShasRequest, GetGitShasResponse, IsAncestorRequest, IsAncestorResponse, ListDirRequest, ListDirResponse,
+    LogRequest, LogResponse, MergeBaseRequest, MergeBaseResponse, ReadFileRequest, ReadFileResponse,
+    ResolveRevisionRequest, ResolveRevisionResponse, StatRequest, StatResponse,
 };
 use scion_store::{BlobStore, MetaStore};
 use scion_tree::{BlobTreeSource, TreeSource, lookup};
@@ -304,6 +304,15 @@ impl QueryService for QuerySvc {
         self.authorize_read(&p, &req.repo, "").await?;
         Ok(Response::new(
             history::get_derived(self.meta.as_ref(), self.blobs.as_ref(), req).await?,
+        ))
+    }
+
+    async fn get_git_shas(&self, request: Request<GetGitShasRequest>) -> Result<Response<GetGitShasResponse>, Status> {
+        let p = principal(&request);
+        let req = request.into_inner();
+        self.authorize_read(&p, &req.repo, "").await?;
+        Ok(Response::new(
+            history::get_git_shas(self.meta.as_ref(), self.blobs.as_ref(), req).await?,
         ))
     }
 }

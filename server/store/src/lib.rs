@@ -351,6 +351,11 @@ pub trait MetaStore: Send + Sync + 'static {
         Err(unsupported("pack locations"))
     }
 
+    /// The packed objects stored as deltas against `base`.
+    async fn delta_dependents(&self, _base: &ObjectId) -> Result<Vec<ObjectId>> {
+        Err(unsupported("pack locations"))
+    }
+
     /// Forgets where `ids` are packed (their pack is being rewritten or a copy is damaged).
     async fn delete_pack_locations(&self, _ids: &[ObjectId]) -> Result<()> {
         Err(unsupported("pack locations"))
@@ -599,6 +604,8 @@ pub struct PackedObject {
     pub id: ObjectId,
     pub offset: u64,
     pub len: u64,
+    /// The object it is stored as a delta against, which must stay readable.
+    pub base: Option<ObjectId>,
 }
 
 /// Where a packed object lives: the pack's content hash, and the byte range of its stored bytes.

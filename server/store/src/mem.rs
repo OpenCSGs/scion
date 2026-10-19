@@ -61,6 +61,7 @@ struct Inner {
     ref_events: std::collections::VecDeque<RefEvent>,
     ref_event_seq: u64,
     pack_locations: HashMap<ObjectId, PackLocation>,
+    delta_bases: HashMap<ObjectId, ObjectId>,
 }
 
 impl Inner {
@@ -549,8 +550,24 @@ impl MetaStore for MemStore {
                 len: o.len,
             };
             inner.pack_locations.insert(o.id, loc);
+            match o.base {
+                Some(b) => inner.delta_bases.insert(o.id, b),
+                None => inner.delta_bases.remove(&o.id),
+            };
         }
         Ok(())
+    }
+
+    async fn delta_dependents(&self, base: &ObjectId) -> Result<Vec<ObjectId>> {
+        let inner = self.read()?;
+        let mut out: Vec<ObjectId> = inner
+            .delta_bases
+            .iter()
+            .filter(|(_, b)| *b == base)
+            .map(|(id, _)| *id)
+            .collect();
+        out.sort();
+        Ok(out)
     }
 
     async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
@@ -565,6 +582,7 @@ impl MetaStore for MemStore {
         let mut inner = self.write()?;
         for id in ids {
             inner.pack_locations.remove(id);
+            inner.delta_bases.remove(id);
         }
         Ok(())
     }

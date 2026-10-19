@@ -48,11 +48,13 @@ impl PackBuilder {
         self.objects.is_empty()
     }
 
+    /// Adds an object's stored bytes (whole, or a delta that names its base).
     pub(crate) fn add(&mut self, id: ObjectId, stored: &[u8]) {
         self.objects.push(PackedObject {
             id,
             offset: self.buf.len() as u64,
             len: stored.len() as u64,
+            base: crate::delta::base_of(stored),
         });
         self.buf.extend_from_slice(stored);
     }
@@ -108,7 +110,12 @@ pub(crate) fn parse_tail(tail: &[u8], total: u64) -> Option<Vec<PackedObject>> {
         if offset < HEADER as u64 || end > data_end {
             return None;
         }
-        out.push(PackedObject { id, offset, len });
+        out.push(PackedObject {
+            id,
+            offset,
+            len,
+            base: None,
+        });
     }
     Some(out)
 }

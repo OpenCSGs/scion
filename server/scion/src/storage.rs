@@ -127,6 +127,17 @@ pub async fn open(
     blobs: &BlobSpec,
     env: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<(Arc<dyn MetaStore>, Arc<dyn BlobStore>)> {
+    let (meta, blobs, _) = open_objects(meta, blobs, env).await?;
+    Ok((meta, blobs))
+}
+
+/// Like [`open`], also returning the object store itself when there is one (not `mem`), for
+/// operations on its layout such as repacking.
+pub async fn open_objects(
+    meta: &MetaSpec,
+    blobs: &BlobSpec,
+    env: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<(Arc<dyn MetaStore>, Arc<dyn BlobStore>, Option<Arc<ObjectBlobStore>>)> {
     let mem = Arc::new(MemStore::new());
     let meta_store: Arc<dyn MetaStore> = match meta {
         MetaSpec::Mem => mem.clone(),
@@ -137,15 +148,15 @@ pub async fn open(
             scion_store_sql::connect(url).await.context("open metadata store")?
         }
     };
-    let blob_store: Arc<dyn BlobStore> = match blobs {
-        BlobSpec::Mem => mem,
+    let objects: Option<Arc<ObjectBlobStore>> = match blobs {
+        BlobSpec::Mem => None,
         BlobSpec::Dir(dir) => {
             let s = ObjectBlobStore::local(dir)
                 .context("open blob directory")?
                 .with_compression(compression(&env));
             let s = with_packs(s, &meta_store, &env);
             s.self_test().await.context("blob store self-test")?;
-            Arc::new(s)
+            Some(Arc::new(s))
         }
         BlobSpec::S3 { bucket, prefix } => {
             let s = ObjectBlobStore::s3(&s3_config(bucket, prefix, &env)?)
@@ -155,10 +166,14 @@ pub async fn open(
             // 识别服务（MinIO / SeaweedFS / AWS …）、健康检查、bucket 是否存在、读写自检
             let backend = s.check().await.context("s3 check (endpoint, bucket and credentials)")?;
             tracing::info!(%backend, bucket, "object store ready");
-            Arc::new(s)
+            Some(Arc::new(s))
         }
     };
-    Ok((meta_store, blob_store))
+    let blob_store: Arc<dyn BlobStore> = match &objects {
+        Some(o) => o.clone(),
+        None => mem,
+    };
+    Ok((meta_store, blob_store, objects))
 }
 
 /// 用于日志：不暴露 URL 中的密码。

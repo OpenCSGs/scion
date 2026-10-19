@@ -30,6 +30,19 @@ Objects written together are stored together: a commit's new trees and its chang
 - **Redaction**: purging a packed object rewrites its pack without it.
 - **Turning it off**: `SCION_BLOB_PACKS=off` writes every new object loose. Packed objects stay readable.
 
+## Repacking
+
+`scion admin repack` rewrites all reachable objects into a few large packs, storing older versions of each file and directory as deltas against the next newer version, then removes the packs and loose objects this superseded. It is Scion's `git gc`: run it now and then (after a large import, or nightly). It is safe while the server runs.
+
+```sh
+scion admin repack --meta postgres://… --blobs s3://scion-objects   # --dry-run to only count
+```
+
+- **Deltas**: an older version is stored as zstd with the newer version as a reference (what `zstd --patch-from` does). The newest versions, which are read most, stay whole. Chains are at most 16 long; reads follow them and cache the bases they use.
+- **Effect** on starhub-server (6,326 commits): 70,206 objects in 1 pack of 51.5 MB, 44,397 of them deltas, in 74 s. git's pack for the same history is 82 MB. Objects over 8 MB stay loose.
+- **Removing what it superseded**: packs none of whose objects live there any more, once older than `--prune-after` (default 1 hour, so that packs being written are not touched), and loose objects that are also packed.
+- **Redaction**: purging an object that others are stored against first rewrites those others whole.
+
 ## 连接参数
 
 | 环境变量 | 说明 | 默认 |

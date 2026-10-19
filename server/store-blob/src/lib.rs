@@ -21,6 +21,7 @@
 //! 不同 S3 兼容服务（MinIO、SeaweedFS 等）的差异由 [`provider`] 适配：启动检查
 //! [`ObjectBlobStore::check`] 识别服务、做对应的健康检查，并在 bucket 缺失时给出该服务的创建方法。
 
+mod delta;
 mod pack;
 mod provider;
 
@@ -96,6 +97,39 @@ struct Packs {
     learned: Cache<[u8; 32], ()>,
     /// Small packs held whole, so that reading their other objects needs no request either.
     bytes: Cache<[u8; 32], Bytes>,
+    /// Objects recently used as delta bases: reading history walks the same chains.
+    bases: Cache<ObjectId, Bytes>,
+}
+
+/// An object for [`ObjectBlobStore::repack`], and the object to store it as a delta against
+/// (typically the next version of the same file or directory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepackItem {
+    pub id: ObjectId,
+    pub base: Option<ObjectId>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RepackStats {
+    /// Objects written to new packs.
+    pub packed: usize,
+    /// Of those, stored as deltas.
+    pub deltas: usize,
+    /// Objects too large to pack, left where they are.
+    pub large: usize,
+    /// Objects that could not be read.
+    pub missing: usize,
+    pub packs: usize,
+    /// Bytes of the new packs.
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PruneStats {
+    pub packs_removed: usize,
+    pub loose_removed: usize,
+    /// Stored bytes removed.
+    pub bytes: u64,
 }
 
 /// What reading an object from a pack found.
@@ -150,6 +184,16 @@ const LOCATION_CACHE: u64 = 1 << 20;
 const PACK_TAIL_READ: u64 = 64 << 10;
 /// Bytes of whole small packs kept in memory.
 const PACK_BYTES_CACHE: u64 = 64 << 20;
+/// Bytes of delta bases kept in memory.
+const BASE_CACHE: u64 = 64 << 20;
+/// Longest delta chain repack writes, and the longest a read follows (damaged data could loop).
+const MAX_DELTA_DEPTH: u8 = 16;
+const MAX_READ_DEPTH: u8 = 64;
+/// Repack packs objects up to this size (larger ones stay loose), into packs of this size.
+const REPACK_MAX_OBJECT: usize = 8 << 20;
+const REPACK_TARGET: usize = 64 << 20;
+/// Objects repack reads at the same time.
+const REPACK_PARALLEL: usize = 32;
 /// Loose objects written at the same time.
 const PARALLEL_PUTS: usize = 16;
 
@@ -205,6 +249,10 @@ impl ObjectBlobStore {
             learned: Cache::new(LOCATION_CACHE / 16),
             bytes: Cache::builder()
                 .max_capacity(PACK_BYTES_CACHE)
+                .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
+                .build(),
+            bases: Cache::builder()
+                .max_capacity(BASE_CACHE)
                 .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
                 .build(),
         });
@@ -418,7 +466,7 @@ impl ObjectBlobStore {
     }
 
     /// The object from its pack (held in memory, or a range read).
-    async fn read_packed(&self, id: &ObjectId, loc: &PackLocation) -> Result<Packed> {
+    async fn read_packed(&self, id: &ObjectId, loc: &PackLocation, depth: u8) -> Result<Packed> {
         let (start, end) = (loc.offset, loc.offset + loc.len);
         let held = self.packs.as_ref().and_then(|p| p.bytes.get(&loc.pack));
         let stored = match held {
@@ -430,9 +478,68 @@ impl ObjectBlobStore {
             },
         };
         let oid = *id;
+        if let Some(base) = delta::base_of(&stored) {
+            return self.undelta(id, &base, stored, depth).await;
+        }
         Ok(match off_runtime(stored.len(), move || decode(&oid, stored)).await {
             Some(data) => Packed::Found(data),
             None => Packed::Damaged,
+        })
+    }
+
+    /// The object from a delta: reads its base (which may be a delta too) and applies it.
+    async fn undelta(&self, id: &ObjectId, base: &ObjectId, stored: Bytes, depth: u8) -> Result<Packed> {
+        let Some(p) = &self.packs else {
+            return Ok(Packed::Damaged);
+        };
+        if depth >= MAX_READ_DEPTH {
+            tracing::error!(%id, "delta chain too long");
+            return Ok(Packed::Damaged);
+        }
+        let base_bytes = match p.bases.get(base) {
+            Some(b) => b,
+            None => match self.get_at(base, depth + 1).await? {
+                Some(b) => {
+                    p.bases.insert(*base, b.clone());
+                    b
+                }
+                None => {
+                    tracing::error!(%id, %base, "delta base is missing");
+                    return Ok(Packed::Damaged);
+                }
+            },
+        };
+        let oid = *id;
+        let size = stored.len() + base_bytes.len();
+        let data = off_runtime(size, move || {
+            delta::decode(&stored, &base_bytes)
+                .filter(|d| oid.verify(d))
+                .map(Bytes::from)
+        })
+        .await;
+        Ok(data.map_or(Packed::Damaged, Packed::Found))
+    }
+
+    /// [`BlobStore::get`] at a depth of delta resolution.
+    fn get_at<'a>(&'a self, id: &'a ObjectId, depth: u8) -> futures::future::BoxFuture<'a, Result<Option<Bytes>>> {
+        Box::pin(async move {
+            let Some(p) = &self.packs else {
+                return self.get_loose(id).await;
+            };
+            // A cached location may be stale (the pack rewritten since): look it up again on any miss
+            if let Some(loc) = p.locations.get(id) {
+                if let Packed::Found(data) = self.read_packed(id, &loc, depth).await? {
+                    return Ok(Some(data));
+                }
+            }
+            if let Some(loc) = self.location(id, true).await? {
+                match self.read_packed(id, &loc, depth).await? {
+                    Packed::Found(data) => return Ok(Some(data)),
+                    Packed::Damaged => return self.forget_damaged(p, id).await,
+                    Packed::Gone => {}
+                }
+            }
+            self.get_loose(id).await
         })
     }
 
@@ -495,8 +602,10 @@ impl ObjectBlobStore {
     }
 
     /// Stores a pack, then records where its objects are (bytes before index).
-    async fn write_pack(&self, packs: &Packs, builder: pack::PackBuilder) -> Result<()> {
+    /// Returns the pack's size.
+    async fn write_pack(&self, packs: &Packs, builder: pack::PackBuilder) -> Result<u64> {
         let (bytes, name, placed) = builder.finish();
+        let size = bytes.len() as u64;
         self.store
             .put(&self.pack_path(&name), PutPayload::from_bytes(bytes.clone()))
             .await
@@ -504,12 +613,207 @@ impl ObjectBlobStore {
         packs.index.put_pack_locations(&name, &placed).await?;
         // Objects just written are likely read soon (rebase at land, clients fetching)
         self.remember_pack(packs, &name, &placed, Some(bytes));
-        Ok(())
+        Ok(size)
+    }
+
+    /// Rewrites `items`, in order, into new packs, storing each as a delta against its base when
+    /// the base comes earlier in `items`, the chain stays short and the delta is smaller. New
+    /// locations replace the old ones; [`ObjectBlobStore::prune`] then removes what they superseded.
+    ///
+    /// Safe while the server runs: every object stays readable throughout. Bases should be the
+    /// newer versions (so the versions read most are stored whole), and come before the objects
+    /// stored against them.
+    pub async fn repack(&self, items: &[RepackItem]) -> Result<RepackStats> {
+        let packs = self
+            .packs
+            .as_ref()
+            .ok_or_else(|| Error::Backend("repacking needs packs (SCION_BLOB_PACKS)".into()))?;
+        let mut stats = RepackStats::default();
+        // Chain length of each object packed so far (0: stored whole)
+        let mut depth: std::collections::HashMap<ObjectId, u8> = std::collections::HashMap::new();
+        let raw: Cache<ObjectId, Bytes> = Cache::builder()
+            .max_capacity(256 << 20)
+            .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
+            .build();
+        let reads: Vec<_> = items
+            .iter()
+            .map(|it| async move { (it, self.get(&it.id).await) })
+            .collect();
+        let mut reads = futures::stream::iter(reads).buffered(REPACK_PARALLEL);
+        let mut builder = pack::PackBuilder::new();
+        while let Some((item, data)) = reads.next().await {
+            let Some(data) = data? else {
+                stats.missing += 1;
+                continue;
+            };
+            if data.len() > REPACK_MAX_OBJECT || depth.contains_key(&item.id) {
+                stats.large += usize::from(data.len() > REPACK_MAX_OBJECT);
+                continue;
+            }
+            let mut stored = self.stored_form(&data).await;
+            let mut d = 0;
+            let base = item.base.and_then(|b| Some((b, *depth.get(&b)?)));
+            if let Some((b, bd)) = base.filter(|(_, bd)| *bd < MAX_DELTA_DEPTH) {
+                let base_bytes = match raw.get(&b) {
+                    Some(x) => Some(x),
+                    None => self.get(&b).await?,
+                };
+                if let Some(base_bytes) = base_bytes {
+                    let (data2, whole) = (data.clone(), stored.len());
+                    let encoded = off_runtime(data.len() + base_bytes.len(), move || {
+                        delta::encode(&b, &base_bytes, &data2, whole)
+                    })
+                    .await;
+                    if let Some(e) = encoded {
+                        stored = Bytes::from(e);
+                        d = bd + 1;
+                        stats.deltas += 1;
+                    }
+                }
+            }
+            depth.insert(item.id, d);
+            raw.insert(item.id, data);
+            builder.add(item.id, &stored);
+            stats.packed += 1;
+            if builder.data_len() >= REPACK_TARGET {
+                let full = std::mem::replace(&mut builder, pack::PackBuilder::new());
+                stats.bytes += self.write_pack(packs, full).await?;
+                stats.packs += 1;
+            }
+        }
+        if !builder.is_empty() {
+            stats.bytes += self.write_pack(packs, builder).await?;
+            stats.packs += 1;
+        }
+        Ok(stats)
+    }
+
+    /// Removes packs none of whose objects live there any more, and loose objects that are also
+    /// packed. Packs younger than `min_age` are kept: a writer may not have recorded their
+    /// locations yet.
+    pub async fn prune(&self, min_age: std::time::Duration) -> Result<PruneStats> {
+        let packs = self
+            .packs
+            .as_ref()
+            .ok_or_else(|| Error::Backend("pruning needs packs (SCION_BLOB_PACKS)".into()))?;
+        let mut stats = PruneStats::default();
+        let cutoff = std::time::SystemTime::now() - min_age;
+        let listed = self.list(&format!("{}packs/", self.prefix)).await?;
+        for meta in listed {
+            let Some(name) = pack_name(meta.location.as_ref()) else {
+                continue;
+            };
+            if std::time::SystemTime::from(meta.last_modified) > cutoff {
+                continue;
+            }
+            let entries = match self.read_trailer(&name).await? {
+                Some(e) => e,
+                None => {
+                    tracing::warn!(pack = %meta.location, "pack with a damaged trailer left in place");
+                    continue;
+                }
+            };
+            let ids: Vec<ObjectId> = entries.iter().map(|e| e.id).collect();
+            let mut live = false;
+            for chunk in ids.chunks(500) {
+                let current = packs.index.pack_locations(chunk).await?;
+                if current.values().any(|l| l.pack == name) {
+                    live = true;
+                    break;
+                }
+            }
+            if live {
+                continue;
+            }
+            match self.store.delete(&meta.location).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(backend("delete pack", e)),
+            }
+            packs.bytes.invalidate(&name);
+            packs.learned.invalidate(&name);
+            stats.packs_removed += 1;
+            stats.bytes += meta.size;
+        }
+        let loose = self.list(&format!("{}objects/", self.prefix)).await?;
+        for chunk in loose.chunks(500) {
+            let ids: Vec<(ObjectId, &object_store::ObjectMeta)> = chunk
+                .iter()
+                .filter_map(|m| Some((loose_id(m.location.as_ref())?, m)))
+                .collect();
+            let only: Vec<ObjectId> = ids.iter().map(|(id, _)| *id).collect();
+            let packed = packs.index.pack_locations(&only).await?;
+            for (id, m) in ids.iter().filter(|(id, _)| packed.contains_key(id)) {
+                match self.store.delete(&m.location).await {
+                    Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                    Err(e) => return Err(backend("delete object", e)),
+                }
+                tracing::debug!(%id, "removed loose copy of a packed object");
+                stats.loose_removed += 1;
+                stats.bytes += m.size;
+            }
+        }
+        Ok(stats)
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<object_store::ObjectMeta>> {
+        let prefix = Path::from(prefix);
+        let mut out = Vec::new();
+        let mut s = self.store.list(Some(&prefix));
+        while let Some(m) = s.next().await {
+            match m {
+                Ok(m) => out.push(m),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(backend("list objects", e)),
+            }
+        }
+        Ok(out)
+    }
+
+    /// The entries of a pack from its trailer; None when the trailer is damaged.
+    async fn read_trailer(&self, name: &[u8; 32]) -> Result<Option<Vec<PackedObject>>> {
+        let path = self.pack_path(name);
+        let suffix = |n: u64| object_store::GetOptions {
+            range: Some(object_store::GetRange::Suffix(n)),
+            ..Default::default()
+        };
+        let res = match self.store.get_opts(&path, suffix(PACK_TAIL_READ)).await {
+            Ok(r) => r,
+            Err(object_store::Error::NotFound { .. }) => return Ok(Some(Vec::new())),
+            Err(e) => return Err(backend("get pack trailer", e)),
+        };
+        let total = res.meta.size;
+        let mut tail = res.bytes().await.map_err(|e| backend("read pack trailer", e))?;
+        let Some(need) = pack::trailer_len(&tail) else {
+            return Ok(None);
+        };
+        if need > tail.len() {
+            let res = self
+                .store
+                .get_opts(&path, suffix(need as u64))
+                .await
+                .map_err(|e| backend("get pack trailer", e))?;
+            tail = res.bytes().await.map_err(|e| backend("read pack trailer", e))?;
+        }
+        Ok(pack::parse_tail(&tail, total))
     }
 
     /// Removes a packed object by rewriting its pack without it. Objects whose location already
     /// points elsewhere are left out of the new pack.
     async fn delete_packed(&self, packs: &Packs, id: &ObjectId, loc: &PackLocation) -> Result<()> {
+        // Objects stored as deltas against this one are rewritten whole while it is still readable
+        let dependents = packs.index.delta_dependents(id).await?;
+        if !dependents.is_empty() {
+            let mut builder = pack::PackBuilder::new();
+            for d in &dependents {
+                let data = self
+                    .get(d)
+                    .await?
+                    .ok_or_else(|| Error::Backend(format!("delta {d} on {id} is missing")))?;
+                builder.add(*d, &self.stored_form(&data).await);
+            }
+            self.write_pack(packs, builder).await?;
+            packs.bases.invalidate(id);
+        }
         let old = self.pack_path(&loc.pack);
         let bytes = match self.store.get(&old).await {
             Ok(r) => r.bytes().await.map_err(|e| backend("read pack", e))?,
@@ -541,6 +845,28 @@ impl ObjectBlobStore {
             Err(e) => Err(backend("delete pack", e)),
         }
     }
+}
+
+/// The pack name in a pack's key (its last segment).
+fn pack_name(key: &str) -> Option<[u8; 32]> {
+    let hex = key.rsplit('/').next()?;
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
+
+/// The object id in a loose object's key (`…objects/{kind}/{hh}/{hex}`).
+fn loose_id(key: &str) -> Option<ObjectId> {
+    let mut parts = key.rsplit('/');
+    let digest = parts.next()?;
+    let _hh = parts.next()?;
+    let kind_algo = parts.next()?;
+    format!("{kind_algo}{digest}").parse().ok()
 }
 
 /// 对象在存储中的相对 key：`objects/{kind}/{hh}/{hex}`。
@@ -646,23 +972,7 @@ impl BlobStore for ObjectBlobStore {
     }
 
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>> {
-        let Some(p) = &self.packs else {
-            return self.get_loose(id).await;
-        };
-        // A cached location may be stale (the pack rewritten since): look it up again on any miss
-        if let Some(loc) = p.locations.get(id) {
-            if let Packed::Found(data) = self.read_packed(id, &loc).await? {
-                return Ok(Some(data));
-            }
-        }
-        if let Some(loc) = self.location(id, true).await? {
-            match self.read_packed(id, &loc).await? {
-                Packed::Found(data) => return Ok(Some(data)),
-                Packed::Damaged => return self.forget_damaged(p, id).await,
-                Packed::Gone => {}
-            }
-        }
-        self.get_loose(id).await
+        self.get_at(id, 0).await
     }
 
     async fn exists(&self, id: &ObjectId) -> Result<bool> {
@@ -957,6 +1267,7 @@ mod tests {
                     id: objs[1].0,
                     offset: 0,
                     len: 1,
+                    base: None,
                 }],
             )
             .await
@@ -1035,6 +1346,186 @@ mod tests {
             .expect("open")
             .with_packs(index.clone());
         assert_eq!(fresh.get(&objs[1].0).await.as_ref(), Ok(&Some(objs[1].1.clone())));
+    }
+
+    /// 21 versions of a file, newest first, each a small change of the next.
+    fn versions() -> Vec<(ObjectId, Bytes)> {
+        (0..21)
+            .rev()
+            .map(|v| {
+                let d: String = (0..400)
+                    .map(|i| format!("line {i}: {}\n", if i % 21 == v { v + 1 } else { 0 }))
+                    .collect();
+                let d = Bytes::from(d);
+                (ObjectId::of_blob(&d), d)
+            })
+            .collect()
+    }
+
+    /// Newest first, each stored against the next newer one.
+    fn chain(vs: &[(ObjectId, Bytes)]) -> Vec<RepackItem> {
+        vs.iter()
+            .enumerate()
+            .map(|(i, (id, _))| RepackItem {
+                id: *id,
+                base: i.checked_sub(1).map(|j| vs[j].0),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn repack_stores_versions_as_deltas_and_prune_removes_what_it_superseded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        let vs = versions();
+        // Written before: loose objects, and a pack
+        for (id, d) in &vs[..10] {
+            s.put(*id, d.clone()).await.expect("loose");
+        }
+        s.put_many(&vs[10..]).await.expect("pack");
+        let before: u64 = files(dir.path(), "")
+            .iter()
+            .map(|f| f.metadata().expect("meta").len())
+            .sum();
+        let stats = s.repack(&chain(&vs)).await.expect("repack");
+        // The chain is cut at MAX_DELTA_DEPTH: v20 whole, 16 deltas, one whole, 3 deltas
+        assert_eq!((stats.packed, stats.deltas, stats.packs, stats.missing), (21, 19, 1, 0));
+        let fresh = || {
+            ObjectBlobStore::local(dir.path())
+                .expect("open")
+                .with_packs(index.clone())
+        };
+        for (id, d) in &vs {
+            assert_eq!(fresh().get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+        // Too young to prune the old pack
+        let young = s
+            .prune(std::time::Duration::from_secs(3600))
+            .await
+            .expect("prune young");
+        assert_eq!((young.packs_removed, young.loose_removed), (0, 10));
+        let pruned = s.prune(std::time::Duration::ZERO).await.expect("prune");
+        assert_eq!((pruned.packs_removed, pruned.loose_removed), (1, 0));
+        assert!(pruned.bytes > 0);
+        let after: u64 = files(dir.path(), "")
+            .iter()
+            .map(|f| f.metadata().expect("meta").len())
+            .sum();
+        assert!(after * 2 < before, "{after} vs {before}");
+        let reader = fresh();
+        for (id, d) in vs.iter().rev() {
+            assert_eq!(
+                reader.get(id).await.as_ref(),
+                Ok(&Some(d.clone())),
+                "oldest first, through the chain"
+            );
+        }
+        // Repacking the same objects again writes the same pack (packs are named by content)
+        s.repack(&chain(&vs)).await.expect("again");
+        assert_eq!(
+            s.prune(std::time::Duration::ZERO).await.expect("prune").packs_removed,
+            0
+        );
+        // In another order it is a new pack, and the old one goes
+        let mut reordered = chain(&vs);
+        reordered.swap(0, 1);
+        s.repack(&reordered).await.expect("reordered");
+        assert_eq!(
+            s.prune(std::time::Duration::ZERO).await.expect("prune").packs_removed,
+            1
+        );
+        assert_eq!(files(dir.path(), "packs").len(), 1);
+        for (id, d) in &vs {
+            assert_eq!(fresh().get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+    }
+
+    #[tokio::test]
+    async fn repack_skips_missing_large_and_repeated_objects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, _) = packed(dir.path());
+        let big = noise(REPACK_MAX_OBJECT + 1);
+        let big_id = ObjectId::of_blob(&big);
+        s.put(big_id, big.clone()).await.expect("big");
+        let small = text(100);
+        let small_id = ObjectId::of_blob(&small);
+        s.put(small_id, small.clone()).await.expect("small");
+        let items = [
+            RepackItem {
+                id: ObjectId::of_blob(b"never stored"),
+                base: None,
+            },
+            RepackItem { id: big_id, base: None },
+            // Its base is too large to be packed, so it is stored whole
+            RepackItem {
+                id: small_id,
+                base: Some(big_id),
+            },
+            RepackItem {
+                id: small_id,
+                base: None,
+            },
+        ];
+        let stats = s.repack(&items).await.expect("repack");
+        assert_eq!((stats.missing, stats.large, stats.packed, stats.deltas), (1, 1, 1, 0));
+        assert_eq!(s.get(&big_id).await, Ok(Some(big)));
+        let plain = ObjectBlobStore::local(dir.path()).expect("open");
+        assert!(matches!(plain.repack(&items).await, Err(Error::Backend(_))));
+        assert!(matches!(
+            plain.prune(std::time::Duration::ZERO).await,
+            Err(Error::Backend(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn purging_a_delta_base_rewrites_its_dependents_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        let vs = versions();
+        s.put_many(&vs).await.expect("pack");
+        s.repack(&chain(&vs)).await.expect("repack");
+        s.prune(std::time::Duration::ZERO).await.expect("prune");
+        assert_eq!(index.delta_dependents(&vs[0].0).await.expect("deps"), vec![vs[1].0]);
+        s.delete(&vs[0].0).await.expect("purge the newest version");
+        assert!(index.delta_dependents(&vs[0].0).await.expect("deps").is_empty());
+        let reader = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        assert_eq!(reader.get(&vs[0].0).await, Ok(None));
+        for (id, d) in &vs[1..] {
+            assert_eq!(reader.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+        // A delta whose base is nowhere fails its read, and is forgotten so an upload repairs it
+        let (ghost, obj) = (text(300), text(301));
+        let (ghost_id, obj_id) = (ObjectId::of_blob(&ghost), ObjectId::of_blob(&obj));
+        let mut b = pack::PackBuilder::new();
+        b.add(
+            obj_id,
+            &delta::encode(&ghost_id, &ghost, &obj, obj.len()).expect("delta"),
+        );
+        b.add(vs[1].0, &vs[1].1);
+        s.write_pack(s.packs.as_ref().expect("packs"), b).await.expect("write");
+        let reader = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        assert!(matches!(reader.get(&obj_id).await, Err(Error::Backend(m)) if m.contains("integrity")));
+        assert!(index.pack_locations(&[obj_id]).await.expect("loc").is_empty());
+        s.put_many(&[(obj_id, obj.clone()), vs[2].clone()])
+            .await
+            .expect("upload again");
+        assert_eq!(reader.get(&obj_id).await, Ok(Some(obj)));
+    }
+
+    #[test]
+    fn keys_back_to_names() {
+        let id = ObjectId::of_blob(b"x");
+        assert_eq!(loose_id(&format!("pre/{}", object_key(&id))), Some(id));
+        assert_eq!(loose_id("objects/zz/aa/nothex"), None);
+        assert_eq!(loose_id("short"), None);
+        let name = [0xab; 32];
+        assert_eq!(pack_name(&format!("pre/{}", pack::pack_key(&name))), Some(name));
+        assert_eq!(pack_name("packs/ab/abc"), None);
+        assert_eq!(pack_name(&format!("packs/zz/{}", "z".repeat(64))), None);
     }
 
     #[tokio::test]

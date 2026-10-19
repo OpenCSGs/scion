@@ -272,6 +272,10 @@ impl MetaStore for CachedMeta {
         self.inner.delete_pack_locations(ids).await
     }
 
+    async fn delta_dependents(&self, base: &ObjectId) -> Result<Vec<ObjectId>> {
+        self.inner.delta_dependents(base).await
+    }
+
     async fn list_leases(&self) -> Result<Vec<(String, Lease)>> {
         self.inner.list_leases().await
     }

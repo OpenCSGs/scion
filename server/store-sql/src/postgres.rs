@@ -907,19 +907,29 @@ impl MetaStore for PgMetaStore {
         for chunk in objects.chunks(MAX_IDS_PER_QUERY) {
             let rows = chunk
                 .iter()
-                .map(|o| Ok((o.id.to_bytes().to_vec(), size_to_db(o.offset)?, size_to_db(o.len)?)))
+                .map(|o| {
+                    let base = o.base.map(|b| b.to_bytes().to_vec());
+                    Ok((
+                        o.id.to_bytes().to_vec(),
+                        size_to_db(o.offset)?,
+                        size_to_db(o.len)?,
+                        base,
+                    ))
+                })
                 .collect::<Result<Vec<_>>>()?;
-            let mut qb =
-                sqlx::QueryBuilder::<sqlx::Postgres>::new("INSERT INTO pack_locations (id, pack, pack_offset, len) ");
-            qb.push_values(rows, |mut b, (id, offset, len)| {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                "INSERT INTO pack_locations (id, pack, pack_offset, len, base) ",
+            );
+            qb.push_values(rows, |mut b, (id, offset, len, base)| {
                 b.push_bind(id)
                     .push_bind(pack.to_vec())
                     .push_bind(offset)
-                    .push_bind(len);
+                    .push_bind(len)
+                    .push_bind(base);
             });
             qb.push(
                 " ON CONFLICT (id) DO UPDATE SET pack = excluded.pack, pack_offset = excluded.pack_offset, \
-                 len = excluded.len",
+                 len = excluded.len, base = excluded.base",
             );
             qb.build()
                 .execute(&mut *tx)
@@ -952,6 +962,16 @@ impl MetaStore for PgMetaStore {
             }
         }
         Ok(out)
+    }
+
+    async fn delta_dependents(&self, base: &ObjectId) -> Result<Vec<ObjectId>> {
+        // No index on base: only a redaction purge asks, and rarely
+        let rows: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM pack_locations WHERE base = $1 ORDER BY id")
+            .bind(base.to_bytes().to_vec())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| backend("delta dependents", e))?;
+        rows.iter().map(|r| id_from_db(r)).collect()
     }
 
     async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {

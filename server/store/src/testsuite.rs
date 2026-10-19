@@ -177,11 +177,13 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
             id: a,
             offset: 5,
             len: 10,
+            base: None,
         },
         PackedObject {
             id: b,
             offset: 15,
             len: u64::from(u32::MAX) + 7,
+            base: Some(c),
         },
     ];
     s.put_pack_locations(&p1, &objs).await.expect("record");
@@ -203,12 +205,33 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
             id: a,
             offset: 1,
             len: 2,
+            base: Some(c),
         }],
     )
     .await
     .expect("move");
     assert_eq!(s.pack_locations(&[a]).await.expect("lookup")[&a].pack, p2);
+    // Deltas: who depends on a base, and re-recording an object as full drops the dependency
+    assert_eq!(s.delta_dependents(&c).await.expect("dependents"), {
+        let mut v = vec![a, b];
+        v.sort();
+        v
+    });
+    s.put_pack_locations(
+        &p1,
+        &[PackedObject {
+            id: b,
+            offset: 15,
+            len: 3,
+            base: None,
+        }],
+    )
+    .await
+    .expect("full again");
+    assert_eq!(s.delta_dependents(&c).await.expect("dependents"), vec![a]);
+    assert!(s.delta_dependents(&b).await.expect("none").is_empty());
     s.delete_pack_locations(&[a, c]).await.expect("forget");
+    assert!(s.delta_dependents(&c).await.expect("forgotten").is_empty());
     let got = s.pack_locations(&[a, b]).await.expect("lookup");
     assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![b]);
     s.put_pack_locations(&p1, &[]).await.expect("nothing to record");
@@ -218,6 +241,7 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
             id: ObjectId::of_blob(&i.to_le_bytes()),
             offset: u64::from(i) * 10,
             len: 10,
+            base: None,
         })
         .collect();
     s.put_pack_locations(&p2, &many).await.expect("large batch");

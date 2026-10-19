@@ -5,6 +5,7 @@
 mod authcmd;
 mod fsck;
 mod opscmd;
+mod repack;
 mod storage;
 
 use std::net::SocketAddr;
@@ -111,6 +112,20 @@ enum AdminCmd {
         /// Read every file and verify its hash (by default only checks it exists).
         #[arg(long)]
         verify: bool,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
+    /// Rewrite objects into large packs, storing older versions as deltas against newer ones, and remove what that supersedes. Like `git gc`; safe while the server runs.
+    Repack {
+        /// Walk only this repository's history (repeatable); all when omitted.
+        #[arg(long = "repo", value_name = "NAME")]
+        repos: Vec<String>,
+        /// Keep packs younger than this when removing superseded ones.
+        #[arg(long, value_name = "DURATION", default_value = "1h", value_parser = parse_duration)]
+        prune_after: std::time::Duration,
+        /// Only count what would be repacked.
+        #[arg(long)]
+        dry_run: bool,
         #[command(flatten)]
         storage: StorageArgs,
     },
@@ -786,6 +801,22 @@ async fn admin_ops(cmd: AdminCmd, env: impl Fn(&str) -> Option<String>) -> anyho
             let (meta, blobs) = open(&storage).await?;
             opscmd::run_fsck(&fsck::FsckOptions { repos, verify }, meta, blobs).await?
         }
+        AdminCmd::Repack {
+            repos,
+            prune_after,
+            dry_run,
+            storage,
+        } => {
+            let (meta_spec, blob_spec) = storage.specs()?;
+            let (meta, _, objects) = storage::open_objects(&meta_spec, &blob_spec, &env).await?;
+            let objects = objects.ok_or_else(|| anyhow::anyhow!("repack needs a directory or s3:// object store"))?;
+            let opts = repack::RepackOptions {
+                repos,
+                prune_after,
+                dry_run,
+            };
+            (repack::repack(&meta, &objects, &opts).await?.lines(dry_run), true)
+        }
         other => anyhow::bail!("not an operations command: {other:?}"),
     })
 }
@@ -1045,6 +1076,15 @@ mod tests {
         };
         let (lines, ok) = run(&["fsck", "--verify"]).await.expect("fsck");
         assert!(ok, "{lines:?}");
+        let (lines, ok) = run(&["repack", "--dry-run"]).await.expect("repack");
+        assert!(
+            ok && lines.len() == 1 && lines[0].starts_with("1 repositories"),
+            "{lines:?}"
+        );
+        let (lines, ok) = run(&["repack", "--prune-after", "0s"]).await.expect("repack");
+        assert!(ok && lines.len() == 3, "{lines:?}");
+        let (lines, ok) = run(&["fsck", "--verify"]).await.expect("fsck after repack");
+        assert!(ok, "{lines:?}");
         let (lines, ok) = run(&["fsck", "--repo", "missing"]).await.expect("fsck");
         assert!(!ok && lines.iter().any(|l| l.contains("does not exist")));
         assert_eq!(run(&["lease", "ls"]).await.expect("lease"), (vec![], true));
@@ -1059,6 +1099,12 @@ mod tests {
         assert!(Cli::try_parse_from(["scion", "admin", "purge", "rd", "--now", "--grace", "1h"]).is_err());
         // 不是运维命令
         assert!(admin_ops(AdminCmd::JwtKeygen, no_env).await.is_err());
+        // Repacking needs an object store, not mem
+        let cli = Cli::try_parse_from(["scion", "admin", "repack"]).expect("parse");
+        let Command::Admin(cmd) = cli.command else {
+            panic!("admin")
+        };
+        assert!(admin_ops(cmd, no_env).await.is_err());
     }
 
     #[test]

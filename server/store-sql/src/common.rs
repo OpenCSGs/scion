@@ -61,6 +61,15 @@ pub(crate) fn size_to_db(size: u64) -> Result<i64> {
     i64::try_from(size).map_err(|_| Error::Backend(format!("object size {size} exceeds i64")))
 }
 
+/// A pack offset or length as stored (4 bytes: packs are at most a few dozen MiB).
+pub(crate) fn pack_range_to_db(v: u64) -> Result<i32> {
+    i32::try_from(v).map_err(|_| Error::Backend(format!("pack offset or length {v} exceeds 2 GiB")))
+}
+
+/// Pack locations joined with pack names, offsets widened for decoding.
+pub(crate) const LOCATION_SELECT: &str = "SELECT l.id, p.name, CAST(l.pack_offset AS BIGINT), CAST(l.len AS BIGINT) \
+     FROM pack_locations l JOIN packs p ON p.pack_id = l.pack_id WHERE l.id IN (";
+
 /// A pack location row: `(id, pack, pack_offset, len)`.
 pub(crate) type LocationRow = (Vec<u8>, Vec<u8>, i64, i64);
 
@@ -213,7 +222,7 @@ pub const REPO_TABLES: &[(&str, &str)] = &[
     ("idempotency", "request_id"),
     ("redactions", "object_id"),
     ("derived", "kind, version, key"),
-    ("path_changes", "path, cs_id"),
+    ("path_changes", "path, generation, cs_id"),
     ("changesets", "cs_id"),
     ("objects_index", "id"),
 ];

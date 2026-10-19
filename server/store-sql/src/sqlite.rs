@@ -14,10 +14,11 @@ use scion_store::{
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
 
 use crate::common::{
-    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, LocationRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REF_EVENT_COLUMNS,
-    REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation,
-    list_limit, location_from_db, now_ms, purge_limit, record_from_row, redaction_from_row, ref_event_from_row,
-    repo_from_row, size_to_db, subtract_present, version_from_db, version_to_db,
+    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, LOCATION_SELECT, LocationRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS,
+    REF_EVENT_COLUMNS, REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db,
+    is_unique_violation, list_limit, location_from_db, now_ms, pack_range_to_db, purge_limit, record_from_row,
+    redaction_from_row, ref_event_from_row, repo_from_row, size_to_db, subtract_present, version_from_db,
+    version_to_db,
 };
 
 /// 写锁等待上限；SQLite 同一时刻只有一个写者，其余写者在此期间排队。
@@ -910,6 +911,14 @@ impl MetaStore for SqliteMetaStore {
             return Ok(());
         }
         let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let pack_id: i32 = sqlx::query_scalar(
+            "INSERT INTO packs (name) VALUES (?) ON CONFLICT (name) DO UPDATE SET name = excluded.name \
+             RETURNING pack_id",
+        )
+        .bind(pack.to_vec())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| backend("record pack", e))?;
         for chunk in objects.chunks(MAX_IDS_PER_QUERY) {
             let rows = chunk
                 .iter()
@@ -917,24 +926,24 @@ impl MetaStore for SqliteMetaStore {
                     let base = o.base.map(|b| b.to_bytes().to_vec());
                     Ok((
                         o.id.to_bytes().to_vec(),
-                        size_to_db(o.offset)?,
-                        size_to_db(o.len)?,
+                        pack_range_to_db(o.offset)?,
+                        pack_range_to_db(o.len)?,
                         base,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                "INSERT INTO pack_locations (id, pack, pack_offset, len, base) ",
+                "INSERT INTO pack_locations (id, pack_id, pack_offset, len, base) ",
             );
             qb.push_values(rows, |mut b, (id, offset, len, base)| {
                 b.push_bind(id)
-                    .push_bind(pack.to_vec())
+                    .push_bind(pack_id)
                     .push_bind(offset)
                     .push_bind(len)
                     .push_bind(base);
             });
             qb.push(
-                " ON CONFLICT (id) DO UPDATE SET pack = excluded.pack, pack_offset = excluded.pack_offset, \
+                " ON CONFLICT (id) DO UPDATE SET pack_id = excluded.pack_id, pack_offset = excluded.pack_offset, \
                  len = excluded.len, base = excluded.base",
             );
             qb.build()
@@ -949,9 +958,7 @@ impl MetaStore for SqliteMetaStore {
     async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
         let mut out = HashMap::new();
         for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
-            let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-                "SELECT id, pack, pack_offset, len FROM pack_locations WHERE id IN (",
-            );
+            let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(LOCATION_SELECT);
             let mut sep = qb.separated(", ");
             for id in chunk {
                 sep.push_bind(id.to_bytes().to_vec());
@@ -978,6 +985,27 @@ impl MetaStore for SqliteMetaStore {
             .await
             .map_err(|e| backend("delta dependents", e))?;
         rows.iter().map(|r| id_from_db(r)).collect()
+    }
+
+    async fn delete_packs(&self, packs: &[[u8; 32]]) -> Result<()> {
+        for chunk in packs.chunks(MAX_IDS_PER_QUERY) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new("DELETE FROM packs WHERE name IN (");
+            let mut sep = qb.separated(", ");
+            for name in chunk {
+                sep.push_bind(name.to_vec());
+            }
+            qb.push(")");
+            qb.build()
+                .execute(&self.pool)
+                .await
+                .map_err(|e| backend("forget packs", e))?;
+        }
+        Ok(())
+    }
+
+    async fn compact_pack_index(&self) -> Result<()> {
+        // SQLite reuses freed pages for new rows; shrinking the file would need a full VACUUM
+        Ok(())
     }
 
     async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
@@ -1203,7 +1231,7 @@ impl MetaStore for SqliteMetaStore {
                     .push_bind(generation)
                     .push_bind(c.deleted);
             });
-            qb.push(" ON CONFLICT (repo_id, path, cs_id) DO NOTHING");
+            qb.push(" ON CONFLICT (repo_id, path, generation, cs_id) DO NOTHING");
             qb.build()
                 .execute(&mut *tx)
                 .await
@@ -1241,7 +1269,7 @@ impl MetaStore for SqliteMetaStore {
                     .push_bind(*generation)
                     .push_bind(*deleted);
             });
-            qb.push(" ON CONFLICT (repo_id, path, cs_id) DO NOTHING");
+            qb.push(" ON CONFLICT (repo_id, path, generation, cs_id) DO NOTHING");
             qb.build()
                 .execute(&mut *tx)
                 .await
@@ -1665,6 +1693,82 @@ mod tests {
         assert_eq!(get("old", a).await, (vec![], 0), "whole repo marked for reindex");
         assert_eq!(get("new", d).await, (vec![c], 2), "untouched");
         assert_eq!(get("new", c).await, (vec![], 1), "untouched");
+    }
+
+    /// 0018 moves pack names into their own table and rebuilds path_changes: existing rows survive.
+    #[tokio::test]
+    async fn upgrade_keeps_pack_locations_and_path_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let url = format!("sqlite://{}", dir.path().join("meta.db").display());
+        let before = sqlx::migrate::Migrator {
+            migrations: MIGRATOR
+                .migrations
+                .iter()
+                .filter(|m| m.version <= 17)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into(),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        let (a, b) = (ObjectId::of_blob(b"a"), ObjectId::of_blob(b"b"));
+        let cs = ObjectId::hash(scion_object::ObjectKind::Changeset, b"c");
+        {
+            let pool = SqlitePool::connect(&format!("{url}?mode=rwc")).await.expect("open");
+            before.run(&pool).await.expect("migrate to 0017");
+            sqlx::query("INSERT INTO repos (repo_id, name, created_at_ms) VALUES (1, 'r', 0)")
+                .execute(&pool)
+                .await
+                .expect("repo");
+            for (id, pack, off, base) in [(a, [1u8; 32], 5, None), (b, [2u8; 32], 9, Some(a))] {
+                sqlx::query("INSERT INTO pack_locations (id, pack, pack_offset, len, base) VALUES (?, ?, ?, 3, ?)")
+                    .bind(id.to_bytes().to_vec())
+                    .bind(pack.to_vec())
+                    .bind(off)
+                    .bind(base.map(|x: ObjectId| x.to_bytes().to_vec()))
+                    .execute(&pool)
+                    .await
+                    .expect("location");
+            }
+            sqlx::query(
+                "INSERT INTO path_changes (repo_id, path, cs_id, generation, deleted) VALUES (1, 'p', ?, 4, 0)",
+            )
+            .bind(cs.to_bytes().to_vec())
+            .execute(&pool)
+            .await
+            .expect("path");
+            pool.close().await;
+        }
+        let s = SqliteMetaStore::connect(&url).await.expect("upgrade");
+        let got = s.pack_locations(&[a, b]).await.expect("locations");
+        assert_eq!(got[&a].pack, [1u8; 32]);
+        assert_eq!((got[&b].pack, got[&b].offset, got[&b].len), ([2u8; 32], 9, 3));
+        assert_eq!(s.delta_dependents(&a).await.expect("deps"), vec![b]);
+        let h = s.path_history("r", "p", u64::MAX >> 1, 10).await.expect("history");
+        assert_eq!((h.len(), h[0].cs, h[0].generation), (1, cs, 4));
+        // The same change recorded again is still one row
+        let change = PathChange {
+            path: "p".into(),
+            deleted: false,
+        };
+        s.index_paths("r", cs, 4, &[change]).await.expect("again");
+        assert_eq!(
+            s.path_history("r", "p", u64::MAX >> 1, 10)
+                .await
+                .expect("history")
+                .len(),
+            1
+        );
+        // Offsets beyond 4 bytes are refused
+        let far = PackedObject {
+            id: a,
+            offset: 1 << 31,
+            len: 1,
+            base: None,
+        };
+        assert!(matches!(
+            s.put_pack_locations(&[3; 32], &[far]).await,
+            Err(Error::Backend(_))
+        ));
     }
 
     #[tokio::test]

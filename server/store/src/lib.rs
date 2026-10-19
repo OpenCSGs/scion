@@ -351,6 +351,16 @@ pub trait MetaStore: Send + Sync + 'static {
         Err(unsupported("pack locations"))
     }
 
+    /// Forgets packs that were removed from object storage (no object lives in them any more).
+    async fn delete_packs(&self, _packs: &[[u8; 32]]) -> Result<()> {
+        Ok(())
+    }
+
+    /// Reclaims the space of replaced pack locations (after a repack has rewritten most of them).
+    async fn compact_pack_index(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// The packed objects stored as deltas against `base`.
     async fn delta_dependents(&self, _base: &ObjectId) -> Result<Vec<ObjectId>> {
         Err(unsupported("pack locations"))

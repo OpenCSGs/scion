@@ -14,10 +14,11 @@ use scion_store::{
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use crate::common::{
-    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, LocationRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REF_EVENT_COLUMNS,
-    REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation,
-    list_limit, location_from_db, now_ms, purge_limit, record_from_row, redaction_from_row, ref_event_from_row,
-    repo_from_row, size_to_db, subtract_present, version_from_db, version_to_db,
+    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, LOCATION_SELECT, LocationRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS,
+    REF_EVENT_COLUMNS, REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db,
+    is_unique_violation, list_limit, location_from_db, now_ms, pack_range_to_db, purge_limit, record_from_row,
+    redaction_from_row, ref_event_from_row, repo_from_row, size_to_db, subtract_present, version_from_db,
+    version_to_db,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -904,6 +905,14 @@ impl MetaStore for PgMetaStore {
             return Ok(());
         }
         let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        let pack_id: i32 = sqlx::query_scalar(
+            "INSERT INTO packs (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = excluded.name \
+             RETURNING pack_id",
+        )
+        .bind(pack.to_vec())
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| backend("record pack", e))?;
         for chunk in objects.chunks(MAX_IDS_PER_QUERY) {
             let rows = chunk
                 .iter()
@@ -911,24 +920,24 @@ impl MetaStore for PgMetaStore {
                     let base = o.base.map(|b| b.to_bytes().to_vec());
                     Ok((
                         o.id.to_bytes().to_vec(),
-                        size_to_db(o.offset)?,
-                        size_to_db(o.len)?,
+                        pack_range_to_db(o.offset)?,
+                        pack_range_to_db(o.len)?,
                         base,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                "INSERT INTO pack_locations (id, pack, pack_offset, len, base) ",
+                "INSERT INTO pack_locations (id, pack_id, pack_offset, len, base) ",
             );
             qb.push_values(rows, |mut b, (id, offset, len, base)| {
                 b.push_bind(id)
-                    .push_bind(pack.to_vec())
+                    .push_bind(pack_id)
                     .push_bind(offset)
                     .push_bind(len)
                     .push_bind(base);
             });
             qb.push(
-                " ON CONFLICT (id) DO UPDATE SET pack = excluded.pack, pack_offset = excluded.pack_offset, \
+                " ON CONFLICT (id) DO UPDATE SET pack_id = excluded.pack_id, pack_offset = excluded.pack_offset, \
                  len = excluded.len, base = excluded.base",
             );
             qb.build()
@@ -943,9 +952,7 @@ impl MetaStore for PgMetaStore {
     async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
         let mut out = HashMap::new();
         for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
-            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                "SELECT id, pack, pack_offset, len FROM pack_locations WHERE id IN (",
-            );
+            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(LOCATION_SELECT);
             let mut sep = qb.separated(", ");
             for id in chunk {
                 sep.push_bind(id.to_bytes().to_vec());
@@ -972,6 +979,30 @@ impl MetaStore for PgMetaStore {
             .await
             .map_err(|e| backend("delta dependents", e))?;
         rows.iter().map(|r| id_from_db(r)).collect()
+    }
+
+    async fn delete_packs(&self, packs: &[[u8; 32]]) -> Result<()> {
+        for chunk in packs.chunks(MAX_IDS_PER_QUERY) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("DELETE FROM packs WHERE name IN (");
+            let mut sep = qb.separated(", ");
+            for name in chunk {
+                sep.push_bind(name.to_vec());
+            }
+            qb.push(")");
+            qb.build()
+                .execute(&self.pool)
+                .await
+                .map_err(|e| backend("forget packs", e))?;
+        }
+        Ok(())
+    }
+
+    async fn compact_pack_index(&self) -> Result<()> {
+        sqlx::query("VACUUM (ANALYZE) pack_locations, packs")
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("vacuum pack locations", e))?;
+        Ok(())
     }
 
     async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
@@ -1198,7 +1229,7 @@ impl MetaStore for PgMetaStore {
                     .push_bind(generation)
                     .push_bind(c.deleted);
             });
-            qb.push(" ON CONFLICT (repo_id, path, cs_id) DO NOTHING");
+            qb.push(" ON CONFLICT (repo_id, path, generation, cs_id) DO NOTHING");
             qb.build()
                 .execute(&mut *tx)
                 .await
@@ -1236,7 +1267,7 @@ impl MetaStore for PgMetaStore {
                     .push_bind(*generation)
                     .push_bind(*deleted);
             });
-            qb.push(" ON CONFLICT (repo_id, path, cs_id) DO NOTHING");
+            qb.push(" ON CONFLICT (repo_id, path, generation, cs_id) DO NOTHING");
             qb.build()
                 .execute(&mut *tx)
                 .await

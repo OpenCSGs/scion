@@ -699,6 +699,7 @@ impl ObjectBlobStore {
         let mut stats = PruneStats::default();
         let cutoff = std::time::SystemTime::now() - min_age;
         let listed = self.list(&format!("{}packs/", self.prefix)).await?;
+        let mut removed = Vec::new();
         for meta in listed {
             let Some(name) = pack_name(meta.location.as_ref()) else {
                 continue;
@@ -731,9 +732,11 @@ impl ObjectBlobStore {
             }
             packs.bytes.invalidate(&name);
             packs.learned.invalidate(&name);
+            removed.push(name);
             stats.packs_removed += 1;
             stats.bytes += meta.size;
         }
+        packs.index.delete_packs(&removed).await?;
         let loose = self.list(&format!("{}objects/", self.prefix)).await?;
         for chunk in loose.chunks(500) {
             let ids: Vec<(ObjectId, &object_store::ObjectMeta)> = chunk

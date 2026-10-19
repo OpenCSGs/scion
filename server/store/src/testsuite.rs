@@ -182,7 +182,7 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
         PackedObject {
             id: b,
             offset: 15,
-            len: u64::from(u32::MAX) + 7,
+            len: 1 << 30,
             base: Some(c),
         },
     ];
@@ -198,7 +198,7 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
             len: 10
         }
     );
-    assert_eq!(got[&b].len, u64::from(u32::MAX) + 7);
+    assert_eq!(got[&b].len, 1 << 30);
     s.put_pack_locations(
         &p2,
         &[PackedObject {
@@ -244,6 +244,9 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
             base: None,
         })
         .collect();
+    s.delete_packs(&[p1, [7; 32]]).await.expect("forget packs");
+    s.delete_packs(&[]).await.expect("forget no packs");
+    s.compact_pack_index().await.expect("compact");
     s.put_pack_locations(&p2, &many).await.expect("large batch");
     let ids: Vec<ObjectId> = many.iter().map(|o| o.id).collect();
     assert_eq!(s.pack_locations(&ids).await.expect("large lookup").len(), many.len());

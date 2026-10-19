@@ -186,6 +186,7 @@ pub async fn repack(
     }
     report.repack = objects.repack(&items).await?;
     report.prune = objects.prune(opts.prune_after).await?;
+    meta.compact_pack_index().await?;
     Ok(report)
 }
 

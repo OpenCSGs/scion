@@ -17,7 +17,8 @@ use crate::{Graph, QueryError, Result, on_first_parent_chain};
 
 /// 派生数据种类与算法版本。
 pub const BLAME_KIND: &str = "blame";
-pub const BLAME_VERSION: u32 = 1;
+/// 2: lines are carried with an exact (LCS) diff where affordable, matching git more closely.
+pub const BLAME_VERSION: u32 = 2;
 
 /// 某个版本文件的逐行归属。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,9 +139,34 @@ async fn content(blobs: &dyn BlobStore, id: &ObjectId) -> Result<Vec<u8>> {
         .ok_or_else(|| QueryError::Corrupt(*id, "file content missing".into()))
 }
 
+/// The line-diff algorithm to use: exact LCS (minimal, like `git diff --minimal`) when the part
+/// between the common prefix and suffix is small enough for its table (about 32 MB at most),
+/// else Myers. similar's Myers is not always minimal on large files.
+fn diff_algorithm(old: &[u8], new: &[u8]) -> similar::Algorithm {
+    const MAX_LCS_CELLS: usize = 4_000_000;
+    let (a, b): (Vec<&[u8]>, Vec<&[u8]>) = (
+        old.split_inclusive(|c| *c == b'\n').collect(),
+        new.split_inclusive(|c| *c == b'\n').collect(),
+    );
+    let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suf = a[pre..]
+        .iter()
+        .rev()
+        .zip(b[pre..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    if (a.len() - pre - suf).saturating_mul(b.len() - pre - suf) <= MAX_LCS_CELLS {
+        similar::Algorithm::Lcs
+    } else {
+        similar::Algorithm::Myers
+    }
+}
+
 /// 由上一版的逐行归属和两个版本的内容，算出新版本的逐行归属。
 fn carry(old: &[u8], old_lines: &[ObjectId], new: &[u8], introduced_by: ObjectId) -> Vec<ObjectId> {
-    let diff = similar::TextDiff::from_lines(old, new);
+    let diff = similar::TextDiff::configure()
+        .algorithm(diff_algorithm(old, new))
+        .diff_lines(old, new);
     let mut out = Vec::new();
     for op in diff.ops() {
         match op.tag() {
@@ -756,6 +782,25 @@ mod tests {
         put_varint(&mut bad_idx, 5);
         assert_eq!(decode(&bad_idx), None, "index out of range");
         assert_eq!(get_varint(&[0x80; 11], &mut 0), None, "overlong varint");
+    }
+
+    #[test]
+    fn diff_algorithm_choice() {
+        let lines = |n: usize, tag: &str| (0..n).map(|i| format!("{tag} {i}\n")).collect::<String>().into_bytes();
+        assert_eq!(diff_algorithm(b"a\nb\n", b"a\nc\n"), similar::Algorithm::Lcs);
+        assert_eq!(diff_algorithm(b"", b""), similar::Algorithm::Lcs);
+        // Big files that differ everywhere: the table would be too large
+        assert_eq!(
+            diff_algorithm(&lines(3000, "old"), &lines(3000, "new")),
+            similar::Algorithm::Myers
+        );
+        // Big files with a small changed middle: only the middle counts
+        let (mut a, mut b) = (lines(20_000, "same"), lines(20_000, "same"));
+        a.extend(lines(100, "old"));
+        b.extend(lines(120, "new"));
+        a.extend(lines(20_000, "tail"));
+        b.extend(lines(20_000, "tail"));
+        assert_eq!(diff_algorithm(&a, &b), similar::Algorithm::Lcs);
     }
 
     #[test]

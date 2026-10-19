@@ -61,6 +61,26 @@ pub(crate) fn size_to_db(size: u64) -> Result<i64> {
     i64::try_from(size).map_err(|_| Error::Backend(format!("object size {size} exceeds i64")))
 }
 
+/// A pack location row: `(id, pack, pack_offset, len)`.
+pub(crate) type LocationRow = (Vec<u8>, Vec<u8>, i64, i64);
+
+pub(crate) fn location_from_db(row: LocationRow) -> Result<(ObjectId, scion_store::PackLocation)> {
+    let (id, pack, offset, len) = row;
+    let pack: [u8; 32] = pack
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::Backend(format!("corrupt pack id of {} bytes", pack.len())))?;
+    let num = |v: i64| u64::try_from(v).map_err(|_| Error::Backend(format!("corrupt pack range {v}")));
+    Ok((
+        id_from_db(&id)?,
+        scion_store::PackLocation {
+            pack,
+            offset: num(offset)?,
+            len: num(len)?,
+        },
+    ))
+}
+
 /// 把多个 ObjectId 依次拼接存入一列。
 pub(crate) fn ids_to_db(ids: &[ObjectId]) -> Vec<u8> {
     ids.iter().flat_map(|id| id.to_bytes()).collect()

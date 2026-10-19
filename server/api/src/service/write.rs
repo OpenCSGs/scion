@@ -79,12 +79,31 @@ impl WriteSvc {
         self.writer.store(repo, objects).await.map_err(status::from_land)
     }
 
+    /// Stores a batch of uploaded objects and adds their ids to `stored`.
+    async fn flush_uploads(
+        &self,
+        repo: &str,
+        batch: &mut Vec<(ObjectId, Bytes)>,
+        stored: &mut Vec<Bytes>,
+    ) -> Result<(), Status> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        self.store(repo, batch).await?;
+        stored.extend(batch.drain(..).map(|(id, _)| Bytes::copy_from_slice(&id.to_bytes())));
+        Ok(())
+    }
+
     /// 校验并创建提交：父提交必须已存在，引用的文件必须已上传，delta 必须能应用到 first parent 上。
     pub(crate) async fn create(&self, repo: &str, cs: &Changeset) -> Result<ChangesetRecord, Status> {
         check_repo(self.meta.as_ref(), repo).await?;
         self.writer.create(repo, cs).await.map_err(status::from_land)
     }
 }
+
+/// An upload stream is written to storage after this many bytes or objects (or at its end).
+const UPLOAD_BATCH_BYTES: usize = 16 << 20;
+const UPLOAD_BATCH_OBJECTS: usize = 4096;
 
 /// 拼接客户端流中的对象分块，并在对象完整时校验 BLAKE3。
 pub(crate) struct UploadAssembler {
@@ -247,21 +266,30 @@ impl WriteService for WriteSvc {
         let mut asm = UploadAssembler::new(self.config.limits.max_upload_object_bytes);
         let mut checked = false;
         let mut stored = Vec::new();
+        // Objects are written in batches, so that a store with packs keeps them together
+        let mut batch: Vec<(ObjectId, Bytes)> = Vec::new();
+        let mut batch_bytes = 0;
+        let mut repo = String::new();
         while let Some(msg) = stream.message().await? {
             let done = asm.push(msg)?;
-            let repo = asm.repo().unwrap_or_default().to_owned();
             if !checked {
+                repo = asm.repo().unwrap_or_default().to_owned();
                 authorize_any(&self.guard, &p, &repo, Action::Write).await?;
                 check_repo(self.meta.as_ref(), &repo).await?;
                 RateLimiter::admit(self.limiter.as_deref(), &repo)?;
                 checked = true;
             }
             if let Some((id, bytes)) = done {
-                self.store(&repo, &[(id, bytes)]).await?;
-                stored.push(Bytes::copy_from_slice(&id.to_bytes()));
+                batch_bytes += bytes.len();
+                batch.push((id, bytes));
+                if batch_bytes >= UPLOAD_BATCH_BYTES || batch.len() >= UPLOAD_BATCH_OBJECTS {
+                    self.flush_uploads(&repo, &mut batch, &mut stored).await?;
+                    batch_bytes = 0;
+                }
             }
         }
         asm.finish()?;
+        self.flush_uploads(&repo, &mut batch, &mut stored).await?;
         Ok(Response::new(UploadBlobsResponse { stored_ids: stored }))
     }
 

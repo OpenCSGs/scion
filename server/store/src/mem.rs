@@ -10,9 +10,9 @@ use scion_object::ObjectId;
 use crate::error::{Error, Result};
 use crate::repo::validate_repo_name;
 use crate::{
-    BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch,
-    TokenRecord, path_within, prefix_upper_bound,
+    BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
+    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter,
+    RepoInfo, RepoPatch, TokenRecord, path_within, prefix_upper_bound,
 };
 
 #[derive(Clone)]
@@ -60,6 +60,7 @@ struct Inner {
     redaction_seq: u64,
     ref_events: std::collections::VecDeque<RefEvent>,
     ref_event_seq: u64,
+    pack_locations: HashMap<ObjectId, PackLocation>,
 }
 
 impl Inner {
@@ -539,6 +540,35 @@ impl MetaStore for MemStore {
         Ok(n)
     }
 
+    async fn put_pack_locations(&self, pack: &[u8; 32], objects: &[PackedObject]) -> Result<()> {
+        let mut inner = self.write()?;
+        for o in objects {
+            let loc = PackLocation {
+                pack: *pack,
+                offset: o.offset,
+                len: o.len,
+            };
+            inner.pack_locations.insert(o.id, loc);
+        }
+        Ok(())
+    }
+
+    async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
+        let inner = self.read()?;
+        Ok(ids
+            .iter()
+            .filter_map(|id| inner.pack_locations.get(id).map(|l| (*id, *l)))
+            .collect())
+    }
+
+    async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
+        let mut inner = self.write()?;
+        for id in ids {
+            inner.pack_locations.remove(id);
+        }
+        Ok(())
+    }
+
     async fn index_objects(&self, repo: &str, objects: &[IndexedObject]) -> Result<()> {
         let mut inner = self.write()?;
         let data = repo_mut(&mut inner, repo)?;
@@ -736,6 +766,11 @@ mod tests {
     #[tokio::test]
     async fn conformance_derived() {
         testsuite::derived(&MemStore::new()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_pack_locations() {
+        testsuite::pack_locations(&MemStore::new()).await;
     }
 
     #[tokio::test]

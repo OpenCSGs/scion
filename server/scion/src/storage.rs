@@ -99,6 +99,15 @@ fn compression(env: &impl Fn(&str) -> Option<String>) -> bool {
     !matches!(env("SCION_BLOB_COMPRESSION").as_deref(), Some("off" | "0" | "false"))
 }
 
+/// Objects written together go into packs unless `SCION_BLOB_PACKS` is off.
+fn packs(env: &impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(env("SCION_BLOB_PACKS").as_deref(), Some("off" | "0" | "false"))
+}
+
+fn with_packs(s: ObjectBlobStore, meta: &Arc<dyn MetaStore>, env: &impl Fn(&str) -> Option<String>) -> ObjectBlobStore {
+    if packs(env) { s.with_packs(meta.clone()) } else { s }
+}
+
 /// The directory a `sqlite://` URL's database file lives in, so it can be created before
 /// opening (SQLite creates the file but not missing parent directories).
 pub fn sqlite_parent(url: &str) -> Option<PathBuf> {
@@ -134,6 +143,7 @@ pub async fn open(
             let s = ObjectBlobStore::local(dir)
                 .context("open blob directory")?
                 .with_compression(compression(&env));
+            let s = with_packs(s, &meta_store, &env);
             s.self_test().await.context("blob store self-test")?;
             Arc::new(s)
         }
@@ -141,6 +151,7 @@ pub async fn open(
             let s = ObjectBlobStore::s3(&s3_config(bucket, prefix, &env)?)
                 .context("configure s3")?
                 .with_compression(compression(&env));
+            let s = with_packs(s, &meta_store, &env);
             // 识别服务（MinIO / SeaweedFS / AWS …）、健康检查、bucket 是否存在、读写自检
             let backend = s.check().await.context("s3 check (endpoint, bucket and credentials)")?;
             tracing::info!(%backend, bucket, "object store ready");
@@ -339,6 +350,14 @@ mod tests {
         let (meta, blobs) = lite(&data);
         open(&meta, &blobs, |_| None).await.expect("open");
         assert!(data.join("meta.db").exists() && data.join("objects").is_dir());
+    }
+
+    #[test]
+    fn packs_switch() {
+        assert!(packs(&|_: &str| None));
+        for off in ["off", "0", "false"] {
+            assert!(!packs(&|_: &str| Some(off.into())), "{off}");
+        }
     }
 
     #[test]

@@ -47,6 +47,10 @@ impl BlobStore for RedactedBlobs {
         self.inner.put(id, data).await
     }
 
+    async fn put_many(&self, objects: &[(ObjectId, Bytes)]) -> Result<()> {
+        self.inner.put_many(objects).await
+    }
+
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>> {
         if redactable(id) {
             if let Some(e) = redacted_error(&self.meta.get_redactions(&self.repo, &[*id]).await?) {

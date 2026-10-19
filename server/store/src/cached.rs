@@ -14,8 +14,9 @@ use moka::sync::Cache;
 use scion_object::ObjectId;
 
 use crate::{
-    ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange, PathHistoryEntry,
-    Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord,
+    ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation, PackedObject,
+    PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo,
+    RepoPatch, Result, TokenRecord,
 };
 
 /// 提交记录在缓存中的最长保留时间。
@@ -257,6 +258,18 @@ impl MetaStore for CachedMeta {
 
     async fn object_repos(&self, id: &ObjectId) -> Result<Vec<String>> {
         self.inner.object_repos(id).await
+    }
+
+    async fn put_pack_locations(&self, pack: &[u8; 32], objects: &[PackedObject]) -> Result<()> {
+        self.inner.put_pack_locations(pack, objects).await
+    }
+
+    async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
+        self.inner.pack_locations(ids).await
+    }
+
+    async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
+        self.inner.delete_pack_locations(ids).await
     }
 
     async fn list_leases(&self) -> Result<Vec<(String, Lease)>> {

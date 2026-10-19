@@ -9,8 +9,8 @@ use bytes::Bytes;
 use scion_object::{ObjectId, ObjectKind};
 
 use crate::{
-    BlobStore, ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState,
+    BlobStore, ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
+    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState,
 };
 
 fn cs(n: u8) -> ObjectId {
@@ -137,6 +137,92 @@ pub async fn blob_store<S: BlobStore + ?Sized>(s: &S) {
     s.delete(&ida).await.expect("delete again");
     s.delete(&idc).await.expect("delete missing");
     assert_eq!(s.get(&idb).await, Ok(Some(b)), "other objects untouched");
+
+    // Several objects at once: all readable afterwards, and writing them again is idempotent
+    let many: Vec<(ObjectId, Bytes)> = (0..40u32)
+        .map(|i| {
+            let d = Bytes::from(format!("object {i} {}", "x".repeat(i as usize * 50)));
+            (ObjectId::of_blob(&d), d)
+        })
+        .collect();
+    s.put_many(&many).await.expect("put many");
+    s.put_many(&many[10..20]).await.expect("put many again");
+    for (id, d) in &many {
+        assert_eq!(s.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        assert_eq!(s.exists(id).await, Ok(true));
+    }
+    let (gone, kept) = (many[3].0, many[4].0);
+    s.delete(&gone).await.expect("delete one of many");
+    assert_eq!(s.get(&gone).await, Ok(None));
+    assert_eq!(s.exists(&gone).await, Ok(false));
+    assert_eq!(s.get(&kept).await, Ok(Some(many[4].1.clone())), "neighbours untouched");
+    s.put_many(&many[3..5]).await.expect("rewrite a deleted object");
+    assert_eq!(s.get(&gone).await, Ok(Some(many[3].1.clone())));
+    let bad = [(ObjectId::of_blob(b"claimed"), Bytes::from_static(b"actual"))];
+    assert!(s.put_many(&bad).await.is_err());
+    s.put_many(&[]).await.expect("nothing to write");
+}
+
+/// Pack locations: global, the latest record wins, forgotten on delete.
+pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
+    let (a, b, c) = (
+        ObjectId::of_blob(b"a"),
+        ObjectId::of_blob(b"b"),
+        ObjectId::of_blob(b"c"),
+    );
+    let (p1, p2) = ([1u8; 32], [2u8; 32]);
+    assert!(s.pack_locations(&[a]).await.expect("empty").is_empty());
+    let objs = [
+        PackedObject {
+            id: a,
+            offset: 5,
+            len: 10,
+        },
+        PackedObject {
+            id: b,
+            offset: 15,
+            len: u64::from(u32::MAX) + 7,
+        },
+    ];
+    s.put_pack_locations(&p1, &objs).await.expect("record");
+    s.put_pack_locations(&p1, &objs).await.expect("record again");
+    let got = s.pack_locations(&[a, b, c, a]).await.expect("lookup");
+    assert_eq!(got.len(), 2);
+    assert_eq!(
+        got[&a],
+        PackLocation {
+            pack: p1,
+            offset: 5,
+            len: 10
+        }
+    );
+    assert_eq!(got[&b].len, u64::from(u32::MAX) + 7);
+    s.put_pack_locations(
+        &p2,
+        &[PackedObject {
+            id: a,
+            offset: 1,
+            len: 2,
+        }],
+    )
+    .await
+    .expect("move");
+    assert_eq!(s.pack_locations(&[a]).await.expect("lookup")[&a].pack, p2);
+    s.delete_pack_locations(&[a, c]).await.expect("forget");
+    let got = s.pack_locations(&[a, b]).await.expect("lookup");
+    assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![b]);
+    s.put_pack_locations(&p1, &[]).await.expect("nothing to record");
+    s.delete_pack_locations(&[]).await.expect("nothing to forget");
+    let many: Vec<PackedObject> = (0..1_234u32)
+        .map(|i| PackedObject {
+            id: ObjectId::of_blob(&i.to_le_bytes()),
+            offset: u64::from(i) * 10,
+            len: 10,
+        })
+        .collect();
+    s.put_pack_locations(&p2, &many).await.expect("large batch");
+    let ids: Vec<ObjectId> = many.iter().map(|o| o.id).collect();
+    assert_eq!(s.pack_locations(&ids).await.expect("large lookup").len(), many.len());
 }
 
 /// 对象索引的语义：按仓库隔离、幂等登记、FindMissing。

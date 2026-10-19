@@ -174,20 +174,10 @@ impl ChangesetWriter {
         Ok(())
     }
 
-    /// 写入对象字节（并发）并登记到仓库索引。顺序：先字节、后索引（索引里有的对象一定可读）。
+    /// 写入对象字节并登记到仓库索引。顺序：先字节、后索引（索引里有的对象一定可读）。
+    /// The objects are written as one unit, so a store with packs keeps them in one pack.
     pub async fn store(&self, repo: &str, objects: &[(ObjectId, Bytes)]) -> Result<()> {
-        const PARALLEL: usize = 16;
-        let mut set = tokio::task::JoinSet::new();
-        for (id, bytes) in objects {
-            if set.len() >= PARALLEL {
-                join_one(&mut set).await?;
-            }
-            let (blobs, id, bytes) = (self.blobs.clone(), *id, bytes.clone());
-            set.spawn(async move { blobs.put(id, bytes).await });
-        }
-        while !set.is_empty() {
-            join_one(&mut set).await?;
-        }
+        self.blobs.put_many(objects).await?;
         let index: Vec<_> = objects
             .iter()
             .map(|(id, b)| IndexedObject {
@@ -196,13 +186,5 @@ impl ChangesetWriter {
             })
             .collect();
         Ok(self.meta.index_objects(repo, &index).await?)
-    }
-}
-
-async fn join_one(set: &mut tokio::task::JoinSet<scion_store::Result<()>>) -> Result<()> {
-    match set.join_next().await {
-        Some(Ok(r)) => Ok(r?),
-        Some(Err(e)) => Err(LandError::Unavailable(format!("object write task failed: {e}"))),
-        None => Ok(()),
     }
 }

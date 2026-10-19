@@ -98,6 +98,14 @@ impl BlobStore for CachedBlobs {
         Ok(())
     }
 
+    async fn put_many(&self, objects: &[(ObjectId, Bytes)]) -> Result<()> {
+        self.inner.put_many(objects).await?;
+        for (id, data) in objects {
+            self.remember(*id, data);
+        }
+        Ok(())
+    }
+
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>> {
         if let Some(d) = self.cached(id) {
             scion_obs::metrics().object_cache("l3", true);

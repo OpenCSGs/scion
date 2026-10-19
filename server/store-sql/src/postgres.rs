@@ -7,17 +7,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use scion_object::ObjectId;
 use scion_store::{
-    ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PathChange,
-    PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo, RepoPatch,
-    Result, TokenRecord, prefix_upper_bound, validate_repo_name,
+    ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
+    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter,
+    RepoInfo, RepoPatch, Result, TokenRecord, prefix_upper_bound, validate_repo_name,
 };
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
 
 use crate::common::{
-    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REF_EVENT_COLUMNS,
+    CHANGESET_COLUMNS, ChangesetRow, FORK_TABLES, LocationRow, MAX_IDS_PER_QUERY, REDACTION_COLUMNS, REF_EVENT_COLUMNS,
     REPO_COLUMNS, REPO_TABLES, RedactionRow, RefEventRow, RepoRow, backend, id_from_db, ids_to_db, is_unique_violation,
-    list_limit, now_ms, purge_limit, record_from_row, redaction_from_row, ref_event_from_row, repo_from_row,
-    size_to_db, subtract_present, version_from_db, version_to_db,
+    list_limit, location_from_db, now_ms, purge_limit, record_from_row, redaction_from_row, ref_event_from_row,
+    repo_from_row, size_to_db, subtract_present, version_from_db, version_to_db,
 };
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
@@ -899,6 +899,77 @@ impl MetaStore for PgMetaStore {
         Ok(r.rows_affected())
     }
 
+    async fn put_pack_locations(&self, pack: &[u8; 32], objects: &[PackedObject]) -> Result<()> {
+        if objects.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.pool.begin().await.map_err(|e| backend("begin", e))?;
+        for chunk in objects.chunks(MAX_IDS_PER_QUERY) {
+            let rows = chunk
+                .iter()
+                .map(|o| Ok((o.id.to_bytes().to_vec(), size_to_db(o.offset)?, size_to_db(o.len)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let mut qb =
+                sqlx::QueryBuilder::<sqlx::Postgres>::new("INSERT INTO pack_locations (id, pack, pack_offset, len) ");
+            qb.push_values(rows, |mut b, (id, offset, len)| {
+                b.push_bind(id)
+                    .push_bind(pack.to_vec())
+                    .push_bind(offset)
+                    .push_bind(len);
+            });
+            qb.push(
+                " ON CONFLICT (id) DO UPDATE SET pack = excluded.pack, pack_offset = excluded.pack_offset, \
+                 len = excluded.len",
+            );
+            qb.build()
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| backend("record pack locations", e))?;
+        }
+        tx.commit().await.map_err(|e| backend("commit", e))?;
+        Ok(())
+    }
+
+    async fn pack_locations(&self, ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
+        let mut out = HashMap::new();
+        for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                "SELECT id, pack, pack_offset, len FROM pack_locations WHERE id IN (",
+            );
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(id.to_bytes().to_vec());
+            }
+            qb.push(")");
+            let rows: Vec<LocationRow> = qb
+                .build_query_as()
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| backend("pack locations", e))?;
+            for row in rows {
+                let (id, loc) = location_from_db(row)?;
+                out.insert(id, loc);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
+        for chunk in ids.chunks(MAX_IDS_PER_QUERY) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("DELETE FROM pack_locations WHERE id IN (");
+            let mut sep = qb.separated(", ");
+            for id in chunk {
+                sep.push_bind(id.to_bytes().to_vec());
+            }
+            qb.push(")");
+            qb.build()
+                .execute(&self.pool)
+                .await
+                .map_err(|e| backend("forget pack locations", e))?;
+        }
+        Ok(())
+    }
+
     async fn index_objects(&self, repo: &str, objects: &[IndexedObject]) -> Result<()> {
         let repo_id = self.repo_id(repo).await?;
         if objects.is_empty() {
@@ -1434,6 +1505,12 @@ mod tests {
     async fn conformance_changesets_and_refs() {
         let s = pg_or_skip!();
         testsuite::changesets_and_refs(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_pack_locations() {
+        let s = pg_or_skip!();
+        testsuite::pack_locations(&s).await;
     }
 
     #[tokio::test]

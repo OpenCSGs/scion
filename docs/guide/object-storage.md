@@ -8,7 +8,7 @@ Scion 服务端把文件内容、目录树和提交对象存放在对象存储�
 | 目录路径（或 `--lite --data-dir`） | 单机 Lite 档 |
 | `s3://bucket[/prefix]` | 生产：SeaweedFS、MinIO、AWS S3，或其他兼容 S3 的服务 |
 
-数据读写只用 S3 核心子集（PUT / GET / HEAD / LIST），不依赖条件写或版本控制。SeaweedFS 和 MinIO 每次 CI 都会跑完整的存储一致性测试。
+数据读写只用 S3 核心子集（PUT / GET（含 Range）/ HEAD / LIST），不依赖条件写或版本控制。SeaweedFS 和 MinIO 每次 CI 都会跑完整的存储一致性测试。
 
 ## Compression
 
@@ -18,6 +18,17 @@ The server stores objects zstd-compressed (level 3) when that saves at least 10%
 - **Old objects**: objects written before compression, or with compression turned off, read back unchanged, and a later upload of the same object keeps the existing copy.
 - **Effect**: importing starhub-server (6,312 commits) stores 227 MB of object bytes instead of 1,007 MB; git's pack for the same history is 392 MB.
 - **Turning it off**: `SCION_BLOB_COMPRESSION=off` stores new objects uncompressed, for example when CPU is scarce and storage is cheap. Reads handle both forms either way.
+
+## Packs
+
+Objects written together are stored together: a commit's new trees and its changeset, and each batch of an upload (up to 16 MB or 4,096 objects), go into one *pack* under `packs/` instead of one stored object each. The metadata store records where each packed object is (`pack_locations`), and reads fetch just its byte range.
+
+- **Why**: most objects are small (the trees and commits of starhub-server are around 1 KB). On MinIO every stored object is a directory plus an `xl.meta` file of at least a disk block each, and every write is a request. Importing starhub-server stored 67,636 objects taking 546 MB of MinIO disk; with packs it stores 10,065 taking 282 MB, and the import takes about 95 s instead of 154 s.
+- **Reads**: the first read from a pack also fetches the pack's index from its end (and the whole pack when it is under 64 KB), so the other objects of the same commit need no further lookups.
+- **What stays loose**: objects over 1 MB, and an object written on its own. Objects written before packs keep being read where they are.
+- **Cost**: a row per packed object in the metadata store (13 MB of PostgreSQL for starhub-server), and range reads (`GET` with `Range`), which every S3-compatible service supports.
+- **Redaction**: purging a packed object rewrites its pack without it.
+- **Turning it off**: `SCION_BLOB_PACKS=off` writes every new object loose. Packed objects stay readable.
 
 ## 连接参数
 

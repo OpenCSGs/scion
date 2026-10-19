@@ -340,6 +340,22 @@ pub trait MetaStore: Send + Sync + 'static {
         Err(unsupported("redactions"))
     }
 
+    /// Records where the objects of a pack live (see [`PackLocation`]). Idempotent; a later record
+    /// for the same object replaces the earlier one (both copies hold the same bytes).
+    async fn put_pack_locations(&self, _pack: &[u8; 32], _objects: &[PackedObject]) -> Result<()> {
+        Err(unsupported("pack locations"))
+    }
+
+    /// Where the packed objects among `ids` live; objects not in any pack are left out.
+    async fn pack_locations(&self, _ids: &[ObjectId]) -> Result<HashMap<ObjectId, PackLocation>> {
+        Err(unsupported("pack locations"))
+    }
+
+    /// Forgets where `ids` are packed (their pack is being rewritten or a copy is damaged).
+    async fn delete_pack_locations(&self, _ids: &[ObjectId]) -> Result<()> {
+        Err(unsupported("pack locations"))
+    }
+
     /// 对象索引中有 `id` 的仓库（按名字排序）。用于判断对象字节能否物理删除。
     async fn object_repos(&self, _id: &ObjectId) -> Result<Vec<String>> {
         Err(unsupported("object lookups"))
@@ -577,12 +593,38 @@ pub struct IndexedObject {
     pub size: u64,
 }
 
+/// An object inside a pack: its stored bytes are `len` bytes at `offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedObject {
+    pub id: ObjectId,
+    pub offset: u64,
+    pub len: u64,
+}
+
+/// Where a packed object lives: the pack's content hash, and the byte range of its stored bytes.
+/// Packs are global, like the objects in them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PackLocation {
+    pub pack: [u8; 32],
+    pub offset: u64,
+    pub len: u64,
+}
+
 /// 按内容寻址的对象字节存储，**全局共享**：相同内容在所有仓库中只存一份。
 /// 仓库能访问哪些对象由 [`MetaStore`] 的对象索引决定。
 #[async_trait]
 pub trait BlobStore: Send + Sync + 'static {
     /// 写入对象。同一 id 重复写入是幂等的。调用方负责保证 `data` 与 `id` 相符。
     async fn put(&self, id: ObjectId, data: Bytes) -> Result<()>;
+
+    /// Writes several objects, as one unit where the store supports it (packs). The default
+    /// writes them one by one.
+    async fn put_many(&self, objects: &[(ObjectId, Bytes)]) -> Result<()> {
+        for (id, data) in objects {
+            self.put(*id, data.clone()).await?;
+        }
+        Ok(())
+    }
 
     async fn get(&self, id: &ObjectId) -> Result<Option<Bytes>>;
 

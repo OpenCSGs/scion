@@ -91,6 +91,18 @@ impl Repo {
         Ok(String::from_utf8_lossy(&out).lines().map(str::to_owned).collect())
     }
 
+    /// Like [`Repo::commits`], without the commits reachable from any of `known` (and `known`).
+    pub fn commits_excluding(&self, git_ref: &str, known: &[String]) -> Result<Vec<String>> {
+        let mut args = vec!["rev-list", "--reverse", "--topo-order", git_ref];
+        if !known.is_empty() {
+            args.push("--not");
+            args.extend(known.iter().map(String::as_str));
+        }
+        args.push("--");
+        let out = self.run(&args)?;
+        Ok(String::from_utf8_lossy(&out).lines().map(str::to_owned).collect())
+    }
+
     /// 相对第一父提交的改动；根提交相对空树。不检测改名（改名即删除加新增）。
     pub fn changes(&self, commit: &str, first_parent: Option<&str>) -> Result<Vec<Change>> {
         let out = match first_parent {

@@ -41,9 +41,12 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Summary {
     /// 导入的提交数（含此前已导入、本次复用的）。
     pub commits: usize,
+    /// Commits that were not on the server yet and were created by this import.
+    pub new_commits: usize,
     /// 因为是子模块而跳过的条目数。
     pub skipped_gitlinks: usize,
-    /// git sha → Scion 提交 id。
+    /// git sha → Scion 提交 id, for the commits this import created and the already imported
+    /// commits it looked up.
     pub mapping: HashMap<String, ObjectId>,
     /// 目标 ref 最终指向的提交；git 历史为空时为 None。
     pub tip: Option<ObjectId>,
@@ -117,24 +120,39 @@ pub async fn import_with(
     mut progress: impl FnMut(usize, usize),
 ) -> Result<Summary> {
     let repo = git::Repo::open(repo_dir)?;
-    let commits = repo.commits(git_ref)?;
+    let all = repo.commits(git_ref)?;
+    // Commits already on the server (an earlier import, or another branch sharing history) are
+    // skipped: imports always create parents first, so excluding the newest known commits and
+    // their ancestors leaves exactly the missing ones.
+    let mut mapping: HashMap<String, ObjectId> = HashMap::new();
+    let mut known: Vec<String> = Vec::new();
+    let mut commits = all.clone();
+    while let Some(found) = probe_known(client, &commits).await? {
+        mapping.insert(found.0.clone(), found.1);
+        known.push(found.0);
+        commits = repo.commits_excluding(git_ref, &known)?;
+    }
     let mut cat = repo.cat_file()?;
-    let mut mapping: HashMap<String, ObjectId> = HashMap::with_capacity(commits.len());
     let mut first_parent_of: HashMap<ObjectId, Option<ObjectId>> = HashMap::with_capacity(commits.len());
     let mut skipped_gitlinks = 0;
 
     for (i, sha) in commits.iter().enumerate() {
         let commit = cat.commit(sha)?;
-        let parents: Vec<ObjectId> = commit
-            .parents
-            .iter()
-            .map(|p| {
-                mapping
-                    .get(p)
-                    .copied()
-                    .ok_or_else(|| Error::Parse(format!("parent {p} of {sha} not imported yet")))
-            })
-            .collect::<Result<_>>()?;
+        let mut parents: Vec<ObjectId> = Vec::with_capacity(commit.parents.len());
+        for p in &commit.parents {
+            let id = match mapping.get(p) {
+                Some(id) => *id,
+                // A parent that was already on the server
+                None => {
+                    let id = known_commit(client, p)
+                        .await?
+                        .ok_or_else(|| Error::Parse(format!("parent {p} of {sha} not imported yet")))?;
+                    mapping.insert(p.clone(), id);
+                    id
+                }
+            };
+            parents.push(id);
+        }
         let changes = repo.changes(sha, commit.parents.first().map(String::as_str))?;
         let (change_id, raw_sha) = sha_bytes(sha)?;
 
@@ -166,16 +184,48 @@ pub async fn import_with(
         progress(i + 1, commits.len());
     }
 
-    let tip = commits.last().and_then(|sha| mapping.get(sha).copied());
+    let tip = all.last().and_then(|sha| mapping.get(sha).copied());
     if let Some(tip) = tip {
         land_chain(client, target_ref, tip, &first_parent_of, options.land_step).await?;
     }
     Ok(Summary {
-        commits: commits.len(),
+        commits: all.len(),
+        new_commits: commits.len(),
         skipped_gitlinks,
         mapping,
         tip,
     })
+}
+
+/// The Scion commit imported from git commit `sha`, if the server has it.
+async fn known_commit(client: &Client, sha: &str) -> Result<Option<ObjectId>> {
+    match client.resolve_revision(sha).await {
+        Ok(r) => Ok(Some(r.id)),
+        Err(e) if e.is_not_found() => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// One commit of `commits` (topological order, parents first) that the server already has,
+/// preferring the newest: probes the newest commit, then exponentially older ones, then the
+/// oldest. None when none of the probed commits is known, so a fresh import costs a few
+/// lookups, not one per commit.
+async fn probe_known(client: &Client, commits: &[String]) -> Result<Option<(String, ObjectId)>> {
+    let n = commits.len();
+    let mut back = 0usize;
+    let mut step = 1usize;
+    while back < n {
+        let sha = &commits[n - 1 - back];
+        if let Some(id) = known_commit(client, sha).await? {
+            return Ok(Some((sha.clone(), id)));
+        }
+        back += step;
+        step *= 2;
+    }
+    match commits.first() {
+        Some(oldest) if n > 1 => Ok(known_commit(client, oldest).await?.map(|id| (oldest.clone(), id))),
+        _ => Ok(None),
+    }
 }
 
 /// 把 ref 快进到 `tip`：ref 当前提交必须在 `tip` 的第一父提交链上（否则 git 历史被改写过）。
@@ -210,7 +260,11 @@ async fn land_chain(
             break;
         }
         chain.push(c);
-        cur = first_parent_of.get(&c).copied().flatten();
+        cur = match first_parent_of.get(&c) {
+            Some(p) => *p,
+            // Imported earlier: ask the server
+            None => client.resolve_revision(&c.to_string()).await?.parents.first().copied(),
+        };
     }
     if let Some(cur_tip) = current {
         if cur.is_none() {

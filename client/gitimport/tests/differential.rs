@@ -263,7 +263,8 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
 
     let first = import(&c, dir, "main", "main", |_, _| {}).await.expect("first");
     let again = import(&c, dir, "main", "main", |_, _| {}).await.expect("again");
-    assert_eq!(first.mapping, again.mapping, "deterministic ids");
+    assert_eq!((first.new_commits, again.new_commits), (1, 0), "nothing new the second time");
+    assert_eq!((again.commits, again.tip), (1, first.tip));
     assert_eq!(
         c.resolve_ref("main").await.expect("ok").expect("ref").version,
         1,
@@ -276,6 +277,7 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
     write(dir, "b", b"b");
     commit(dir, "three", "1700000200 +0000");
     let third = import(&c, dir, "main", "main", |_, _| {}).await.expect("incremental");
+    assert_eq!((third.commits, third.new_commits), (3, 2), "only the new commits are created");
     let tip = c.resolve_ref("main").await.expect("ok").expect("ref");
     assert_eq!(Some(tip.changeset), third.tip);
     assert_eq!(tip.version, 2, "one fast-forward for both commits");
@@ -288,6 +290,47 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
     commit(dir, "rewritten", "1700000300 +0000");
     let err = import(&c, dir, "main", "main", |_, _| {}).await.expect_err("diverged");
     assert!(matches!(err, Error::Diverged { .. }), "{err:?}");
+}
+
+/// A branch that shares history with an imported one only creates its own commits, and merging
+/// it back only creates the merge commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_history_is_not_imported_twice() {
+    let srv = server().await;
+    let c = Client::builder()
+        .endpoint(&srv.url)
+        .repo("imported")
+        .build()
+        .await
+        .expect("connect");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    for (i, t) in ["1700000000", "1700000100", "1700000200"].iter().enumerate() {
+        write(dir, "a", format!("{i}").as_bytes());
+        commit(dir, &format!("main {i}"), &format!("{t} +0000"));
+    }
+    let main = import(&c, dir, "main", "main", |_, _| {}).await.expect("main");
+    assert_eq!(main.new_commits, 3);
+    git(dir, &["checkout", "-q", "-b", "feat"]);
+    for (i, t) in ["1700000300", "1700000400"].iter().enumerate() {
+        write(dir, "f", format!("{i}").as_bytes());
+        commit(dir, &format!("feat {i}"), &format!("{t} +0000"));
+    }
+    let feat = import(&c, dir, "feat", "feat", |_, _| {}).await.expect("feat");
+    assert_eq!((feat.commits, feat.new_commits), (5, 2));
+    assert_eq!(c.log("feat", None, 10, None).await.expect("log").entries.len(), 5, "full history on the new ref");
+    git(dir, &["checkout", "-q", "main"]);
+    git(dir, &["-c", "user.name=t", "-c", "user.email=t@x", "merge", "-q", "--no-ff", "-m", "merge feat", "feat"]);
+    let merged = import(&c, dir, "main", "main", |_, _| {}).await.expect("merge");
+    assert_eq!((merged.commits, merged.new_commits), (6, 1));
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!(tip.parents.len(), 2);
+    assert_eq!(c.read_file("main", "f").await.expect("f").as_ref(), b"1");
+    // Importing a branch whose every commit is already there only moves the ref
+    let copy = import(&c, dir, "main", "main-copy", |_, _| {}).await.expect("copy");
+    assert_eq!((copy.new_commits, copy.tip), (0, merged.tip));
+    assert_eq!(c.resolve_ref("main-copy").await.expect("ok").map(|r| r.changeset), merged.tip);
 }
 
 /// A git tag imported into `tags/…` is created at its commit in one step (the server never

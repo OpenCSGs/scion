@@ -742,6 +742,8 @@ pub struct ImportOut {
     #[serde(rename = "ref")]
     pub reference: String,
     pub commits: usize,
+    /// Commits created by this import (the others were already on the server).
+    pub new_commits: usize,
     pub skipped_gitlinks: usize,
     pub tip: Option<String>,
 }
@@ -750,11 +752,13 @@ impl Render for ImportOut {
     fn text(&self) -> String {
         let mut s = match &self.tip {
             Some(t) => format!(
-                "imported {} commits into {} ({} at {})",
+                "imported {} commits into {} ({} at {}; {} new, {} already there)",
                 self.commits,
                 self.repo,
                 self.reference,
-                short(t)
+                short(t),
+                self.new_commits,
+                self.commits - self.new_commits
             ),
             None => format!("nothing to import into {}", self.repo),
         };
@@ -782,6 +786,7 @@ pub async fn import_git(ctx: &Ctx, git_dir: &Path, git_ref: &str, target_ref: &s
         repo,
         reference: target_ref.to_owned(),
         commits: summary.commits,
+        new_commits: summary.new_commits,
         skipped_gitlinks: summary.skipped_gitlinks,
         tip: summary.tip.map(|t| t.to_string()),
     })
@@ -1260,12 +1265,13 @@ mod tests {
             repo: "r".into(),
             reference: "main".into(),
             commits: 3,
+            new_commits: 2,
             skipped_gitlinks: 1,
             tip: Some("c1tiptiptiptip".into()),
         };
         assert_eq!(
             o.text(),
-            "imported 3 commits into r (main at c1tiptiptipt)\nskipped 1 submodule entries (not supported yet)"
+            "imported 3 commits into r (main at c1tiptiptipt; 2 new, 1 already there)\nskipped 1 submodule entries (not supported yet)"
         );
         let o = ImportOut {
             tip: None,

@@ -66,12 +66,23 @@ enum Command {
     Status,
     /// 把本地改动创建为提交（尚未合入）。
     Commit {
-        #[arg(short, long)]
-        message: String,
+        /// Required unless --amend (which keeps the old message by default).
+        #[arg(short, long, required_unless_present = "amend")]
+        message: Option<String>,
+        /// Replace the pending (not yet landed) commit, adding the current local changes.
+        #[arg(long)]
+        amend: bool,
         /// Author as "Name <email>". Defaults to `scn config` `user.name` / `user.email`, then git's
         /// `user.name` / `user.email`.
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
+    },
+    /// Drop the pending (not yet landed) commit; its changes stay as uncommitted local changes.
+    Uncommit,
+    /// Discard local changes to tracked files under PATHS (`.` for everything). Added files are kept.
+    Restore {
+        #[arg(required = true)]
+        paths: Vec<String>,
     },
     /// User settings: the default commit author (`user.name`, `user.email`).
     #[command(subcommand)]
@@ -343,7 +354,17 @@ async fn run(cli: Cli) -> ExitCode {
             BranchCmd::Rm { name } => emit(repos::delete_branch(&ctx, &name).await, json),
         },
         Command::Status => emit(commands::status(&ctx), json),
-        Command::Commit { message, author } => emit(commands::commit(&ctx, &message, author.as_deref()).await, json),
+        Command::Commit {
+            message,
+            amend: true,
+            author,
+        } => emit(commands::amend(&ctx, message.as_deref(), author.as_deref()).await, json),
+        Command::Commit { message, author, .. } => emit(
+            commands::commit(&ctx, message.as_deref().unwrap_or_default(), author.as_deref()).await,
+            json,
+        ),
+        Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
+        Command::Restore { paths } => emit(commands::restore(&ctx, &paths).await, json),
         Command::Config(cmd) => {
             let path = config::path(|k| std::env::var(k).ok());
             emit(
@@ -498,8 +519,26 @@ mod tests {
         let cli = Cli::try_parse_from(["scn", "sparse", "disable"]).expect("parse");
         assert!(matches!(cli.command, Command::Sparse(SparseCmd::Disable)));
         let cli = Cli::try_parse_from(["scn", "commit", "-m", "msg", "--author", "A <a@b>"]).expect("parse");
-        assert!(matches!(cli.command, Command::Commit { ref message, .. } if message == "msg"));
+        assert!(
+            matches!(cli.command, Command::Commit { ref message, amend: false, .. } if message.as_deref() == Some("msg"))
+        );
         assert!(Cli::try_parse_from(["scn", "commit"]).is_err(), "message required");
+        let cli = Cli::try_parse_from(["scn", "commit", "--amend"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Command::Commit {
+                message: None,
+                amend: true,
+                ..
+            }
+        ));
+        assert!(Cli::try_parse_from(["scn", "restore"]).is_err(), "paths required");
+        let cli = Cli::try_parse_from(["scn", "restore", "src", "a.txt"]).expect("parse");
+        assert!(matches!(cli.command, Command::Restore { ref paths } if paths.len() == 2));
+        assert!(matches!(
+            Cli::try_parse_from(["scn", "uncommit"]).expect("parse").command,
+            Command::Uncommit
+        ));
         let cli =
             Cli::try_parse_from(["scn", "import", "git", "../repo", "--repo", "r", "--git-ref", "dev"]).expect("parse");
         assert!(matches!(cli.command, Command::Import(ImportCmd::Git { ref git_ref, .. }) if git_ref == "dev"));

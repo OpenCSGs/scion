@@ -279,6 +279,53 @@ async fn clone_commit_land_sync_workflow() {
             Some(2)
         );
 
+        // restore (paths relative to the current directory), uncommit, commit --amend
+        std::fs::write(wc.join("src/lib.rs"), "broken").expect("edit");
+        std::fs::write(wc.join("src/extra.rs"), "x").expect("add");
+        let v = json_of(&scn_in(&wc.join("src"), &["restore", "lib.rs", "--json"]));
+        assert_eq!(v["restored"], serde_json::json!(["src/lib.rs"]));
+        assert_eq!(
+            std::fs::read_to_string(wc.join("src/lib.rs")).expect("lib"),
+            "pub fn f() {}\n"
+        );
+        let out = scn_in(&wc, &["restore", "."]);
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("kept 1 added file(s)"),
+            "{out:?}"
+        );
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "extra", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        let v = json_of(&scn_in(&wc, &["uncommit", "--json"]));
+        assert_eq!(v["schema"], "scion.cli.uncommit/v1");
+        let v = json_of(&scn_in(&wc, &["status", "--json"]));
+        assert_eq!(v["added"], serde_json::json!(["src/extra.rs"]));
+        json_of(&scn_in(
+            &wc,
+            &[
+                "commit",
+                "-m",
+                "extra v1",
+                "--author",
+                "Ada <ada@example.com>",
+                "--json",
+            ],
+        ));
+        std::fs::write(wc.join("src/extra2.rs"), "y").expect("add");
+        let v = json_of(&scn_in(&wc, &["commit", "--amend", "-m", "extra files", "--json"]));
+        assert!(v["changeset"].is_string());
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let log = json_of(&scn_in(&wc, &["log", "-n", "1", "--json"]));
+        assert_eq!(log["entries"][0]["message"], "extra files");
+        assert_eq!(log["entries"][0]["author"], "Ada", "amend keeps the author");
+        let out = scn_in(&wc, &["uncommit"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("not yet landed"),
+            "{out:?}"
+        );
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

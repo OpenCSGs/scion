@@ -700,3 +700,112 @@ async fn ignored_files_stay_local_and_tracked_files_stay_tracked() {
     assert!(alice.status().expect("status").is_clean());
     assert!(matches!(alice.sync(&c).await, Ok(SyncOutcome::UpToDate)));
 }
+
+#[tokio::test]
+async fn restore_puts_tracked_files_back_and_keeps_new_ones() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&dir, "a.txt", "a\n");
+    write(&dir, "src/x.rs", "x\n");
+    write(&dir, "src/y.rs", "y\n");
+    wc.commit(&c, "init", None).await.expect("commit");
+    // Restoring needs no landed base: the pending commit is the snapshot
+    write(&dir, "a.txt", "changed\n");
+    std::fs::remove_file(dir.join("src/x.rs")).expect("rm");
+    write(&dir, "src/y.rs", "changed\n");
+    write(&dir, "src/new.rs", "new\n");
+    let r = wc.restore(&c, &["src/".into()]).await.expect("restore src");
+    assert_eq!(r.restored, ["src/x.rs", "src/y.rs"]);
+    assert_eq!(r.kept_added, ["src/new.rs"]);
+    assert_eq!(std::fs::read_to_string(dir.join("src/x.rs")).expect("x"), "x\n");
+    assert_eq!(wc.status().expect("status"), status(&["src/new.rs"], &["a.txt"], &[]));
+    let r = wc.restore(&c, &[".".into()]).await.expect("restore all");
+    assert_eq!(
+        (r.restored.as_slice(), r.kept_added.as_slice()),
+        (&["a.txt".to_string()][..], &["src/new.rs".to_string()][..])
+    );
+    let r = wc
+        .restore(&c, &["src/x".into(), "nope".into()])
+        .await
+        .expect("no match");
+    assert!(
+        r.restored.is_empty() && r.kept_added.is_empty(),
+        "src/x does not match src/x.rs"
+    );
+    assert_eq!(wc.status().expect("status"), status(&["src/new.rs"], &[], &[]));
+}
+
+#[tokio::test]
+async fn uncommit_and_amend_rewrite_the_pending_commit() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
+        .await
+        .expect("clone");
+    assert!(matches!(wc.uncommit(&c).await, Err(Error::NoPendingCommit)));
+    write(&dir, "keep.txt", "1\n");
+    write(&dir, "gone.txt", "g\n");
+    wc.commit(&c, "base", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    assert!(
+        matches!(wc.amend(&c, None, None).await, Err(Error::NoPendingCommit)),
+        "landed"
+    );
+
+    // A pending commit that edits, deletes and adds
+    write(&dir, "keep.txt", "2\n");
+    std::fs::remove_file(dir.join("gone.txt")).expect("rm");
+    write(&dir, "new.txt", "n\n");
+    let first = wc
+        .commit(&c, "work", Some(("Ada", "ada@example.com")))
+        .await
+        .expect("commit")
+        .expect("created");
+    assert!(wc.status().expect("status").is_clean());
+    // Uncommit: the same changes are back as uncommitted, the files untouched
+    assert_eq!(wc.uncommit(&c).await.expect("uncommit"), first.id);
+    assert_eq!(
+        wc.status().expect("status"),
+        status(&["new.txt"], &["keep.txt"], &["gone.txt"])
+    );
+    assert_eq!(std::fs::read_to_string(dir.join("keep.txt")).expect("keep"), "2\n");
+    assert!(matches!(wc.land(&c).await, Err(Error::NothingToLand)));
+
+    // Commit again, then amend with one more change: old message and author are kept
+    wc.commit(&c, "work", Some(("Ada", "ada@example.com")))
+        .await
+        .expect("again");
+    write(&dir, "more.txt", "m\n");
+    let amended = wc.amend(&c, None, None).await.expect("amend").expect("created");
+    assert_ne!(amended.id, first.id);
+    assert!(wc.status().expect("status").is_clean());
+    let log = c.log("main", None, 5, None).await.expect("log");
+    assert_eq!(log.entries.len(), 1, "nothing landed yet");
+    let landed = wc.land(&c).await.expect("land");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!(tip.id, landed.tip);
+    assert_eq!((tip.message.as_str(), tip.author.name.as_str()), ("work", "Ada"));
+    let changed: Vec<String> = c
+        .diff(Some(&tip.parents[0].to_string()), &tip.id.to_string(), None)
+        .await
+        .expect("diff")
+        .into_iter()
+        .map(|f| f.path)
+        .collect();
+    assert_eq!(changed, ["gone.txt", "keep.txt", "more.txt", "new.txt"]);
+
+    // Amending away every change drops the pending commit
+    write(&dir, "keep.txt", "3\n");
+    wc.commit(&c, "tmp", None).await.expect("tmp");
+    write(&dir, "keep.txt", "2\n");
+    assert!(wc.amend(&c, Some("renamed"), None).await.expect("amend").is_none());
+    assert!(wc.status().expect("status").is_clean());
+    assert!(matches!(wc.land(&c).await, Err(Error::NothingToLand)));
+}

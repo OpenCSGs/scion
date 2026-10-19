@@ -85,6 +85,15 @@ struct TreeFile {
     id: ObjectId,
 }
 
+/// Result of [`WorkingCopy::restore`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restored {
+    /// Files put back to the snapshot version.
+    pub restored: Vec<String>,
+    /// Added files under the given paths, left untouched (restore never deletes files).
+    pub kept_added: Vec<String>,
+}
+
 pub struct WorkingCopy {
     paths: Paths,
     state: State,
@@ -365,6 +374,15 @@ impl WorkingCopy {
         author: Option<(&str, &str)>,
     ) -> Result<Option<CreatedChangeset>> {
         let _lock = self.paths.lock()?;
+        self.commit_locked(client, message, author).await
+    }
+
+    async fn commit_locked(
+        &mut self,
+        client: &Client,
+        message: &str,
+        author: Option<(&str, &str)>,
+    ) -> Result<Option<CreatedChangeset>> {
         let (_, changes) = self.changes()?;
         if changes.is_empty() {
             return Ok(None);
@@ -409,6 +427,100 @@ impl WorkingCopy {
         self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
         self.paths.save_state(&self.state)?;
         Ok(Some(created))
+    }
+
+    /// Replaces the pending commit with one that also includes the current local changes, with
+    /// `message` (default: the old message) and `author` (default: the old author). Returns None
+    /// when the result has no changes, which drops the pending commit.
+    pub async fn amend(
+        &mut self,
+        client: &Client,
+        message: Option<&str>,
+        author: Option<(&str, &str)>,
+    ) -> Result<Option<CreatedChangeset>> {
+        let _lock = self.paths.lock()?;
+        let old_message = self.state.head_message.clone().unwrap_or_default();
+        let old_author = self.state.head_author.clone();
+        self.uncommit_locked(client).await?;
+        let author = author.or(old_author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())));
+        self.commit_locked(client, message.unwrap_or(&old_message), author)
+            .await
+    }
+
+    /// Drops the pending commit and keeps its changes in the working tree as uncommitted changes.
+    /// Returns the dropped commit.
+    pub async fn uncommit(&mut self, client: &Client) -> Result<ObjectId> {
+        let _lock = self.paths.lock()?;
+        self.uncommit_locked(client).await
+    }
+
+    async fn uncommit_locked(&mut self, client: &Client) -> Result<ObjectId> {
+        let head = match &self.state.head {
+            Some(h) => h
+                .parse::<ObjectId>()
+                .map_err(|e| Error::Corrupt(format!("head: {e}")))?,
+            None => return Err(Error::NoPendingCommit),
+        };
+        let sparse = self.sparse()?;
+        let head_files = flatten(client, client.root_tree(&head.to_string()).await?, &sparse).await?;
+        let base_files = match &self.state.base {
+            Some(b) => flatten(client, client.root_tree(b).await?, &sparse).await?,
+            None => BTreeMap::new(),
+        };
+        // The snapshot goes back to base; the files on disk stay as they are. Records of changed
+        // paths get mtime 0 so the next status re-hashes them and reports them as modified.
+        let mut dirstate = self.paths.load_dirstate()?;
+        for (path, change) in diff(&head_files, &base_files) {
+            match change {
+                Some(f) => {
+                    dirstate.files.insert(path, record(f.mode, f.id, 0, 0));
+                }
+                None => {
+                    dirstate.files.remove(&path);
+                }
+            }
+        }
+        // dirstate first: a crash in between leaves the changes visible as uncommitted on top of
+        // the old head, never hidden
+        self.paths.save_dirstate(&mut dirstate)?;
+        self.clear_head();
+        self.paths.save_state(&self.state)?;
+        Ok(head)
+    }
+
+    /// Discards uncommitted changes to tracked files at or under `paths` (`.` or an empty path
+    /// means everything): modified and deleted files go back to the current snapshot. Added
+    /// (untracked) files are left alone and returned in [`Restored::kept_added`].
+    pub async fn restore(&mut self, client: &Client, paths: &[String]) -> Result<Restored> {
+        let _lock = self.paths.lock()?;
+        let wanted: Vec<&str> = paths.iter().map(|p| p.trim_end_matches('/')).collect();
+        let matches = |p: &str| {
+            wanted.iter().any(|w| {
+                w.is_empty() || *w == "." || p == *w || (p.starts_with(*w) && p.as_bytes().get(w.len()) == Some(&b'/'))
+            })
+        };
+        let (status, _) = self.changes()?;
+        let mut dirstate = self.paths.load_dirstate()?;
+        let mut delta = BTreeMap::new();
+        for path in status.modified.iter().chain(&status.deleted).filter(|p| matches(p)) {
+            let rec = dirstate
+                .files
+                .get(path)
+                .ok_or_else(|| Error::Corrupt(format!("{path} changed but is not tracked")))?;
+            delta.insert(
+                path.clone(),
+                Some(TreeFile {
+                    mode: rec.mode,
+                    id: rec.object_id()?,
+                }),
+            );
+        }
+        self.apply(client, &mut dirstate, &delta).await?;
+        self.paths.save_dirstate(&mut dirstate)?;
+        Ok(Restored {
+            restored: delta.into_keys().collect(),
+            kept_added: status.added.into_iter().filter(|p| matches(p)).collect(),
+        })
     }
 
     /// 合入已提交的改动。ref 已前进时由服务端 rebase，随后把上游改动更新到工作区。

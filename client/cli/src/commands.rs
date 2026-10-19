@@ -293,6 +293,117 @@ impl Render for CommitOut {
     }
 }
 
+/// `scn commit --amend`: replaces the pending commit. Unlike a new commit, the default author is
+/// the old commit's author, not the configured one.
+pub async fn amend(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> Result<CommitOut, CliError> {
+    let author = author.map(parse_author).transpose()?;
+    let (mut wc, client) = open_wc(ctx).await?;
+    let created = wc
+        .amend(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
+        .await?;
+    Ok(CommitOut {
+        schema: "scion.cli.commit/v1",
+        changeset: created.map(|c| c.id.to_string()),
+        generation: created.map(|c| c.generation),
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct UncommitOut {
+    pub schema: &'static str,
+    /// The dropped commit.
+    pub changeset: String,
+}
+
+impl Render for UncommitOut {
+    fn text(&self) -> String {
+        format!(
+            "uncommitted {}; its changes are now uncommitted local changes",
+            short(&self.changeset)
+        )
+    }
+}
+
+pub async fn uncommit(ctx: &Ctx) -> Result<UncommitOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    let id = wc.uncommit(&client).await?;
+    Ok(UncommitOut {
+        schema: "scion.cli.uncommit/v1",
+        changeset: id.to_string(),
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RestoreOut {
+    pub schema: &'static str,
+    pub restored: Vec<String>,
+    /// Added files under the given paths; restore leaves them alone.
+    pub kept_added: Vec<String>,
+}
+
+impl Render for RestoreOut {
+    fn text(&self) -> String {
+        let mut lines: Vec<String> = self.restored.iter().map(|p| format!("restored {p}")).collect();
+        if lines.is_empty() {
+            lines.push("nothing to restore".to_owned());
+        }
+        if !self.kept_added.is_empty() {
+            lines.push(format!(
+                "kept {} added file(s) (restore never deletes files): {}",
+                self.kept_added.len(),
+                self.kept_added.join(", ")
+            ));
+        }
+        lines.join("\n")
+    }
+}
+
+/// Paths are relative to the current directory, like other commands that take local paths.
+pub async fn restore(ctx: &Ctx, paths: &[String]) -> Result<RestoreOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    let rel = wc_relative(wc.root(), &ctx.cwd, paths)?;
+    let r = wc.restore(&client, &rel).await?;
+    Ok(RestoreOut {
+        schema: "scion.cli.restore/v1",
+        restored: r.restored,
+        kept_added: r.kept_added,
+    })
+}
+
+/// Converts paths given relative to `cwd` into working-copy paths (`/`-separated, no `..`).
+fn wc_relative(root: &Path, cwd: &Path, paths: &[String]) -> Result<Vec<String>, CliError> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let base = cwd
+        .strip_prefix(&root)
+        .map_err(|_| CliError::Usage(format!("{} is outside the working copy", cwd.display())))?;
+    paths
+        .iter()
+        .map(|p| {
+            let mut parts: Vec<String> = base
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            for part in p.split('/') {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        parts
+                            .pop()
+                            .ok_or_else(|| CliError::Usage(format!("{p:?} is outside the working copy")))?;
+                    }
+                    other => parts.push(other.to_owned()),
+                }
+            }
+            Ok(if parts.is_empty() {
+                ".".to_owned()
+            } else {
+                parts.join("/")
+            })
+        })
+        .collect()
+}
+
 pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<CommitOut, CliError> {
     let author = match author {
         Some(a) => Some(parse_author(a)?),
@@ -647,6 +758,25 @@ pub async fn ls(ctx: &Ctx, spec: Option<&str>) -> Result<LsOut, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wc_relative_paths() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let root = d.path().join("wc");
+        std::fs::create_dir_all(root.join("src/a")).expect("mkdir");
+        let rel =
+            |cwd: &Path, p: &[&str]| wc_relative(&root, cwd, &p.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            rel(&root, &["src/x.rs", ".", "src/"]).expect("ok"),
+            ["src/x.rs", ".", "src"]
+        );
+        assert_eq!(
+            rel(&root.join("src/a"), &["../b.rs", ".", "..", "../.."]).expect("ok"),
+            ["src/b.rs", "src/a", "src", "."]
+        );
+        assert!(matches!(rel(&root, &["../x"]), Err(CliError::Usage(_))));
+        assert!(matches!(rel(d.path(), &["x"]), Err(CliError::Usage(_))), "cwd outside");
+    }
 
     #[test]
     fn parse_author_cases() {

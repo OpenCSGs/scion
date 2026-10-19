@@ -168,6 +168,9 @@ echo 'hello' > README.md
 echo 'target/' > .gitignore         # 支持 .gitignore 与 .scionignore（gitignore 语法）
 scn status                          # A .gitignore, A README.md
 scn commit -m "add readme"          # 或 --author "Ada <ada@example.com>"
+scn restore src/main.rs             # 放弃已跟踪文件的本地改动（`.` 表示全部）；新增的文件保留
+scn commit --amend                  # 把更多本地改动并入未合入的提交（保留说明与作者）
+scn uncommit                        # 撤销未合入的提交，改动保留为本地改动
 scn land                            # 合入 main；main 已前进时由服务端 rebase（三方合并）
 scn sync                            # 拉取别人合入的改动；有未合入的提交时自动做文件级 rebase
 scn cat main:README.md              # 不需要工作副本也能读文件（工作副本外加 --repo）

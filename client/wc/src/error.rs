@@ -16,6 +16,9 @@ pub enum Error {
     Dirty,
     #[error("nothing to land")]
     NothingToLand,
+    /// `uncommit` / `commit --amend` without a pending (committed, not landed) commit.
+    #[error("no pending commit; landed commits cannot be changed")]
+    NoPendingCommit,
     /// 本地未合入的改动与 ref 上的新提交改了同样的文件。
     #[error("conflict: both you and upstream changed {}", .0.join(", "))]
     Conflict(Vec<String>),

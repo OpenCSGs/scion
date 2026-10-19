@@ -129,6 +129,9 @@ echo 'hello' > README.md
 echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
 scn status                          # A .gitignore, A README.md
 scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
+scn restore src/main.rs             # discard local changes to tracked files (`.` for all); added files are kept
+scn commit --amend                  # fold more local changes into the pending commit (keeps message and author)
+scn uncommit                        # drop the pending commit, keep its changes as local changes
 scn land                            # land on main; if main moved, the server rebases (three-way merge)
 scn sync                            # pull others' changes; rebases a pending commit at file level
 scn cat main:README.md              # read files without a working copy (add --repo outside one)

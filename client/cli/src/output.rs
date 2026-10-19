@@ -112,6 +112,9 @@ impl CliError {
             CliError::Wc(scion_wc::Error::Dirty) => Some("run `scn commit -m <message>` first"),
             CliError::Wc(scion_wc::Error::NothingToLand) => Some("run `scn commit -m <message>` first"),
             CliError::Wc(scion_wc::Error::NotAWorkingCopy(_)) => Some("run `scn clone <repo>` first, or pass --repo"),
+            CliError::Wc(scion_wc::Error::NoPendingCommit) => {
+                Some("only a commit made with `scn commit` and not yet landed can be changed")
+            }
             CliError::Import(scion_gitimport::Error::Diverged { .. }) => {
                 Some("the git history was rewritten; import into a new ref with --ref")
             }
@@ -382,6 +385,7 @@ mod tests {
             scion_wc::Error::NothingToLand,
             scion_wc::Error::NotAWorkingCopy("/x".into()),
             scion_wc::Error::Conflict(vec!["a".into()]),
+            scion_wc::Error::NoPendingCommit,
         ] {
             assert!(CliError::Wc(e).hint().is_some());
         }

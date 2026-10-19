@@ -94,6 +94,11 @@ pub fn s3_config(bucket: &str, prefix: &str, env: impl Fn(&str) -> Option<String
 }
 
 /// 打开两个后端。两者都是内存时共用同一个 [`MemStore`]。对象存储会先做读写自检。
+/// `SCION_BLOB_COMPRESSION=off` stores new objects uncompressed (reads handle both forms).
+fn compression(env: &impl Fn(&str) -> Option<String>) -> bool {
+    !matches!(env("SCION_BLOB_COMPRESSION").as_deref(), Some("off" | "0" | "false"))
+}
+
 /// The directory a `sqlite://` URL's database file lives in, so it can be created before
 /// opening (SQLite creates the file but not missing parent directories).
 pub fn sqlite_parent(url: &str) -> Option<PathBuf> {
@@ -126,12 +131,16 @@ pub async fn open(
     let blob_store: Arc<dyn BlobStore> = match blobs {
         BlobSpec::Mem => mem,
         BlobSpec::Dir(dir) => {
-            let s = ObjectBlobStore::local(dir).context("open blob directory")?;
+            let s = ObjectBlobStore::local(dir)
+                .context("open blob directory")?
+                .with_compression(compression(&env));
             s.self_test().await.context("blob store self-test")?;
             Arc::new(s)
         }
         BlobSpec::S3 { bucket, prefix } => {
-            let s = ObjectBlobStore::s3(&s3_config(bucket, prefix, env)?).context("configure s3")?;
+            let s = ObjectBlobStore::s3(&s3_config(bucket, prefix, &env)?)
+                .context("configure s3")?
+                .with_compression(compression(&env));
             // 识别服务（MinIO / SeaweedFS / AWS …）、健康检查、bucket 是否存在、读写自检
             let backend = s.check().await.context("s3 check (endpoint, bucket and credentials)")?;
             tracing::info!(%backend, bucket, "object store ready");
@@ -330,6 +339,15 @@ mod tests {
         let (meta, blobs) = lite(&data);
         open(&meta, &blobs, |_| None).await.expect("open");
         assert!(data.join("meta.db").exists() && data.join("objects").is_dir());
+    }
+
+    #[test]
+    fn compression_switch() {
+        assert!(compression(&|_: &str| None));
+        assert!(compression(&|_: &str| Some("on".into())));
+        for off in ["off", "0", "false"] {
+            assert!(!compression(&|_: &str| Some(off.into())), "{off}");
+        }
     }
 
     #[test]

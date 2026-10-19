@@ -103,6 +103,7 @@ Benchmarks run on one machine (Apple M5, 10 cores) with objects in memory; clien
 | Landing ([`server/land/tests/bench.rs`](server/land/tests/bench.rs)) | 2,000 lands on one ref from 200 concurrent clients | PostgreSQL 885/s (p99 379 ms); SQLite 1,921/s (p99 173 ms) | ≥ 200/s, p99 < 500 ms |
 | History queries ([`server/query/tests/bench.rs`](server/query/tests/bench.rs)) | 100,000 commits: log, diff, ancestry, merge-base, blame | p99 < 20 ms on SQLite and PostgreSQL (cold blame 13.6 ms, `log --path` 15.6 ms) | p99 < 100 ms |
 | Directory listings (same benchmark) | Last commit of every entry in a 100-entry root, and repository stats, at 100,000 commits | PostgreSQL: cold p50 33 ms (p99 93 ms); after a land with the parent cached p99 2.4 ms; cached p99 < 5 ms. Repository stats cold 131 ms, next commit 3.1 ms | p99 < 100 ms |
+| Real repository (`~/git/starhub-server`, Lite, this machine) | Import 6,312 commits (2,836 merges, 4,663 files); clone; queries | Import 57 s; object bytes 227 MB with zstd (1,007 MB uncompressed; git pack 392 MB); clone 0.37 s; status 23 ms; log, blame, show, diff 8–50 ms. Files, git SHAs, blame, diff and archive match git | — |
 
 ## Quick start
 

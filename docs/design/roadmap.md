@@ -111,7 +111,16 @@ Legend: 🔵 has an initial design, ⚪ idea only.
 - **Repository-level events**: creates, deletes and forks also go into the event feed.
 - **Async fork**: fork very large repositories as a background task.
 
-### 2.9 Caching and multiple regions ⚪
+### 2.9 Packing small objects ⚪
+- **What**: store small objects together in pack files (with an index), instead of one file or S3 object each.
+- **Why it waits**: objects are already zstd-compressed (starhub-server: 227 MB of bytes, against git's 392 MB pack). On S3/MinIO you pay for bytes, so it barely matters there.
+- **Start when**: a local file system holds a large repository (84% of starhub-server's objects are under 4 KB, so it takes 404 MB on disk with 4 KB blocks), or per-request S3 costs dominate.
+- **Design points**:
+  - Content addressing stays the same.
+  - Packs are immutable and written by a background compactor.
+  - Deltas between versions of a file (git-style) could go on top, for history-heavy repositories.
+
+### 2.10 Caching and multiple regions ⚪
 - **Cold-ref detection**: stop warming and prefetching refs nobody reads.
 - **Isolating sensitive prefixes**: keep content under path-level permissions out of shared caches.
 - **Multi-region deployment**: writes go to the primary region and reads go to regional caches. This needs the Distributed tier.

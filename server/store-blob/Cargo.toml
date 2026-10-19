@@ -13,7 +13,9 @@ object_store.workspace = true
 reqwest.workspace = true
 scion-object.workspace = true
 scion-store.workspace = true
+tokio.workspace = true
 tracing.workspace = true
+zstd = "0.13"
 
 [dev-dependencies]
 scion-store = { workspace = true, features = ["testsuite"] }

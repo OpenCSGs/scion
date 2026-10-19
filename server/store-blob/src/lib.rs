@@ -7,6 +7,11 @@
 //! 只使用 S3 的核心子集（PUT / GET / HEAD），不依赖条件写：同一 key 的内容永远相同，重复写入天然幂等。
 //! 读取时校验 BLAKE3，磁盘或存储服务的静默损坏会以错误形式暴露，而不是把坏数据发给客户端。
 //!
+//! Objects are stored zstd-compressed when that saves at least 10%; already-compressed content
+//! (model weights, images) is stored as it is. Reads recognise a zstd frame by its magic number
+//! and keep the decompressed bytes only if they match the object id, so objects written before
+//! compression, and raw content that happens to start with the zstd magic, read back unchanged.
+//!
 //! 不同 S3 兼容服务（MinIO、SeaweedFS 等）的差异由 [`provider`] 适配：启动检查
 //! [`ObjectBlobStore::check`] 识别服务、做对应的健康检查，并在 bucket 缺失时给出该服务的创建方法。
 
@@ -64,6 +69,8 @@ impl std::fmt::Debug for S3Config {
 pub struct ObjectBlobStore {
     store: Arc<dyn ObjectStore>,
     prefix: String,
+    /// Compress objects on write (reads always understand both forms).
+    compress: bool,
     /// S3 后端的服务信息；本地目录为 None。
     s3: Option<S3Target>,
 }
@@ -94,7 +101,58 @@ impl std::fmt::Display for BlobBackend {
     }
 }
 
+/// zstd frames start with these bytes.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Smaller objects are not worth compressing.
+const MIN_COMPRESS: usize = 128;
+const ZSTD_LEVEL: i32 = 3;
+/// Larger objects are (de)compressed on a blocking thread, off the async runtime.
+const BLOCKING_ABOVE: usize = 1 << 20;
+
+/// The bytes to store for `data`: a zstd frame when it saves at least 10%, else `data` itself.
+fn encode(data: &Bytes) -> Bytes {
+    if data.len() < MIN_COMPRESS {
+        return data.clone();
+    }
+    match zstd::bulk::compress(data, ZSTD_LEVEL) {
+        Ok(z) if z.len() < data.len() - data.len() / 10 => Bytes::from(z),
+        _ => data.clone(),
+    }
+}
+
+/// The object bytes from what was stored: the decompressed frame if it matches `id`, else the
+/// stored bytes if they do (uncompressed objects). None when neither matches.
+fn decode(id: &ObjectId, stored: Bytes) -> Option<Bytes> {
+    if stored.starts_with(&ZSTD_MAGIC) {
+        if let Ok(plain) = zstd::stream::decode_all(stored.as_ref()) {
+            if id.verify(&plain) {
+                return Some(Bytes::from(plain));
+            }
+        }
+    }
+    id.verify(&stored).then_some(stored)
+}
+
+async fn off_runtime<T: Send + 'static>(size: usize, f: impl FnOnce() -> T + Send + 'static) -> T {
+    if size <= BLOCKING_ABOVE {
+        return f();
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) => match h.spawn_blocking(f).await {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        },
+        Err(_) => f(),
+    }
+}
+
 impl ObjectBlobStore {
+    /// Turns compression on write on or off (default on). Reads handle both forms either way.
+    pub fn with_compression(mut self, on: bool) -> Self {
+        self.compress = on;
+        self
+    }
+
     /// 本地目录（不存在则创建）。
     pub fn local(dir: impl AsRef<std::path::Path>) -> Result<Self> {
         let dir = dir.as_ref();
@@ -103,6 +161,7 @@ impl ObjectBlobStore {
         Ok(Self {
             store: Arc::new(fs),
             prefix: String::new(),
+            compress: true,
             s3: None,
         })
     }
@@ -150,6 +209,7 @@ impl ObjectBlobStore {
         Ok(Self {
             store: Arc::new(store),
             prefix: normalize_prefix(&cfg.prefix),
+            compress: true,
             s3: Some(S3Target {
                 endpoint: cfg.endpoint.clone(),
                 bucket: cfg.bucket.clone(),
@@ -217,7 +277,8 @@ impl ObjectBlobStore {
             Err(e) => return Err(backend("get object", e)),
         };
         let data = res.bytes().await.map_err(|e| backend("read object", e))?;
-        Ok(id.verify(&data))
+        let id = *id;
+        Ok(off_runtime(data.len(), move || decode(&id, data).is_some()).await)
     }
 
     fn key(&self, id: &ObjectId) -> Path {
@@ -279,16 +340,25 @@ impl BlobStore for ObjectBlobStore {
             )));
         }
         let key = self.key(&id);
+        let stored = if self.compress {
+            let d = data.clone();
+            off_runtime(data.len(), move || encode(&d)).await
+        } else {
+            data.clone()
+        };
         // 已存在且完好就不再上传。已存在但大小不符或内容校验失败（截断、位翻转）时覆盖写入，
         // 否则损坏的对象永远无法被重新上传修复，跨仓库去重还会让新仓库引用到坏数据。
+        // An existing copy may be compressed or not (written before compression, or by a store
+        // with compression off); either is fine if intact.
+        let sizes = [stored.len() as u64, data.len() as u64];
         match self.store.head(&key).await {
-            Ok(meta) if meta.size == data.len() as u64 && self.intact(&key, &id).await? => return Ok(()),
+            Ok(meta) if sizes.contains(&meta.size) && self.intact(&key, &id).await? => return Ok(()),
             Ok(_) => tracing::warn!(%id, "existing blob is damaged; overwriting with verified bytes"),
             Err(object_store::Error::NotFound { .. }) => {}
             Err(e) => return Err(backend("head object", e)),
         }
         self.store
-            .put(&key, PutPayload::from_bytes(data))
+            .put(&key, PutPayload::from_bytes(stored))
             .await
             .map_err(|e| backend("put object", e))?;
         Ok(())
@@ -300,12 +370,15 @@ impl BlobStore for ObjectBlobStore {
             Err(object_store::Error::NotFound { .. }) => return Ok(None),
             Err(e) => return Err(backend("get object", e)),
         };
-        let data = res.bytes().await.map_err(|e| backend("read object", e))?;
-        if !id.verify(&data) {
-            tracing::error!(%id, "blob failed integrity check");
-            return Err(Error::Backend(format!("object {id} failed integrity check")));
+        let stored = res.bytes().await.map_err(|e| backend("read object", e))?;
+        let oid = *id;
+        match off_runtime(stored.len(), move || decode(&oid, stored)).await {
+            Some(data) => Ok(Some(data)),
+            None => {
+                tracing::error!(%id, "blob failed integrity check");
+                Err(Error::Backend(format!("object {id} failed integrity check")))
+            }
         }
-        Ok(Some(data))
     }
 
     async fn exists(&self, id: &ObjectId) -> Result<bool> {
@@ -417,6 +490,136 @@ mod tests {
         let s = ObjectBlobStore::local(dir.path().join("blobs")).expect("open");
         testsuite::blob_store(&s).await;
         s.self_test().await.expect("self test");
+    }
+
+    fn text(n: usize) -> Bytes {
+        Bytes::from(
+            (0..n)
+                .map(|i| format!("line {} of a source file\n", i % 97))
+                .collect::<String>(),
+        )
+    }
+
+    fn noise(n: usize) -> Bytes {
+        // xorshift: incompressible
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        Bytes::from(
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x as u8
+                })
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    fn stored_len(dir: &std::path::Path, id: &ObjectId) -> u64 {
+        std::fs::metadata(dir.join(object_key(id))).expect("stored").len()
+    }
+
+    #[test]
+    fn encode_decode_rules() {
+        let small = Bytes::from_static(b"tiny");
+        assert_eq!(encode(&small), small, "below MIN_COMPRESS");
+        let t = text(1000);
+        let z = encode(&t);
+        assert!(
+            z.starts_with(&ZSTD_MAGIC) && z.len() * 4 < t.len(),
+            "{} -> {}",
+            t.len(),
+            z.len()
+        );
+        assert_eq!(decode(&ObjectId::of_blob(&t), z), Some(t.clone()));
+        let n = noise(4096);
+        assert_eq!(encode(&n), n, "incompressible content is stored as it is");
+        // Raw content that starts with the zstd magic is not mistaken for a frame
+        let mut tricky = ZSTD_MAGIC.to_vec();
+        tricky.extend_from_slice(&noise(300));
+        let tricky = Bytes::from(tricky);
+        assert_eq!(decode(&ObjectId::of_blob(&tricky), tricky.clone()), Some(tricky));
+        // A frame of something else
+        assert_eq!(decode(&ObjectId::of_blob(b"other"), encode(&t)), None);
+        assert_eq!(decode(&ObjectId::of_blob(b"x"), Bytes::from_static(b"y")), None);
+    }
+
+    #[tokio::test]
+    async fn compressed_storage_round_trips_and_reads_old_objects() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = ObjectBlobStore::local(dir.path()).expect("open");
+        let (t, n) = (text(5000), noise(2 << 20));
+        let (tid, nid) = (ObjectId::of_blob(&t), ObjectId::of_blob(&n));
+        s.put(tid, t.clone()).await.expect("put text");
+        s.put(nid, n.clone()).await.expect("put noise");
+        assert!(stored_len(dir.path(), &tid) * 4 < t.len() as u64, "text is compressed");
+        assert_eq!(stored_len(dir.path(), &nid), n.len() as u64, "noise is not");
+        assert_eq!(s.get(&tid).await, Ok(Some(t.clone())));
+        assert_eq!(s.get(&nid).await, Ok(Some(n)));
+        // Large compressible objects go through the blocking pool
+        let big = text(200_000);
+        let bid = ObjectId::of_blob(&big);
+        s.put(bid, big.clone()).await.expect("put big");
+        assert!(stored_len(dir.path(), &bid) * 4 < big.len() as u64);
+        assert_eq!(s.get(&bid).await, Ok(Some(big)));
+
+        // Objects written without compression (older servers) read back and are not rewritten
+        let old = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_compression(false);
+        let legacy = text(3000);
+        let lid = ObjectId::of_blob(&legacy);
+        old.put(lid, legacy.clone()).await.expect("legacy put");
+        assert_eq!(stored_len(dir.path(), &lid), legacy.len() as u64);
+        assert_eq!(s.get(&lid).await, Ok(Some(legacy.clone())));
+        s.put(lid, legacy.clone()).await.expect("put again");
+        assert_eq!(stored_len(dir.path(), &lid), legacy.len() as u64, "intact copy kept");
+        assert_eq!(
+            old.get(&tid).await,
+            Ok(Some(t)),
+            "compressed objects read without compression on"
+        );
+    }
+
+    #[tokio::test]
+    async fn damaged_compressed_objects_fail_reads_and_are_repaired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let s = ObjectBlobStore::local(dir.path()).expect("open");
+        let t = text(5000);
+        let id = ObjectId::of_blob(&t);
+        s.put(id, t.clone()).await.expect("put");
+        let file = dir.path().join(object_key(&id));
+        let mut z = std::fs::read(&file).expect("read");
+        let mid = z.len() / 2;
+        z[mid] ^= 0xff;
+        std::fs::write(&file, &z).expect("flip");
+        assert!(matches!(s.get(&id).await, Err(Error::Backend(m)) if m.contains("integrity")));
+        s.put(id, t.clone()).await.expect("repair");
+        assert_eq!(s.get(&id).await, Ok(Some(t)));
+    }
+
+    #[tokio::test]
+    async fn off_runtime_without_a_runtime_and_with_a_panic() {
+        assert_eq!(
+            std::thread::spawn(|| futures_lite_block_on(off_runtime(BLOCKING_ABOVE + 1, || 7)))
+                .join()
+                .ok(),
+            Some(7)
+        );
+        let r = tokio::spawn(off_runtime(BLOCKING_ABOVE + 1, || -> u8 { panic!("boom") })).await;
+        assert!(r.is_err_and(|e| e.is_panic()));
+    }
+
+    /// Polls a future to completion on the current thread (no tokio runtime).
+    fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
+        use std::task::{Context, Poll, Waker};
+        let mut f = std::pin::pin!(f);
+        let mut cx = Context::from_waker(Waker::noop());
+        loop {
+            if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
+                return v;
+            }
+        }
     }
 
     #[tokio::test]

@@ -10,6 +10,15 @@ Scion 服务端把文件内容、目录树和提交对象存放在对象存储�
 
 数据读写只用 S3 核心子集（PUT / GET / HEAD / LIST），不依赖条件写或版本控制。SeaweedFS 和 MinIO 每次 CI 都会跑完整的存储一致性测试。
 
+## Compression
+
+The server stores objects zstd-compressed (level 3) when that saves at least 10%. Content that is already compressed, such as model weights, archives or images, is stored as it is.
+
+- **Transparent**: object ids, sizes in the metadata and everything clients see are those of the original bytes.
+- **Old objects**: objects written before compression, or with compression turned off, read back unchanged, and a later upload of the same object keeps the existing copy.
+- **Effect**: importing starhub-server (6,312 commits) stores 227 MB of object bytes instead of 1,007 MB; git's pack for the same history is 392 MB.
+- **Turning it off**: `SCION_BLOB_COMPRESSION=off` stores new objects uncompressed, for example when CPU is scarce and storage is cheap. Reads handle both forms either way.
+
 ## 连接参数
 
 | 环境变量 | 说明 | 默认 |

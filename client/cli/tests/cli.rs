@@ -223,6 +223,62 @@ async fn clone_commit_land_sync_workflow() {
         let out = scn_in(&wc, &["archive", "--format", "rar"]);
         assert_eq!(out.status.code(), Some(2));
 
+        // Default author: `scn config` first, then git's settings; a hint when neither is set
+        let cfg = root.join("scion-config.json");
+        let iso = |args: &[&str], with_git: bool| {
+            let mut c = Command::new(env!("CARGO_BIN_EXE_scn"));
+            c.current_dir(&wc)
+                .args(args)
+                .env_remove("SCION_AUTHOR")
+                .env("SCION_NO_DAEMON", "1")
+                .env("SCION_CONFIG_FILE", &cfg)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    root.join(if with_git { "gitconfig" } else { "none" }),
+                );
+            c.output().expect("run scn")
+        };
+        std::fs::write(
+            root.join("gitconfig"),
+            "[user]\n\tname = Git User\n\temail = git@example.com\n",
+        )
+        .expect("gitconfig");
+        std::fs::write(wc.join("a1.txt"), "1").expect("write");
+        let out = iso(&["commit", "-m", "anon"], false);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("scn config set user.name"),
+            "{out:?}"
+        );
+        json_of(&iso(&["land", "--json"], false));
+        std::fs::write(wc.join("a2.txt"), "2").expect("write");
+        json_of(&iso(&["commit", "-m", "from git", "--json"], true));
+        json_of(&iso(&["land", "--json"], true));
+        json_of(&iso(&["config", "set", "user.name", "Ada", "--json"], true));
+        assert_eq!(
+            String::from_utf8_lossy(&iso(&["config", "get", "user.name"], true).stdout).trim(),
+            "Ada"
+        );
+        std::fs::write(wc.join("a3.txt"), "3").expect("write");
+        json_of(&iso(&["commit", "-m", "mixed", "--json"], true));
+        json_of(&iso(&["land", "--json"], true));
+        let log = json_of(&scn_in(&wc, &["log", "-n", "3", "--json"]));
+        let who = |i: usize| {
+            let e = &log["entries"][i];
+            format!(
+                "{} <{}>",
+                e["author"].as_str().unwrap_or(""),
+                e["email"].as_str().unwrap_or("")
+            )
+        };
+        assert_eq!(who(0), "Ada <git@example.com>", "name from scn config, email from git");
+        assert_eq!(who(1), "Git User <git@example.com>");
+        assert_eq!(who(2), "scion <scion@localhost>");
+        assert_eq!(
+            iso(&["config", "set", "core.editor", "vi"], true).status.code(),
+            Some(2)
+        );
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

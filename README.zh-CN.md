@@ -158,14 +158,16 @@ cargo run -p scion -- server --lite --data-dir ./.scion-data
 # 另一个终端：安装 scn 并检查连接
 cargo install --path client/cli
 scn doctor
-scn archive -o mono.tar.gz          # 打包下载 tar.gz / zip / tar（见 docs/guide/archive.md）
+scn config set user.name "Ada Lovelace"       # 默认的提交作者（未设置时用 git 的 user.name / user.email）
+scn config set user.email ada@example.com
 scn repo create mono                # 仓库与分支：scn repo / scn branch（见 docs/guide/repos.md）
 
 # 日常流程
 scn clone mono && cd mono          # 检出（默认 ref main，空仓库也可以）
 echo 'hello' > README.md
-scn status                          # A README.md
-scn commit -m "add readme" --author "Ada <ada@example.com>"
+echo 'target/' > .gitignore         # 支持 .gitignore 与 .scionignore（gitignore 语法）
+scn status                          # A .gitignore, A README.md
+scn commit -m "add readme"          # 或 --author "Ada <ada@example.com>"
 scn land                            # 合入 main；main 已前进时由服务端 rebase（三方合并）
 scn sync                            # 拉取别人合入的改动；有未合入的提交时自动做文件级 rebase
 scn cat main:README.md              # 不需要工作副本也能读文件（工作副本外加 --repo）
@@ -175,6 +177,7 @@ scn diff                            # 本地未提交的改动（unified diff）
 scn diff main                       # main 最新提交引入的改动；`scn diff A B` 比较两个版本
 scn blame src/lib.rs                # 每一行最后被哪个提交改动
 scn clone mono part --sparse src/   # 稀疏检出：只检出 src/ 和根目录下的文件；之后可以 `scn sparse add docs/`
+scn archive -o mono.tar.gz          # 打包下载 tar.gz / zip / tar（见 docs/guide/archive.md）
 
 # scn 经本机 daemon（scn daemon）连接服务端，按需自动拉起；SCION_NO_DAEMON=1 关闭
 scn daemon status

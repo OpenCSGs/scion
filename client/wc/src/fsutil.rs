@@ -3,9 +3,11 @@
 use std::collections::BTreeMap;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error::{Error, Result, io};
 use crate::state::{DIR, Mode};
@@ -50,11 +52,79 @@ fn mode_of(meta: &Metadata) -> Option<Mode> {
     Some(Mode::File)
 }
 
-/// 扫描工作区，返回 `相对路径（/ 分隔）→ 文件信息`。跳过 `.scion/`、目录本身和特殊文件。
-pub(crate) fn scan(root: &Path) -> Result<BTreeMap<String, Found>> {
+/// Ignore-rule files read in every directory. Both use gitignore syntax; when both exist in one
+/// directory, `.scionignore` is read last and wins.
+pub const IGNORE_FILES: [&str; 2] = [".gitignore", ".scionignore"];
+
+/// Ignore rules of one directory (`None` when it has no ignore files).
+fn dir_rules(dir: &Path) -> Option<Arc<Gitignore>> {
+    let mut b = GitignoreBuilder::new(dir);
+    let mut any = false;
+    for name in IGNORE_FILES {
+        let f = dir.join(name);
+        if f.is_file() {
+            // Lines that fail to parse are skipped, like git does
+            let _ = b.add(&f);
+            any = true;
+        }
+    }
+    if !any {
+        return None;
+    }
+    b.build().ok().map(Arc::new)
+}
+
+/// Whether `path` is ignored: the deepest directory with a matching rule decides, as in git.
+fn is_ignored(rules: &[Arc<Gitignore>], path: &Path, is_dir: bool) -> bool {
+    for r in rules.iter().rev() {
+        match r.matched(path, is_dir) {
+            ignore::Match::Ignore(_) => return true,
+            ignore::Match::Whitelist(_) => return false,
+            ignore::Match::None => {}
+        }
+    }
+    false
+}
+
+/// Whether any tracked path lies under directory `dir` (relative, `/`-separated).
+fn tracks_under<R>(tracked: &BTreeMap<String, R>, dir: &str) -> bool {
+    let prefix = format!("{dir}/");
+    tracked
+        .range(prefix.clone()..)
+        .next()
+        .is_some_and(|(k, _)| k.starts_with(&prefix))
+}
+
+/// Scans the working tree and returns `relative path (/-separated) → file info`.
+///
+/// Skips `.scion/`, `.git/`, directories themselves and special files, and untracked paths matched
+/// by `.gitignore` / `.scionignore`. Tracked files (keys of `tracked`) are always returned, even
+/// when an ignore rule matches them, so ignoring a tracked file never looks like deleting it.
+pub(crate) fn scan<R>(root: &Path, tracked: &BTreeMap<String, R>) -> Result<BTreeMap<String, Found>> {
+    struct Dir {
+        path: PathBuf,
+        prefix: String,
+        rules: Vec<Arc<Gitignore>>,
+        /// Inside an ignored directory that still holds tracked files: only those are returned.
+        ignored: bool,
+    }
     let mut out = BTreeMap::new();
-    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
-    while let Some((dir, prefix)) = stack.pop() {
+    let mut stack = vec![Dir {
+        path: root.to_path_buf(),
+        prefix: String::new(),
+        rules: Vec::new(),
+        ignored: false,
+    }];
+    while let Some(Dir {
+        path: dir,
+        prefix,
+        mut rules,
+        ignored,
+    }) = stack.pop()
+    {
+        if !ignored {
+            rules.extend(dir_rules(&dir));
+        }
         for entry in std::fs::read_dir(&dir).map_err(io(&dir))? {
             let entry = entry.map_err(io(&dir))?;
             let name = entry.file_name();
@@ -73,8 +143,21 @@ pub(crate) fn scan(root: &Path) -> Result<BTreeMap<String, Found>> {
             let path = entry.path();
             let meta = std::fs::symlink_metadata(&path).map_err(io(&path))?;
             if meta.is_dir() {
-                stack.push((path, rel));
+                let skip = ignored || name == ".git" || is_ignored(&rules, &path, true);
+                if skip && !tracks_under(tracked, &rel) {
+                    continue;
+                }
+                stack.push(Dir {
+                    path,
+                    prefix: rel,
+                    rules: rules.clone(),
+                    ignored: skip,
+                });
             } else if let Some(mode) = mode_of(&meta) {
+                let skip = ignored || is_ignored(&rules, &path, false);
+                if skip && !tracked.contains_key(&rel) {
+                    continue;
+                }
                 out.insert(
                     rel,
                     Found {
@@ -202,6 +285,70 @@ pub(crate) fn remove_file(root: &Path, rel: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn none() -> BTreeMap<String, ()> {
+        BTreeMap::new()
+    }
+
+    fn tracked(paths: &[&str]) -> BTreeMap<String, ()> {
+        paths.iter().map(|p| ((*p).to_owned(), ())).collect()
+    }
+
+    fn keys(found: &BTreeMap<String, Found>) -> Vec<&str> {
+        found.keys().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn ignore_rules_follow_git() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let r = d.path();
+        for f in [
+            "src/main.rs",
+            "target/debug/app",
+            "notes.tmp",
+            "keep.tmp",
+            "sub/build/out.o",
+            "sub/build.rs",
+            "sub/local.cfg",
+            "docs/x.log",
+            ".git/HEAD",
+            "nested/.git/config",
+        ] {
+            write_file(r, f, Mode::File, b"x").expect("write");
+        }
+        std::fs::write(r.join(".gitignore"), "target/\n*.tmp\n!keep.tmp\n*.log\n[bad\n").expect("gitignore");
+        // .scionignore wins over .gitignore in the same directory; deeper directories win over parents
+        std::fs::write(r.join(".scionignore"), "!docs/x.log\n").expect("scionignore");
+        std::fs::write(r.join("sub/.gitignore"), "build/\nlocal.cfg\n").expect("sub");
+        let found = scan(r, &none()).expect("scan");
+        assert_eq!(
+            keys(&found),
+            [
+                ".gitignore",
+                ".scionignore",
+                "docs/x.log",
+                "keep.tmp",
+                "src/main.rs",
+                "sub/.gitignore",
+                "sub/build.rs"
+            ]
+        );
+    }
+
+    #[test]
+    fn tracked_files_are_never_hidden_by_ignore_rules() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let r = d.path();
+        for f in ["build/keep.txt", "build/junk.o", "a.log", "b.log", ".git/HEAD"] {
+            write_file(r, f, Mode::File, b"x").expect("write");
+        }
+        std::fs::write(r.join(".gitignore"), "build/\n*.log\n").expect("gitignore");
+        let t = tracked(&["build/keep.txt", "a.log", ".git/HEAD"]);
+        let found = scan(r, &t).expect("scan");
+        // Untracked files inside an ignored directory stay ignored even when tracked siblings exist
+        assert_eq!(keys(&found), [".git/HEAD", ".gitignore", "a.log", "build/keep.txt"]);
+        assert!(tracks_under(&t, "build") && !tracks_under(&t, "buil") && !tracks_under(&t, "a.log"));
+    }
+
     #[test]
     fn now_and_to_ns() {
         assert!(now_ns() > 1_577_836_800_000_000_000);
@@ -217,7 +364,7 @@ mod tests {
         write_file(r, "link", Mode::Symlink, b"a/b.txt").expect("link");
         std::fs::create_dir(r.join(DIR)).expect("meta dir");
         std::fs::write(r.join(DIR).join("state.json"), b"{}").expect("ignored");
-        let found = scan(r).expect("scan");
+        let found = scan(r, &none()).expect("scan");
         assert_eq!(found.keys().collect::<Vec<_>>(), ["a/b.txt", "link", "run.sh"]);
         assert_eq!(found["a/b.txt"].mode, Mode::File);
         assert_eq!(found["a/b.txt"].size, 5);
@@ -236,10 +383,10 @@ mod tests {
         let r = d.path();
         write_file(r, "x", Mode::Symlink, b"target").expect("link");
         write_file(r, "x", Mode::File, b"now a file").expect("replace link");
-        assert_eq!(scan(r).expect("scan")["x"].mode, Mode::File);
+        assert_eq!(scan(r, &none()).expect("scan")["x"].mode, Mode::File);
         write_file(r, "dir/inner", Mode::File, b"i").expect("dir");
         write_file(r, "dir", Mode::File, b"file replaces dir").expect("replace dir");
-        assert_eq!(scan(r).expect("scan").keys().collect::<Vec<_>>(), ["dir", "x"]);
+        assert_eq!(scan(r, &none()).expect("scan").keys().collect::<Vec<_>>(), ["dir", "x"]);
         assert!(matches!(
             write_file(r, "bad", Mode::Symlink, &[0xff]),
             Err(Error::Corrupt(_))
@@ -255,7 +402,7 @@ mod tests {
         create_file(r, "a/b/c.txt", Mode::File, b"c").expect("file");
         create_file(r, "a/b/e.sh", Mode::Executable, b"#!/bin/sh").expect("exec");
         create_file(r, "top.txt", Mode::Symlink, b"a/d.txt").expect("link");
-        let found = scan(r).expect("scan");
+        let found = scan(r, &none()).expect("scan");
         assert_eq!(found["a/b/c.txt"].mode, Mode::File);
         assert_eq!(found["a/b/e.sh"].mode, Mode::Executable);
         assert_eq!(found["top.txt"].mode, Mode::Symlink);
@@ -295,7 +442,10 @@ mod tests {
             read_content(d.path(), "nope", Mode::Symlink),
             Err(Error::Io { .. })
         ));
-        assert!(matches!(scan(&d.path().join("missing")), Err(Error::Io { .. })));
+        assert!(matches!(
+            scan(&d.path().join("missing"), &none()),
+            Err(Error::Io { .. })
+        ));
     }
 
     #[cfg(unix)]
@@ -304,7 +454,7 @@ mod tests {
         let d = tempfile::tempdir().expect("tempdir");
         let sock = d.path().join("s.sock");
         let _l = std::os::unix::net::UnixListener::bind(&sock).expect("socket");
-        assert!(scan(d.path()).expect("scan").is_empty());
+        assert!(scan(d.path(), &none()).expect("scan").is_empty());
     }
 
     #[cfg(unix)]
@@ -315,7 +465,7 @@ mod tests {
         let name = std::ffi::OsStr::from_bytes(&[0x66, 0xff]);
         // 部分文件系统（如 APFS）不允许非 UTF-8 文件名，此时跳过
         if std::fs::write(d.path().join(name), b"x").is_ok() {
-            assert!(matches!(scan(d.path()), Err(Error::Corrupt(_))));
+            assert!(matches!(scan(d.path(), &none()), Err(Error::Corrupt(_))));
         }
     }
 }

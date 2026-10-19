@@ -15,6 +15,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 futures.workspace = true
 tokio.workspace = true
+ignore = "0.4"
 
 [dev-dependencies]
 scion-proto.workspace = true

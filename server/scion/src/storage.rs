@@ -94,6 +94,20 @@ pub fn s3_config(bucket: &str, prefix: &str, env: impl Fn(&str) -> Option<String
 }
 
 /// 打开两个后端。两者都是内存时共用同一个 [`MemStore`]。对象存储会先做读写自检。
+/// The directory a `sqlite://` URL's database file lives in, so it can be created before
+/// opening (SQLite creates the file but not missing parent directories).
+pub fn sqlite_parent(url: &str) -> Option<PathBuf> {
+    let path = url.strip_prefix("sqlite://")?;
+    let path = path.split('?').next().unwrap_or_default();
+    if path.is_empty() || path == ":memory:" {
+        return None;
+    }
+    Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
 pub async fn open(
     meta: &MetaSpec,
     blobs: &BlobSpec,
@@ -102,7 +116,12 @@ pub async fn open(
     let mem = Arc::new(MemStore::new());
     let meta_store: Arc<dyn MetaStore> = match meta {
         MetaSpec::Mem => mem.clone(),
-        MetaSpec::Url(url) => scion_store_sql::connect(url).await.context("open metadata store")?,
+        MetaSpec::Url(url) => {
+            if let Some(dir) = sqlite_parent(url) {
+                std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+            }
+            scion_store_sql::connect(url).await.context("open metadata store")?
+        }
     };
     let blob_store: Arc<dyn BlobStore> = match blobs {
         BlobSpec::Mem => mem,
@@ -302,6 +321,25 @@ mod tests {
         assert_eq!(d, "meta=mem blobs=s3://b/p");
         let (m, b) = lite(Path::new("/d"));
         assert_eq!(describe(&m, &b), "meta=sqlite:///d/meta.db blobs=/d/objects");
+    }
+
+    #[tokio::test]
+    async fn open_creates_missing_lite_directories() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let data = d.path().join("nested/data");
+        let (meta, blobs) = lite(&data);
+        open(&meta, &blobs, |_| None).await.expect("open");
+        assert!(data.join("meta.db").exists() && data.join("objects").is_dir());
+    }
+
+    #[test]
+    fn sqlite_parent_cases() {
+        assert_eq!(sqlite_parent("sqlite:///var/scion/meta.db"), Some("/var/scion".into()));
+        assert_eq!(sqlite_parent("sqlite://data/meta.db?mode=rwc"), Some("data".into()));
+        assert_eq!(sqlite_parent("sqlite://meta.db"), None);
+        assert_eq!(sqlite_parent("sqlite://:memory:"), None);
+        assert_eq!(sqlite_parent("sqlite://"), None);
+        assert_eq!(sqlite_parent("postgres://x/y"), None);
     }
 
     #[tokio::test]

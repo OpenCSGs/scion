@@ -4,6 +4,7 @@
 //! 4 可重试错误（已用尽重试）、5 认证失败。
 
 mod commands;
+mod config;
 mod creds;
 mod daemon;
 mod history;
@@ -67,10 +68,14 @@ enum Command {
     Commit {
         #[arg(short, long)]
         message: String,
-        /// 作者，格式为 "Name <email>"。
+        /// Author as "Name <email>". Defaults to `scn config` `user.name` / `user.email`, then git's
+        /// `user.name` / `user.email`.
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
     },
+    /// User settings: the default commit author (`user.name`, `user.email`).
+    #[command(subcommand)]
+    Config(ConfigCmd),
     /// 合入已提交的改动。
     Land,
     /// 更新到 ref 的最新提交；有未合入的提交时在其上做 rebase。
@@ -173,6 +178,18 @@ enum RepoCmd {
     Restore { name: String },
     /// fork：复制全部历史与分支到新仓库。
     Fork { source: String, target: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCmd {
+    /// Print every setting.
+    List,
+    /// Print one setting.
+    Get { key: String },
+    /// Change one setting.
+    Set { key: String, value: String },
+    /// Remove one setting.
+    Unset { key: String },
 }
 
 #[derive(Debug, Subcommand)]
@@ -327,6 +344,18 @@ async fn run(cli: Cli) -> ExitCode {
         },
         Command::Status => emit(commands::status(&ctx), json),
         Command::Commit { message, author } => emit(commands::commit(&ctx, &message, author.as_deref()).await, json),
+        Command::Config(cmd) => {
+            let path = config::path(|k| std::env::var(k).ok());
+            emit(
+                match cmd {
+                    ConfigCmd::List => config::list(&path),
+                    ConfigCmd::Get { key } => config::get(&path, &key),
+                    ConfigCmd::Set { key, value } => config::set(&path, &key, &value),
+                    ConfigCmd::Unset { key } => config::unset(&path, &key),
+                },
+                json,
+            )
+        }
         Command::Land => emit(commands::land(&ctx).await, json),
         Command::Sync => emit(commands::sync(&ctx).await, json),
         Command::Ls { spec } => emit(commands::ls(&ctx, spec.as_deref()).await, json),

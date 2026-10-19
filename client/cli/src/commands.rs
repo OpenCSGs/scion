@@ -294,7 +294,20 @@ impl Render for CommitOut {
 }
 
 pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<CommitOut, CliError> {
-    let author = author.map(parse_author).transpose()?;
+    let author = match author {
+        Some(a) => Some(parse_author(a)?),
+        None => {
+            let settings = crate::config::load(&crate::config::path(|k| std::env::var(k).ok()))?;
+            let found = crate::config::author(&settings, crate::config::git_config);
+            if found.is_none() {
+                eprintln!(
+                    "hint: no author configured; set one with `scn config set user.name \"Your Name\"` \
+                     and `scn config set user.email you@example.com` (or pass --author)"
+                );
+            }
+            found
+        }
+    };
     let (mut wc, client) = open_wc(ctx).await?;
     let created = wc
         .commit(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))

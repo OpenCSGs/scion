@@ -658,3 +658,45 @@ async fn sparse_changes_judge_untracked_files_by_the_new_scope() {
     write(&dir, "a/x.txt", "edited");
     assert!(matches!(wc.set_sparse(&c, Sparse::full()).await, Err(Error::Dirty)));
 }
+
+#[tokio::test]
+async fn ignored_files_stay_local_and_tracked_files_stay_tracked() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a_dir, b_dir) = (tmp.path().join("alice"), tmp.path().join("bob"));
+    let mut alice = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&a_dir, "src/lib.rs", "pub fn f() {}\n");
+    write(&a_dir, "config.local", "secret\n");
+    write(&a_dir, ".gitignore", "target/\n*.local\n");
+    write(&a_dir, "target/debug/app", "binary\n");
+    assert_eq!(
+        alice.status().expect("status"),
+        status(&[".gitignore", "src/lib.rs"], &[], &[]),
+        "build output and local config are ignored"
+    );
+    alice.commit(&c, "init", None).await.expect("commit");
+    alice.land(&c).await.expect("land");
+
+    // Bob adds a .scionignore rule for a file that is already tracked: it stays tracked
+    let bob = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
+        .await
+        .expect("clone bob");
+    assert!(!b_dir.join("target").exists() && !b_dir.join("config.local").exists());
+    write(&b_dir, ".scionignore", "src/\n");
+    write(&b_dir, "src/lib.rs", "pub fn f() -> u8 { 1 }\n");
+    write(&b_dir, "src/new.rs", "// untracked and ignored\n");
+    assert_eq!(
+        bob.status().expect("status"),
+        status(&[".scionignore"], &["src/lib.rs"], &[])
+    );
+    // Ignored local files do not make the tree dirty, so sync works
+    write(&a_dir, "README.md", "hi\n");
+    alice.commit(&c, "readme", None).await.expect("commit 2");
+    alice.land(&c).await.expect("land 2");
+    write(&a_dir, "target/release/app", "more output\n");
+    assert!(alice.status().expect("status").is_clean());
+    assert!(matches!(alice.sync(&c).await, Ok(SyncOutcome::UpToDate)));
+}

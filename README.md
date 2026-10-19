@@ -119,14 +119,16 @@ cargo run -p scion -- server --lite --data-dir ./.scion-data
 # In another terminal: install scn and check the connection
 cargo install --path client/cli
 scn doctor
-scn archive -o mono.tar.gz          # download a snapshot as tar.gz / zip / tar (see docs/guide/archive.md)
+scn config set user.name "Ada Lovelace"       # default commit author (falls back to git's user.name / user.email)
+scn config set user.email ada@example.com
 scn repo create mono                # repositories and branches: scn repo / scn branch (see docs/guide/repos.md)
 
 # Everyday workflow
 scn clone mono && cd mono          # check out (ref main by default; empty repositories work too)
 echo 'hello' > README.md
-scn status                          # A README.md
-scn commit -m "add readme" --author "Ada <ada@example.com>"
+echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
+scn status                          # A .gitignore, A README.md
+scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
 scn land                            # land on main; if main moved, the server rebases (three-way merge)
 scn sync                            # pull others' changes; rebases a pending commit at file level
 scn cat main:README.md              # read files without a working copy (add --repo outside one)
@@ -136,6 +138,7 @@ scn diff                            # uncommitted local changes (unified diff)
 scn diff main                       # what the tip of main changed; `scn diff A B` compares two revisions
 scn blame src/lib.rs                # the commit that last changed each line
 scn clone mono part --sparse src/   # sparse checkout: only src/ and files at the root; `scn sparse add docs/` later
+scn archive -o mono.tar.gz          # download a snapshot as tar.gz / zip / tar (see docs/guide/archive.md)
 
 # scn talks to the server through a local daemon (scn daemon), started on demand; SCION_NO_DAEMON=1 opts out
 scn daemon status

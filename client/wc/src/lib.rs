@@ -230,9 +230,10 @@ impl WorkingCopy {
         let _lock = self.paths.lock()?;
         let old = self.sparse()?;
         let mut dirstate = self.paths.load_dirstate()?;
-        let (untracked, found): (BTreeMap<String, Found>, BTreeMap<String, Found>) = fsutil::scan(self.root())?
-            .into_iter()
-            .partition(|(p, _)| !old.includes_file(p) && !dirstate.files.contains_key(p));
+        let (untracked, found): (BTreeMap<String, Found>, BTreeMap<String, Found>) =
+            fsutil::scan(self.root(), &dirstate.files)?
+                .into_iter()
+                .partition(|(p, _)| !old.includes_file(p) && !dirstate.files.contains_key(p));
         let stray: Vec<String> = untracked.keys().filter(|p| !sparse.includes_file(p)).cloned().collect();
         if !stray.is_empty() {
             return Err(Error::OutsideSparse(stray));
@@ -271,7 +272,7 @@ impl WorkingCopy {
     /// 计算相对当前快照的改动，同时返回提交所需的内容。
     fn changes(&self) -> Result<(Status, Vec<Change>)> {
         let dirstate = self.paths.load_dirstate()?;
-        let found = fsutil::scan(self.root())?;
+        let found = fsutil::scan(self.root(), &dirstate.files)?;
         let sparse = self.sparse()?;
         let outside: Vec<String> = found
             .keys()

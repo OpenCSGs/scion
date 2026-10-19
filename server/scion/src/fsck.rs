@@ -25,9 +25,9 @@ const MAX_PROBLEMS: usize = 1_000;
 
 #[derive(Debug, Clone, Default)]
 pub struct FsckOptions {
-    /// 只检查这些仓库；为空时检查全部。
+    /// Only these repositories; all when empty.
     pub repos: Vec<String>,
-    /// 读出每个文件并校验哈希（默认只确认存在）。
+    /// Read every file and verify its hash (by default only checks it exists).
     pub verify: bool,
 }
 

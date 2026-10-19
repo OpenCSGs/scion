@@ -1,7 +1,7 @@
-//! `scn`：Scion 命令行客户端。
+//! `scn`: the Scion command line client.
 //!
-//! 退出码（客户端文档 §8.2）：0 成功、1 一般错误、2 用法错误、3 冲突、
-//! 4 可重试错误（已用尽重试）、5 认证失败。
+//! Exit codes (client design §8.2): 0 success, 1 general error, 2 usage error, 3 conflict,
+//! 4 retryable error (retries exhausted), 5 authentication failed.
 
 mod commands;
 mod config;
@@ -24,13 +24,13 @@ use crate::output::{CliError, Render, error_out, render, version_out};
 #[derive(Debug, Parser)]
 #[command(name = "scn", version, about = "Scion command line client")]
 struct Cli {
-    /// 服务端地址；默认取工作副本记录的地址，再默认 http://127.0.0.1:7080。
+    /// Server address; defaults to the working copy's, then http://127.0.0.1:7080.
     #[arg(long, global = true, env = "SCION_ENDPOINT")]
     endpoint: Option<String>,
-    /// 仓库（cat / ls 在工作副本之外使用）。
+    /// Repository, for commands run outside a working copy.
     #[arg(long, global = true, env = "SCION_REPO")]
     repo: Option<String>,
-    /// 输出 JSON（带 schema 字段，供 Agent 和脚本解析）。
+    /// Print JSON (with a schema field) for agents and scripts.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -39,28 +39,28 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// 检查与服务端的连接和能力协商。
+    /// Check the connection to the server and what it supports.
     Doctor,
-    /// 打印客户端版本与协议版本。
+    /// Print the client and protocol versions.
     Version,
-    /// 把仓库检出到本地目录。
+    /// Check out a repository into a local directory.
     Clone {
         repo: String,
         dir: Option<PathBuf>,
         #[arg(long = "ref", default_value = "main")]
         reference: String,
-        /// 稀疏检出：只检出这些目录（逗号分隔）和根目录下的文件。
+        /// Sparse checkout: only these directories (comma-separated) and the files at the root.
         /// Can be repeated: `--sparse src --sparse docs`.
         #[arg(long, value_name = "DIRS", value_delimiter = ',', num_args = 1)]
         sparse: Option<Vec<String>>,
     },
-    /// 稀疏检出的范围。
+    /// The directories of a sparse checkout.
     #[command(subcommand)]
     Sparse(SparseCmd),
-    /// 仓库管理：创建、列出、修改、删除、恢复、fork。
+    /// Repositories: create, list, change, delete, restore, fork.
     #[command(subcommand)]
     Repo(RepoCmd),
-    /// 分支：列出、创建、删除（当前工作副本的仓库，或 --repo）。
+    /// Branches: list, create, delete (of the working copy's repository, or --repo).
     /// git-style forms also work: `scn branch` (list), `scn branch NAME [REV]`, `scn branch -d NAME`.
     #[command(args_conflicts_with_subcommands = true)]
     Branch {
@@ -87,9 +87,9 @@ enum Command {
         #[arg(short = 'd', long = "delete", value_name = "NAME", conflicts_with = "name")]
         delete: Option<String>,
     },
-    /// 显示本地改动。
+    /// Show local changes.
     Status,
-    /// 把本地改动创建为提交（尚未合入）。
+    /// Commit the local changes (not landed yet; see `scn land`).
     Commit {
         /// Required, except with --amend (keeps the old message) or when finishing a sync or
         /// merge that stopped on conflicts (keeps that commit's message).
@@ -199,35 +199,35 @@ enum Command {
     /// User settings: the default commit author (`user.name`, `user.email`).
     #[command(subcommand)]
     Config(ConfigCmd),
-    /// 合入已提交的改动。
+    /// Land the pending commit on the branch.
     Land,
-    /// 更新到 ref 的最新提交；有未合入的提交时在其上做 rebase。
+    /// Update to the branch tip, rebasing a pending commit onto it.
     Sync,
-    /// 输出文件内容：[REV:]PATH。
+    /// Print a file: [REV:]PATH.
     Cat { spec: String },
-    /// 列出目录：[REV:][DIR]。A bare revision lists its root (`scn ls main`); `:DIR` forces a path.
+    /// List a directory: [REV:][DIR].A bare revision lists its root (`scn ls main`); `:DIR` forces a path.
     Ls { spec: Option<String> },
-    /// 打包下载：[REV:][DIR]（默认当前 ref 的整个仓库），不需要工作副本。A bare revision works too
+    /// Download an archive of [REV:][DIR] (default: the whole current branch); no working copy needed.A bare revision works too
     /// (`scn archive main`); `:DIR` forces a path.
     Archive {
         spec: Option<String>,
-        /// tar.gz、zip 或 tar。
+        /// tar.gz, zip or tar.
         #[arg(long, default_value = "tar.gz")]
         format: String,
-        /// 加在归档中每个路径前面，例如 mono-main/。
+        /// Prefix for every path in the archive, such as mono-main/.
         #[arg(long, default_value = "")]
         prefix: String,
-        /// 输出文件；不指定时写到标准输出。
+        /// Output file; standard output when omitted.
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
-    /// 历史：从 REV（默认当前 ref）开始，按时间从新到旧。
+    /// History from REV (default: the current branch), newest first.
     Log {
         revision: Option<String>,
-        /// 只显示改动了该路径的提交。Same as `-- PATH`.
+        /// Only commits that changed this path.Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
-        /// 最多显示的条数。
+        /// At most this many commits.
         #[arg(short = 'n', long = "max-count", default_value_t = 20)]
         max_count: usize,
         /// Accepted for git compatibility; the output is one line per commit already.
@@ -247,68 +247,68 @@ enum Command {
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
     },
-    /// 逐行显示最后改动的提交：[REV:]PATH。
+    /// The commit that last changed each line: [REV:]PATH.
     Blame { spec: String },
-    /// 差异：不带参数为本地未提交的改动；一个 REV 为该提交引入的改动；两个 REV 为两者之间的差异。
+    /// Changes: without revisions, the uncommitted local changes; with one, what that commit introduced; with two, the difference between them.
     /// Revisions may be `A B`, `A..B` or `A...B` (from their common ancestor), as in git.
     Diff {
         revisions: Vec<String>,
-        /// 只比较该路径。Same as `-- PATH`.
+        /// Only this path.Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
-        /// 只列出文件名与状态（A / M / D）。
+        /// Only file names and status (A / M / D).
         #[arg(long)]
         name_only: bool,
         /// `-- PATH`, as in git.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
     },
-    /// 导入外部历史。
+    /// Import history from elsewhere.
     #[command(subcommand)]
     Import(ImportCmd),
-    /// 登录服务端：默认在浏览器中完成（OIDC device flow），也可以用已有的令牌（PAT）。
+    /// Log in to the server: in a browser (OIDC device flow) by default, or with an existing token (PAT).
     Login {
-        /// 用这个令牌登录，而不是在浏览器中登录。
+        /// Log in with this token instead of a browser.
         #[arg(long, value_name = "TOKEN", conflicts_with = "with_token")]
         token: Option<String>,
-        /// 从标准输入读取令牌（避免出现在 shell 历史中）。
+        /// Read the token from standard input (keeps it out of the shell history).
         #[arg(long)]
         with_token: bool,
     },
-    /// 删除保存的登录凭据。
+    /// Delete the saved credentials.
     Logout,
-    /// 显示当前身份。
+    /// Show who you are logged in as.
     Whoami,
-    /// 本机 daemon（L1 缓存）：通常由其它命令自动拉起，`SCION_NO_DAEMON=1` 关闭。
+    /// The local daemon (L1 cache), started on demand by other commands; `SCION_NO_DAEMON=1` turns it off.
     #[command(subcommand)]
     Daemon(DaemonCmd),
 }
 
 #[derive(Debug, Subcommand)]
 enum RepoCmd {
-    /// 创建仓库。
+    /// Create a repository.
     Create {
         name: String,
-        /// 默认分支（默认 main）。
+        /// Default branch (main if omitted).
         #[arg(long)]
         default_branch: Option<String>,
         #[arg(long, default_value = "")]
         description: String,
     },
-    /// 列出能看到的仓库。
+    /// List the repositories you can see.
     Ls {
-        /// 名字前缀，例如 opencsg/。
+        /// Name prefix, such as opencsg/.
         #[arg(default_value = "")]
         prefix: String,
-        /// 列出已删除、尚未清除的仓库。
+        /// List deleted repositories that are not purged yet.
         #[arg(long)]
         deleted: bool,
         #[arg(long, default_value_t = repos::DEFAULT_LIST_LIMIT)]
         limit: usize,
     },
-    /// 显示仓库属性（包括已删除的仓库）。
+    /// Show a repository's settings (also for deleted repositories).
     Info { name: String },
-    /// 修改默认分支或描述。
+    /// Change the default branch or the description.
     Set {
         name: String,
         #[arg(long)]
@@ -316,11 +316,11 @@ enum RepoCmd {
         #[arg(long)]
         description: Option<String>,
     },
-    /// 删除仓库（宽限期内可以用 restore 恢复）。
+    /// Delete a repository (restorable during the grace period).
     Rm { name: String },
-    /// 恢复已删除的仓库。
+    /// Restore a deleted repository.
     Restore { name: String },
-    /// fork：复制全部历史与分支到新仓库。
+    /// Fork: copy all history and branches into a new repository.
     Fork { source: String, target: String },
 }
 
@@ -338,64 +338,64 @@ enum ConfigCmd {
 
 #[derive(Debug, Subcommand)]
 enum BranchCmd {
-    /// 列出分支（* 为默认分支）。
+    /// List branches (* marks the default branch).
     Ls,
-    /// 创建分支，指向 REV（默认为当前跟踪的 ref）。
+    /// Create a branch at REV (default: the current branch).
     Create { name: String, revision: Option<String> },
-    /// 删除分支（不能删除默认分支）。
+    /// Delete a branch (not the default branch).
     Rm { name: String },
 }
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum SparseCmd {
-    /// 列出范围内的目录。
+    /// List the directories in the checkout.
     Ls,
-    /// 把范围设为这些目录（全部检出的工作副本由此变为稀疏检出）。
+    /// Set the directories (turns a full checkout into a sparse one).
     Set {
         #[arg(required = true)]
         dirs: Vec<String>,
     },
-    /// 加入目录并检出。
+    /// Add directories and check them out.
     Add {
         #[arg(required = true)]
         dirs: Vec<String>,
     },
-    /// 移出目录并删除其中的文件（不能有未提交的改动）。
+    /// Remove directories and their files (needs no uncommitted changes).
     Rm {
         #[arg(required = true)]
         dirs: Vec<String>,
     },
-    /// 恢复为全部检出。
+    /// Go back to a full checkout.
     Disable,
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonCmd {
-    /// 在前台运行 daemon。
+    /// Run the daemon in the foreground.
     Run {
-        /// 磁盘缓存上限（字节）。
+        /// Disk cache limit in bytes.
         #[arg(long, value_name = "BYTES")]
         max_disk: Option<u64>,
-        /// 没有请求多少秒后退出；0 表示一直运行。
+        /// Exit after this many idle seconds; 0 runs forever.
         #[arg(long, value_name = "SECS")]
         idle_timeout: Option<u64>,
     },
-    /// 查看 daemon 是否在运行。
+    /// Show whether the daemon is running.
     Status,
-    /// 停止 daemon。
+    /// Stop the daemon.
     Stop,
 }
 
 #[derive(Debug, Subcommand)]
 enum ImportCmd {
-    /// 把本地 git 仓库的历史导入 --repo 指定的 Scion 仓库。
+    /// Import the history of a local git repository into the --repo repository.
     Git {
-        /// git 仓库目录。
+        /// The git repository directory.
         path: PathBuf,
-        /// 要导入的 git 引用。
+        /// The git ref to import.
         #[arg(long, default_value = "main")]
         git_ref: String,
-        /// 导入后更新的 Scion ref。
+        /// The Scion ref to update after importing.
         #[arg(long = "ref", default_value = "main")]
         reference: String,
     },

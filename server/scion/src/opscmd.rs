@@ -12,22 +12,22 @@ use crate::fsck::{FsckOptions, FsckReport, fsck};
 
 #[derive(Debug, clap::Args)]
 pub struct RedactArgs {
-    /// 仓库。
+    /// Repository.
     #[arg(long)]
     pub repo: String,
-    /// 要 redact 的 blob id（文本形式 b1…）。
+    /// Blob id to redact (text form b1…).
     #[arg(value_name = "ID")]
     pub ids: Vec<String>,
-    /// 用 REV:PATH 指定文件，可以重复。
+    /// A file as REV:PATH (repeatable).
     #[arg(long = "path", value_name = "REV:PATH")]
     pub paths: Vec<String>,
-    /// 原因（记录在案）。
+    /// Reason (recorded).
     #[arg(long)]
     pub reason: String,
-    /// 同时 redact 对象索引中有这些对象的所有仓库。
+    /// Also redact them in every repository whose object index has them.
     #[arg(long)]
     pub all_repos: bool,
-    /// 记录的操作人；默认取 $USER。
+    /// Who did it, for the record; $USER by default.
     #[arg(long, value_name = "NAME")]
     pub by: Option<String>,
 }
@@ -35,17 +35,17 @@ pub struct RedactArgs {
 #[derive(Debug, clap::Args)]
 pub struct PurgeArgs {
     pub redaction_id: String,
-    /// 宽限期：这段时间之后才物理删除，期间可以 unredact。
+    /// Grace period: objects are deleted only after it; unredact works until then.
     #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = scion_api::scion_auth::config::parse_duration)]
     pub grace: Duration,
-    /// 不等宽限期、也不等运行中的服务端：立即删除（不可撤销）。
+    /// Delete now, without waiting for the grace period or a running server (cannot be undone).
     #[arg(long, conflicts_with = "grace")]
     pub now: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub enum LeaseCmd {
-    /// 列出租约（合入 leader 等）。
+    /// List leases (land leaders and others).
     Ls,
 }
 

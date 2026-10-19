@@ -7,16 +7,16 @@ use anyhow::Context;
 use scion_api::scion_auth::{AuthConfig, Guard, GuardConfig};
 use scion_store::MetaStore;
 
-/// `scion server` 的认证参数。
+/// Authentication options of `scion server`.
 #[derive(Debug, Clone, Default, clap::Args)]
 pub struct AuthArgs {
-    /// 要求认证：没有有效令牌的请求只能访问策略允许 anonymous 的仓库。
+    /// Require authentication: requests without a valid token only reach repositories the policy opens to anonymous.
     #[arg(long, env = "SCION_AUTH_REQUIRED")]
     pub auth_required: bool,
-    /// 认证配置文件（auth.toml：外部签发方、内省、鉴权回调、OIDC），见 docs/guide/auth.md。
+    /// Authentication config (auth.toml: external issuers, introspection, authorization callback, OIDC); see docs/guide/auth.md.
     #[arg(long, value_name = "FILE", env = "SCION_AUTH_CONFIG")]
     pub auth_config: Option<PathBuf>,
-    /// 签发访问令牌用的 ES256 私钥（PKCS#8 PEM，`scion admin jwt-keygen` 生成）。集群中所有节点使用同一个。
+    /// ES256 key that signs access tokens (PKCS#8 PEM, from `scion admin jwt-keygen`). The same on every node.
     #[arg(long, value_name = "FILE", env = "SCION_JWT_KEY_FILE")]
     pub jwt_key: Option<PathBuf>,
 }
@@ -42,7 +42,7 @@ impl AuthArgs {
     }
 }
 
-/// 管理命令使用的 Guard：直接读写元数据库，不需要签名密钥。
+/// The Guard for admin commands: reads and writes the metadata store directly, no signing key needed.
 fn admin_guard(meta: Arc<dyn MetaStore>) -> anyhow::Result<Arc<Guard>> {
     Guard::build(
         GuardConfig {
@@ -57,7 +57,7 @@ fn admin_guard(meta: Arc<dyn MetaStore>) -> anyhow::Result<Arc<Guard>> {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum TokenCmd {
-    /// 创建 PAT / service token（只显示这一次）。
+    /// Create a PAT or service token (shown only this once).
     Create {
         #[arg(long)]
         subject: String,
@@ -65,24 +65,24 @@ pub enum TokenCmd {
         groups: Vec<String>,
         #[arg(long, default_value = "")]
         description: String,
-        /// 有效期，如 90d、12h；不指定时不过期。
+        /// Lifetime, such as 90d or 12h; no expiry when omitted.
         #[arg(long, value_name = "DURATION", value_parser = scion_api::scion_auth::config::parse_duration)]
         ttl: Option<std::time::Duration>,
     },
-    /// 列出令牌（不含令牌本身）。
+    /// List tokens (without the tokens themselves).
     List {
         #[arg(long)]
         subject: Option<String>,
     },
-    /// 吊销令牌。
+    /// Revoke a token.
     Revoke { id: String },
 }
 
 #[derive(Debug, clap::Subcommand)]
 pub enum PolicyCmd {
-    /// 显示当前的访问控制策略。
+    /// Show the access control policy.
     Show,
-    /// 校验并设置访问控制策略（TOML 文件）。运行中的服务端在 30 秒内生效。
+    /// Check and set the access control policy (a TOML file). Running servers apply it within 30 seconds.
     Set { file: PathBuf },
 }
 

@@ -18,7 +18,7 @@ use scion_api::{App, ServerConfig};
 #[derive(Debug, Parser)]
 #[command(name = "scion", version, about = "Scion source control server")]
 struct Cli {
-    /// 日志格式。
+    /// Log format.
     #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text, env = "SCION_LOG_FORMAT")]
     log_format: LogFormat,
     #[command(subcommand)]
@@ -35,59 +35,59 @@ enum LogFormat {
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// 运行 L3 服务端。
+    /// Run the server (L3).
     Server(ServerArgs),
-    /// 运行区域对象缓存（L2）。
+    /// Run a regional object cache (L2).
     Cache(CacheArgs),
-    /// 打印版本与协议版本。
+    /// Print the version and protocol version.
     Version,
-    /// 运维命令。
+    /// Operations commands.
     #[command(subcommand)]
     Admin(AdminCmd),
 }
 
 #[derive(Debug, Subcommand)]
 enum AdminCmd {
-    /// 为旧数据补建派生索引（父提交与跳表、PathHistory、GitSha）。可重复执行。
-    /// 运行中的服务端会缓存提交记录：请在启动服务端之前运行，或运行后重启服务端。
+    /// Build derived indexes for older data (parents and skip lists, PathHistory, GitSha). Safe to repeat.
+    /// A running server caches commit records: run this before starting the server, or restart it afterwards.
     Reindex(ReindexArgs),
-    /// 生成签发访问令牌用的 ES256 私钥（PKCS#8 PEM，输出到标准输出）。
+    /// Generate the ES256 key that signs access tokens (PKCS#8 PEM, on standard output).
     JwtKeygen,
-    /// 管理 PAT / service token。
+    /// Manage PATs and service tokens.
     Token {
         #[command(subcommand)]
         cmd: authcmd::TokenCmd,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 查看或设置访问控制策略。
+    /// Show or set the access control policy.
     Policy {
         #[command(subcommand)]
         cmd: authcmd::PolicyCmd,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// redact 文件内容：对象 id 与历史不变，读取返回 REDACTED（docs/guide/redaction.md）。
+    /// Redact file contents: ids and history stay, reads return REDACTED (docs/guide/redaction.md).
     Redact {
         #[command(flatten)]
         args: opscmd::RedactArgs,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 撤销一次 redaction（物理删除之前）。
+    /// Undo a redaction (before it is purged).
     Unredact {
         redaction_id: String,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 安排物理删除 redact 过的对象（宽限期后由服务端执行，或 --now 立即执行）。
+    /// Schedule redacted objects for deletion (the server deletes them after the grace period, or now with --now).
     Purge {
         #[command(flatten)]
         args: opscmd::PurgeArgs,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 列出 redaction 记录。
+    /// List redactions.
     Redactions {
         #[arg(long)]
         repo: Option<String>,
@@ -96,19 +96,19 @@ enum AdminCmd {
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 查看租约（合入 leader 等）。
+    /// Show leases (land leaders and others).
     Lease {
         #[command(subcommand)]
         cmd: opscmd::LeaseCmd,
         #[command(flatten)]
         storage: StorageArgs,
     },
-    /// 校验仓库数据：ref、提交、目录树与文件的引用闭包，对象索引与对象存储。只读。
+    /// Check repository data: that refs, commits, trees and files reference only existing data, and the object index against object storage. Read-only.
     Fsck {
-        /// 只检查这个仓库（可以重复）；不指定时检查全部。
+        /// Only check this repository (repeatable); all when omitted.
         #[arg(long = "repo", value_name = "NAME")]
         repos: Vec<String>,
-        /// 读出每个文件并校验哈希（默认只确认存在）。
+        /// Read every file and verify its hash (by default only checks it exists).
         #[arg(long)]
         verify: bool,
         #[command(flatten)]
@@ -118,26 +118,26 @@ enum AdminCmd {
 
 #[derive(Debug, clap::Args)]
 struct ReindexArgs {
-    /// 只处理这个仓库；不指定时处理全部仓库。
+    /// Only this repository; all when omitted.
     #[arg(long = "repo", value_name = "NAME")]
     repo: Option<String>,
     #[command(flatten)]
     storage: StorageArgs,
 }
 
-/// 存储后端选项，server 与 admin 共用。
+/// Storage options, shared by server and admin.
 #[derive(Debug, clap::Args)]
 struct StorageArgs {
-    /// Lite 档：SQLite + 本地目录，单进程、零外部依赖。需要 --data-dir。
+    /// Lite tier: SQLite and a local directory, one process, no other services. Needs --data-dir.
     #[arg(long, global = true, requires = "data_dir", conflicts_with_all = ["meta", "blobs"])]
     lite: bool,
-    /// Lite 档的数据目录（meta.db 与 objects/）。
+    /// The Lite tier's data directory (meta.db and objects/).
     #[arg(long, global = true, value_name = "DIR", env = "SCION_DATA_DIR")]
     data_dir: Option<PathBuf>,
-    /// 元数据后端：mem、sqlite://PATH、postgres://…
+    /// Metadata store: mem, sqlite://PATH, postgres://…
     #[arg(long, global = true, value_name = "URL", default_value = "mem", env = "SCION_META")]
     meta: String,
-    /// 对象存储：mem、目录路径、s3://bucket[/prefix]（连接参数见 SCION_S3_* 环境变量）。
+    /// Object storage: mem, a directory, or s3://bucket[/prefix] (connection settings in SCION_S3_* variables).
     #[arg(long, global = true, value_name = "SPEC", default_value = "mem", env = "SCION_BLOBS")]
     blobs: String,
 }
@@ -153,21 +153,21 @@ impl StorageArgs {
 
 #[derive(Debug, clap::Args)]
 struct ServerArgs {
-    /// gRPC 监听地址。
+    /// gRPC listen address.
     #[arg(long, default_value = "127.0.0.1:7080", env = "SCION_LISTEN")]
     listen: SocketAddr,
-    /// 启动时确保存在的仓库（已存在则跳过），可重复指定。
+    /// Repository to create at startup if missing (repeatable).
     #[arg(long = "repo", value_name = "NAME")]
     repos: Vec<String>,
-    /// 集群模式：本节点供其它节点访问的地址（如 http://10.0.0.5:7080）。多个节点共享同一个元数据库与
-    /// 对象存储时，每个 ref 的合入由持有租约的节点处理，其它节点转发给它。
+    /// Cluster mode: this node's address for other nodes (such as http://10.0.0.5:7080). Nodes that share one
+    /// metadata store and object storage land each ref on the node holding its lease; others forward to it.
     #[arg(long, value_name = "URL", env = "SCION_ADVERTISE_URL", conflicts_with = "lite")]
     advertise_url: Option<String>,
-    /// 集群共享密钥（各节点相同）：节点间转发合入时带上，收到的节点据此跳过重复的限流计数。
-    /// 不设置时转发的合入在两个节点上各计一次。
+    /// Cluster secret (the same on every node), sent with forwarded lands so the receiving node does not count
+    /// them against rate limits again. Without it, a forwarded land counts on both nodes.
     #[arg(long, value_name = "SECRET", env = "SCION_CLUSTER_SECRET", hide_env_values = true)]
     cluster_secret: Option<String>,
-    /// 全局在途请求上限，超过时立即拒绝（客户端可重试）。
+    /// Limit on requests in flight; beyond it requests are refused at once (clients retry).
     #[arg(
         long,
         value_name = "N",
@@ -175,33 +175,33 @@ struct ServerArgs {
         env = "SCION_MAX_CONCURRENT_REQUESTS"
     )]
     max_concurrent_requests: usize,
-    /// 按仓库的写入速率限制：每秒 RATE 次，可选突发 BURST（默认等于 2×RATE），如 200 或 200/1000。
+    /// Write rate limit per repository: RATE per second, optional BURST (default 2×RATE), such as 200 or 200/1000.
     #[arg(long, value_name = "RATE[/BURST]", value_parser = parse_write_rate, env = "SCION_REPO_WRITE_RATE")]
     repo_write_rate: Option<scion_api::WriteRate>,
-    /// 按调用者（认证过的主体，匿名时为来源 IP）的请求速率限制，所有 RPC 各算一次：RATE[/BURST]。
+    /// Request rate limit per caller (the authenticated subject, else the source IP), every RPC counting once: RATE[/BURST].
     #[arg(long, value_name = "RATE[/BURST]", value_parser = parse_write_rate, env = "SCION_TENANT_RATE")]
     tenant_rate: Option<scion_api::WriteRate>,
-    /// 每个调用者的在途请求上限。
+    /// Limit on requests in flight per caller.
     #[arg(long, value_name = "N", env = "SCION_TENANT_CONCURRENCY")]
     tenant_concurrency: Option<usize>,
-    /// 请求处理时间上限（与客户端 deadline 取较小者，超时返回 DEADLINE_EXCEEDED）；0s 只按客户端的 deadline。
+    /// Limit on request time (the smaller of this and the client's deadline; DEADLINE_EXCEEDED when exceeded); 0s uses only the client's deadline.
     #[arg(long, value_name = "DURATION", default_value = "60s", value_parser = parse_duration,
         env = "SCION_MAX_REQUEST_TIMEOUT")]
     max_request_timeout: std::time::Duration,
-    /// 推荐给客户端的只读端点（区域缓存 `scion cache` 的地址），可附带区域名：URL 或 URL@REGION。
-    /// 可重复指定，客户端从中选择读取对象的地址。
+    /// Read endpoint to recommend to clients (a `scion cache` address), optionally with a region: URL or URL@REGION.
+    /// Repeatable; clients pick where to read objects from.
     #[arg(long = "read-endpoint", value_name = "URL[@REGION]", value_parser = parse_read_endpoint,
         env = "SCION_READ_ENDPOINTS", value_delimiter = ',')]
     read_endpoints: Vec<scion_api::ReadEndpoint>,
-    /// WatchRefs 轮询元数据库的间隔（集群中其它节点的合入通知到订阅者的最大延迟），如 500ms、2s。
+    /// How often WatchRefs polls the metadata store (the most a land on another node waits to reach subscribers), such as 500ms or 2s.
     #[arg(long, value_name = "DURATION", default_value = "1s", value_parser = parse_duration,
         env = "SCION_REF_POLL_INTERVAL")]
     ref_poll_interval: std::time::Duration,
-    /// 删除的仓库保留多久（期间可以恢复），之后清除数据、释放名字（不小于 2h）。
+    /// How long deleted repositories are kept (restorable), before their data is purged and the name freed (at least 2h).
     #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = parse_duration,
         env = "SCION_REPO_DELETE_GRACE")]
     repo_delete_grace: std::time::Duration,
-    /// redaction 清除的默认宽限期（AdminService.Purge 未指定时），期间可以撤销。
+    /// Default grace period before redacted objects are purged (when AdminService.Purge gives none); undo is possible until then.
     #[arg(long, value_name = "DURATION", default_value = "24h", value_parser = parse_duration,
         env = "SCION_PURGE_GRACE")]
     purge_grace: std::time::Duration,
@@ -215,13 +215,13 @@ struct ServerArgs {
     storage: StorageArgs,
 }
 
-/// ref 变化的推送（docs/guide/events.md）。
+/// Delivery of ref changes (docs/guide/events.md).
 #[derive(Debug, Clone, clap::Args)]
 struct EventArgs {
-    /// 把 ref 变化 POST 到这个地址（JSON，至少送达一次）。
+    /// POST ref changes to this URL (JSON, at least once).
     #[arg(long, value_name = "URL", env = "SCION_EVENT_WEBHOOK")]
     event_webhook: Option<String>,
-    /// webhook 的签名密钥：X-Scion-Signature-256 为请求体的 HMAC-SHA256。
+    /// Webhook signing secret: X-Scion-Signature-256 is the HMAC-SHA256 of the body.
     #[arg(
         long,
         value_name = "SECRET",
@@ -229,10 +229,10 @@ struct EventArgs {
         hide_env_values = true
     )]
     event_webhook_secret: Option<String>,
-    /// 把 ref 变化发布到 NATS JetStream（需要有覆盖 <前缀>.ref.> 的 stream）。
+    /// Publish ref changes to NATS JetStream (needs a stream covering <prefix>.ref.>).
     #[arg(long, value_name = "URL", env = "SCION_EVENT_NATS")]
     event_nats: Option<String>,
-    /// NATS subject 前缀：subject 为 <前缀>.ref.created|updated|deleted。
+    /// NATS subject prefix: subjects are <prefix>.ref.created|updated|deleted.
     #[arg(
         long,
         value_name = "PREFIX",
@@ -240,20 +240,20 @@ struct EventArgs {
         env = "SCION_EVENT_NATS_SUBJECT"
     )]
     event_nats_subject: String,
-    /// 合入前检查：合入、创建或移动 ref 之前把要引入的提交 POST 到这个地址，由它决定是否允许。
+    /// Pre-land check: before landing, creating or moving a ref, POST the incoming commits here; it decides.
     #[arg(long, value_name = "URL", env = "SCION_PRE_LAND_WEBHOOK")]
     pre_land_webhook: Option<String>,
-    /// 合入前检查的签名密钥（X-Scion-Signature-256）。
+    /// Signing secret for the pre-land check (X-Scion-Signature-256).
     #[arg(long, value_name = "SECRET", env = "SCION_PRE_LAND_SECRET", hide_env_values = true)]
     pre_land_secret: Option<String>,
-    /// 合入前检查的超时。
+    /// Timeout for the pre-land check.
     #[arg(long, value_name = "DURATION", default_value = "5s", value_parser = parse_duration,
         env = "SCION_PRE_LAND_TIMEOUT")]
     pre_land_timeout: std::time::Duration,
-    /// 检查服务不可用（超时、5xx、连接失败）时放行；默认拒绝。
+    /// Allow the change when the check service is unavailable (timeout, 5xx, connection failure); refused by default.
     #[arg(long, env = "SCION_PRE_LAND_FAIL_OPEN")]
     pre_land_fail_open: bool,
-    /// 事件在元数据库中保留多久（ListRefEvents 与推送都受它限制）。
+    /// How long events are kept in the metadata store (bounds both ListRefEvents and delivery).
     #[arg(long, value_name = "DURATION", default_value = "7d", value_parser = parse_duration,
         env = "SCION_EVENT_RETENTION")]
     event_retention: std::time::Duration,
@@ -299,24 +299,24 @@ impl EventArgs {
     }
 }
 
-/// 指标与追踪（`scion server` 和 `scion cache` 共用）。
+/// Metrics and tracing (shared by `scion server` and `scion cache`).
 #[derive(Debug, Clone, Default, clap::Args)]
 struct ObsArgs {
-    /// Prometheus 指标的 HTTP 监听地址（GET /metrics），如 0.0.0.0:9464；不指定时不提供。
+    /// HTTP address for Prometheus metrics (GET /metrics), such as 0.0.0.0:9464; none when omitted.
     #[arg(long, value_name = "ADDR", env = "SCION_METRICS_LISTEN")]
     metrics_listen: Option<SocketAddr>,
-    /// OTLP gRPC 地址（如 http://otel-collector:4317），把 trace 导出到 OpenTelemetry collector。
-    /// 也可以只设置标准环境变量 OTEL_EXPORTER_OTLP_ENDPOINT。
+    /// OTLP gRPC address (such as http://otel-collector:4317) to export traces to an OpenTelemetry collector.
+    /// The standard OTEL_EXPORTER_OTLP_ENDPOINT variable works too.
     #[arg(long, value_name = "URL", env = "SCION_OTLP_ENDPOINT")]
     otlp_endpoint: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]
 struct CacheArgs {
-    /// gRPC 监听地址。
+    /// gRPC listen address.
     #[arg(long, default_value = "127.0.0.1:7090", env = "SCION_CACHE_LISTEN")]
     listen: SocketAddr,
-    /// 上游 L3 服务端地址，可重复指定（同一集群的多个节点，互为副本）。
+    /// Upstream server address (repeatable: nodes of one cluster, interchangeable).
     #[arg(
         long = "upstream",
         value_name = "URL",
@@ -325,10 +325,10 @@ struct CacheArgs {
         value_delimiter = ','
     )]
     upstreams: Vec<String>,
-    /// 本节点供其它缓存节点访问的地址；与 --peer 一起按 rendezvous 哈希分片。
+    /// This node's address for other cache nodes; with --peer, objects are sharded by rendezvous hashing.
     #[arg(long, value_name = "URL", env = "SCION_CACHE_ADVERTISE_URL")]
     advertise_url: Option<String>,
-    /// 区域内其它缓存节点的地址，可重复指定。
+    /// Another cache node in the region (repeatable).
     #[arg(
         long = "peer",
         value_name = "URL",
@@ -337,19 +337,19 @@ struct CacheArgs {
         requires = "advertise_url"
     )]
     peers: Vec<String>,
-    /// 内存层容量，如 512MiB、8GiB。
+    /// Memory tier size, such as 512MiB or 8GiB.
     #[arg(long, value_name = "SIZE", default_value = "1GiB", value_parser = parse_size, env = "SCION_CACHE_MEMORY")]
     memory: u64,
-    /// 磁盘层目录（建议放在 NVMe 上）；不指定时只用内存。
+    /// Disk tier directory (NVMe recommended); memory only when omitted.
     #[arg(long, value_name = "DIR", env = "SCION_CACHE_DISK_DIR")]
     disk_dir: Option<PathBuf>,
-    /// 磁盘层容量。
+    /// Disk tier size.
     #[arg(long, value_name = "SIZE", default_value = "64GiB", value_parser = parse_size, env = "SCION_CACHE_DISK_SIZE")]
     disk_size: u64,
-    /// 超过这个大小的对象不缓存（最大 16MiB）。
+    /// Objects larger than this are not cached (at most 16MiB).
     #[arg(long, value_name = "SIZE", default_value = "8MiB", value_parser = parse_size)]
     max_object: u64,
-    /// 预热：订阅上游的 ref 变化并预取变化的目录树。REPO 或 REPO:REF[,REF...]，可重复指定。
+    /// Warm-up: follow upstream ref changes and prefetch changed trees. REPO or REPO:REF[,REF...], repeatable.
     #[arg(
         long = "warm",
         value_name = "REPO[:REFS]",
@@ -357,20 +357,20 @@ struct CacheArgs {
         value_delimiter = ';'
     )]
     warm: Vec<scion_cache::WarmTarget>,
-    /// 预热时连同不超过这个大小的文件一起预取；0 只预取目录树。
+    /// Also prefetch files up to this size while warming; 0 prefetches only trees.
     #[arg(long, value_name = "SIZE", default_value = "0", value_parser = parse_size)]
     warm_blob_max: u64,
-    /// 关闭对冲（慢请求向另一个上游重发）。
+    /// Turn off hedging (resending slow requests to another upstream).
     #[arg(long)]
     no_hedge: bool,
-    /// 预热时使用的令牌（服务端要求认证时需要），建议用环境变量传入。
+    /// Token for warming (when the server requires authentication); best passed in the environment.
     #[arg(long, value_name = "TOKEN", env = "SCION_CACHE_WARM_TOKEN", hide_env_values = true)]
     warm_token: Option<String>,
     #[command(flatten)]
     obs: ObsArgs,
 }
 
-/// 字节数：纯数字，或带 K/M/G/T（KiB/MiB/…，均按 1024 进位）后缀。
+/// A byte count: a number, optionally with K/M/G/T (KiB/MiB/…, powers of 1024).
 fn parse_size(s: &str) -> Result<u64, String> {
     let t = s.trim();
     let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
@@ -390,7 +390,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("size {s:?} is too large"))
 }
 
-/// 时长：数字加 ms、s、m 后缀。
+/// A duration: a number with ms, s or m.
 fn parse_duration(s: &str) -> Result<std::time::Duration, String> {
     let t = s.trim();
     let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
@@ -486,7 +486,7 @@ fn parse_write_rate(s: &str) -> Result<scion_api::WriteRate, String> {
     })
 }
 
-/// 初始化日志与追踪（`service` 为 OpenTelemetry 的 service.name）。返回的 guard 在退出时导出剩余的 span。
+/// Sets up logging and tracing (`service` is the OpenTelemetry service.name). The returned guard exports the remaining spans on exit.
 fn init_tracing(format: LogFormat, service: &str, obs: &ObsArgs) -> anyhow::Result<scion_obs::trace::TraceGuard> {
     scion_obs::trace::init(&scion_obs::trace::TraceConfig {
         service_name: service.to_owned(),
@@ -497,7 +497,7 @@ fn init_tracing(format: LogFormat, service: &str, obs: &ObsArgs) -> anyhow::Resu
     .map_err(|e| anyhow::anyhow!("initializing tracing: {e}"))
 }
 
-/// 启动 `/metrics`（指定了 `--metrics-listen` 时），随进程退出。
+/// Serves `/metrics` (with `--metrics-listen`) until the process exits.
 async fn start_metrics(obs: &ObsArgs) -> anyhow::Result<Option<SocketAddr>> {
     let Some(addr) = obs.metrics_listen else {
         return Ok(None);
@@ -528,7 +528,7 @@ fn scion_proto_version() -> &'static str {
     scion_api::PROTOCOL_VERSION
 }
 
-/// 打开存储并确保 `--repo` 指定的仓库存在。
+/// Opens storage and creates the `--repo` repositories if missing.
 async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<(App, String)> {
     let cluster = match &args.advertise_url {
         Some(url) if url.starts_with("http://") || url.starts_with("https://") => {
@@ -599,14 +599,14 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
     Ok((app, storage::describe(&meta_spec, &blob_spec)))
 }
 
-/// 只打开元数据库（管理命令用）。
+/// Opens only the metadata store (for admin commands).
 async fn open_meta(storage: &StorageArgs) -> anyhow::Result<Arc<dyn scion_store::MetaStore>> {
     let (meta_spec, blob_spec) = storage.specs()?;
     let (meta, _) = storage::open(&meta_spec, &blob_spec, |k| std::env::var(k).ok()).await?;
     Ok(meta)
 }
 
-/// `scion admin reindex`：返回每个仓库的一行摘要。
+/// `scion admin reindex`: one summary line per repository.
 async fn reindex(args: &ReindexArgs, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<Vec<String>> {
     let (meta_spec, blob_spec) = args.storage.specs()?;
     let (meta, blobs) = storage::open(&meta_spec, &blob_spec, env).await?;
@@ -624,8 +624,8 @@ async fn reindex(args: &ReindexArgs, env: impl Fn(&str) -> Option<String>) -> an
     Ok(out)
 }
 
-/// 立即注册 SIGINT / SIGTERM（在打印「listening」之前，避免信号在注册前到达时进程被默认处理杀掉），
-/// 返回收到信号时完成的 future。
+/// Registers SIGINT / SIGTERM right away (before printing "listening", so an early signal does not kill the process),
+/// and returns a future that completes on a signal.
 fn shutdown_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
     let term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -744,7 +744,7 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-/// 运维类 admin 命令：返回输出与是否成功（fsck 发现问题时为 false）。
+/// Operations admin commands: returns the output and whether it succeeded (false when fsck finds problems).
 async fn admin_ops(cmd: AdminCmd, env: impl Fn(&str) -> Option<String>) -> anyhow::Result<(Vec<String>, bool)> {
     let open = |storage: &StorageArgs| {
         let specs = storage.specs();

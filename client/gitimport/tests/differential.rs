@@ -263,7 +263,11 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
 
     let first = import(&c, dir, "main", "main", |_, _| {}).await.expect("first");
     let again = import(&c, dir, "main", "main", |_, _| {}).await.expect("again");
-    assert_eq!((first.new_commits, again.new_commits), (1, 0), "nothing new the second time");
+    assert_eq!(
+        (first.new_commits, again.new_commits),
+        (1, 0),
+        "nothing new the second time"
+    );
     assert_eq!((again.commits, again.tip), (1, first.tip));
     assert_eq!(
         c.resolve_ref("main").await.expect("ok").expect("ref").version,
@@ -277,7 +281,11 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
     write(dir, "b", b"b");
     commit(dir, "three", "1700000200 +0000");
     let third = import(&c, dir, "main", "main", |_, _| {}).await.expect("incremental");
-    assert_eq!((third.commits, third.new_commits), (3, 2), "only the new commits are created");
+    assert_eq!(
+        (third.commits, third.new_commits),
+        (3, 2),
+        "only the new commits are created"
+    );
     let tip = c.resolve_ref("main").await.expect("ok").expect("ref");
     assert_eq!(Some(tip.changeset), third.tip);
     assert_eq!(tip.version, 2, "one fast-forward for both commits");
@@ -319,9 +327,27 @@ async fn shared_history_is_not_imported_twice() {
     }
     let feat = import(&c, dir, "feat", "feat", |_, _| {}).await.expect("feat");
     assert_eq!((feat.commits, feat.new_commits), (5, 2));
-    assert_eq!(c.log("feat", None, 10, None).await.expect("log").entries.len(), 5, "full history on the new ref");
+    assert_eq!(
+        c.log("feat", None, 10, None).await.expect("log").entries.len(),
+        5,
+        "full history on the new ref"
+    );
     git(dir, &["checkout", "-q", "main"]);
-    git(dir, &["-c", "user.name=t", "-c", "user.email=t@x", "merge", "-q", "--no-ff", "-m", "merge feat", "feat"]);
+    git(
+        dir,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@x",
+            "merge",
+            "-q",
+            "--no-ff",
+            "-m",
+            "merge feat",
+            "feat",
+        ],
+    );
     let merged = import(&c, dir, "main", "main", |_, _| {}).await.expect("merge");
     assert_eq!((merged.commits, merged.new_commits), (6, 1));
     let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
@@ -330,7 +356,10 @@ async fn shared_history_is_not_imported_twice() {
     // Importing a branch whose every commit is already there only moves the ref
     let copy = import(&c, dir, "main", "main-copy", |_, _| {}).await.expect("copy");
     assert_eq!((copy.new_commits, copy.tip), (0, merged.tip));
-    assert_eq!(c.resolve_ref("main-copy").await.expect("ok").map(|r| r.changeset), merged.tip);
+    assert_eq!(
+        c.resolve_ref("main-copy").await.expect("ok").map(|r| r.changeset),
+        merged.tip
+    );
 }
 
 /// A git tag imported into `tags/…` is created at its commit in one step (the server never

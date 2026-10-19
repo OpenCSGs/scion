@@ -205,9 +205,10 @@ enum Command {
     Sync,
     /// 输出文件内容：[REV:]PATH。
     Cat { spec: String },
-    /// 列出目录：[REV:][DIR]。
+    /// 列出目录：[REV:][DIR]。A bare revision lists its root (`scn ls main`); `:DIR` forces a path.
     Ls { spec: Option<String> },
-    /// 打包下载：[REV:][DIR]（默认当前 ref 的整个仓库），不需要工作副本。
+    /// 打包下载：[REV:][DIR]（默认当前 ref 的整个仓库），不需要工作副本。A bare revision works too
+    /// (`scn archive main`); `:DIR` forces a path.
     Archive {
         spec: Option<String>,
         /// tar.gz、zip 或 tar。

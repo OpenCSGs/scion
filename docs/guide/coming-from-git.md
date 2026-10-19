@@ -41,8 +41,8 @@
 | `git diff`, `git diff A B`, `A..B`, `A...B` | `scn diff`, `scn diff A B`, `A..B`, `A...B` | `--name-only`, `-- PATH` |
 | `git blame [REV] -- PATH` | `scn blame [REV:]PATH` | |
 | `git show REV:PATH` | `scn cat REV:PATH` | No working copy needed |
-| `git ls-tree REV DIR` | `scn ls REV:DIR` | |
-| `git archive` | `scn archive [REV:][DIR] --format tar.gz\|zip\|tar [--prefix P] [-o FILE]` | |
+| `git ls-tree REV DIR` | `scn ls REV:DIR`, or `scn ls REV` for the root | A bare argument that is not a revision is a directory; `:DIR` forces a directory |
+| `git archive REV` | `scn archive REV`, `scn archive [REV:][DIR] --format tar.gz\|zip\|tar [--prefix P] [-o FILE]` | |
 | `git config user.name` / `user.email` | `scn config set user.name` / `user.email` | The only settings so far |
 | `.gitignore` | `.gitignore` and `.scionignore` | Same syntax; `.scionignore` wins in the same directory |
 | `git fast-import` | `scn import git PATH --repo R` | Keeps the original git SHAs |

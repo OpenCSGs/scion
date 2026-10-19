@@ -798,6 +798,27 @@ pub(crate) fn split_spec<'a>(spec: &'a str, default_rev: &'a str) -> (&'a str, &
     }
 }
 
+/// `[REV:][DIR]` for commands that take a tree (`ls`, `archive`): like [`split_spec`], but a bare
+/// argument that names a revision is the revision, as in `git archive main` / `git ls-tree main`.
+/// `:DIR` forces a path.
+pub(crate) async fn split_tree_spec(
+    client: &Client,
+    ctx: &Ctx,
+    spec: &str,
+    default_rev: &str,
+) -> Result<(String, String), CliError> {
+    if spec.is_empty() || spec.contains(':') {
+        let (rev, path) = split_spec(spec, default_rev);
+        return Ok((ctx.expand_rev(rev)?, path.to_owned()));
+    }
+    let rev = ctx.expand_rev(spec)?;
+    match client.resolve_revision(&rev).await {
+        Ok(_) => Ok((rev, String::new())),
+        Err(e) if e.is_not_found() => Ok((ctx.expand_rev(default_rev)?, spec.to_owned())),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// 不需要工作副本的命令：仓库来自 --repo 或当前工作副本。
 pub(crate) async fn query_client(ctx: &Ctx) -> Result<(Client, String), CliError> {
     let wc = ctx.working_copy();
@@ -884,9 +905,8 @@ pub async fn archive(
     let fmt = scion_client::ArchiveFormat::parse(format)
         .ok_or_else(|| CliError::Usage(format!("unknown archive format {format:?} (tar.gz, zip or tar)")))?;
     let (client, default_rev) = query_client(ctx).await?;
-    let (rev, path) = split_spec(spec.unwrap_or(""), &default_rev);
-    let rev = ctx.expand_rev(rev)?;
-    let rev = rev.as_str();
+    let (rev, path) = split_tree_spec(&client, ctx, spec.unwrap_or(""), &default_rev).await?;
+    let (rev, path) = (rev.as_str(), path.as_str());
     let (changeset, bytes) = match output {
         Some(file) => {
             let f =
@@ -958,9 +978,8 @@ pub fn kind(m: EntryMode) -> &'static str {
 
 pub async fn ls(ctx: &Ctx, spec: Option<&str>) -> Result<LsOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
-    let (rev, path) = split_spec(spec.unwrap_or(""), &default_rev);
-    let rev = ctx.expand_rev(rev)?;
-    let rev = rev.as_str();
+    let (rev, path) = split_tree_spec(&client, ctx, spec.unwrap_or(""), &default_rev).await?;
+    let (rev, path) = (rev.as_str(), path.as_str());
     let entries = client.list_dir(rev, path).await?;
     Ok(LsOut {
         schema: "scion.cli.ls/v1",

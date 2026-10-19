@@ -512,6 +512,30 @@ async fn clone_commit_land_sync_workflow() {
         assert_eq!(scn_in(&wc, &["mv", "missing.txt", "x"]).status.code(), Some(2));
         json_of(&scn_in(&wc, &["branch", "-d", "legacy", "--json"]));
 
+        // A bare revision for ls / archive, as in git; :DIR forces a path
+        let v = json_of(&scn_in(&wc, &["ls", "main", "--json"]));
+        assert_eq!((v["revision"].as_str(), v["path"].as_str()), (Some("main"), Some("")));
+        let v = json_of(&scn_in(&wc, &["ls", "src", "--json"]));
+        assert_eq!(v["path"], "src", "not a revision, so a path");
+        let v = json_of(&scn_in(&wc, &["ls", "HEAD~1", "--json"]));
+        assert_eq!(v["path"], "");
+        let out = scn_in(&wc, &["ls", ":main"]);
+        assert_eq!(out.status.code(), Some(1), "forced path that does not exist: {out:?}");
+        let tar = root.join("bare.tar");
+        json_of(&scn_in(
+            &wc,
+            &[
+                "archive",
+                "main",
+                "--format",
+                "tar",
+                "-o",
+                tar.to_str().expect("path"),
+                "--json",
+            ],
+        ));
+        assert!(std::fs::metadata(&tar).expect("tar").len() > 0);
+
         // Tags
         let v = json_of(&scn_in(&wc, &["tag", "v1.0", "--json"]));
         assert_eq!(

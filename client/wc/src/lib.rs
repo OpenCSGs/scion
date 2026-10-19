@@ -21,7 +21,7 @@ use scion_object::{EntryMode, ObjectId, Tree};
 pub use error::{Error, Result};
 pub use merge::{ConflictKind, MergeConflict};
 pub use sparse::Sparse;
-pub use state::{DirState, FileRecord, Mode, State};
+pub use state::{ConflictState, DirState, FileRecord, Mode, Sides, State, Version};
 
 use crate::fsutil::Found;
 use crate::state::Paths;
@@ -32,6 +32,8 @@ pub struct Status {
     pub added: Vec<String>,
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
+    /// Paths with unresolved conflicts (they also appear as added/modified/deleted).
+    pub conflicted: Vec<String>,
 }
 
 impl Status {
@@ -85,6 +87,141 @@ enum Change {
 pub(crate) struct TreeFile {
     mode: Mode,
     id: ObjectId,
+}
+
+/// One path's result of a three-way merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Final {
+    /// A version that exists on the server (None: no file).
+    Version(Option<TreeFile>),
+    /// Line-merged content, not on the server yet.
+    Data(TreeFile, Bytes),
+    Conflict {
+        kind: ConflictKind,
+        /// Text with conflict markers, for content conflicts.
+        marked: Option<Bytes>,
+        ours: Option<TreeFile>,
+        theirs: Option<TreeFile>,
+    },
+}
+
+/// Three-way merges `paths` of `ours` and `theirs` against `base` (see [`merge`] for the rules),
+/// fetching file contents only for paths both sides changed.
+async fn three_way(
+    client: &Client,
+    paths: impl IntoIterator<Item = String>,
+    base: &BTreeMap<String, TreeFile>,
+    ours: &BTreeMap<String, TreeFile>,
+    theirs: &BTreeMap<String, TreeFile>,
+) -> Result<BTreeMap<String, Final>> {
+    use merge::{Resolution, Step};
+    let mut out = BTreeMap::new();
+    let mut lines = Vec::new();
+    for path in paths {
+        let (b, o, t) = (
+            base.get(&path).copied(),
+            ours.get(&path).copied(),
+            theirs.get(&path).copied(),
+        );
+        let f = match merge::step(b, o, t) {
+            Step::Same => Final::Version(o),
+            Step::Done(Resolution::Take(x)) => Final::Version(x),
+            Step::Conflict(kind) => Final::Conflict {
+                kind,
+                marked: None,
+                ours: o,
+                theirs: t,
+            },
+            Step::Lines { mode } => {
+                lines.push((path, mode, [b, o, t]));
+                continue;
+            }
+        };
+        out.insert(path, f);
+    }
+    for part in lines.chunks(FETCH_BATCH / 3) {
+        let ids: Vec<ObjectId> = part
+            .iter()
+            .flat_map(|(_, _, files)| files.iter().flatten().map(|f| f.id))
+            .collect();
+        let mut data = client.get_objects(&ids).await?.into_iter();
+        for (path, mode, [_, o, t]) in part {
+            let (Some(bd), Some(od), Some(td)) = (data.next(), data.next(), data.next()) else {
+                return Err(Error::Corrupt(format!("no content fetched for {path}")));
+            };
+            let f = match merge::merge_lines(&bd, &od, &td) {
+                Ok(merged) => {
+                    let merged = Bytes::from(merged);
+                    let id = ObjectId::of_blob(&merged);
+                    Final::Data(TreeFile { mode: *mode, id }, merged)
+                }
+                Err((kind, marked)) => Final::Conflict {
+                    kind,
+                    marked: marked.map(Bytes::from),
+                    ours: *o,
+                    theirs: *t,
+                },
+            };
+            out.insert(path.clone(), f);
+        }
+    }
+    // A file on one side where the other has a directory
+    let mut result: std::collections::BTreeSet<String> = ours.keys().cloned().collect();
+    for (path, f) in &out {
+        match f {
+            Final::Version(None) => {
+                result.remove(path);
+            }
+            Final::Conflict { ours: None, .. } => {}
+            _ => {
+                result.insert(path.clone());
+            }
+        }
+    }
+    for path in merge::path_clashes(&result) {
+        out.insert(
+            path.clone(),
+            Final::Conflict {
+                kind: ConflictKind::Path,
+                marked: None,
+                ours: ours.get(&path).copied(),
+                theirs: theirs.get(&path).copied(),
+            },
+        );
+    }
+    Ok(out)
+}
+
+fn version(f: Option<TreeFile>) -> Option<Version> {
+    f.map(|f| Version {
+        mode: f.mode,
+        id: f.id.to_string(),
+    })
+}
+
+/// The conflicted paths of a merge result, as stored in [`ConflictState::paths`].
+fn sides_of(finals: &BTreeMap<String, Final>) -> BTreeMap<String, Sides> {
+    finals
+        .iter()
+        .filter_map(|(p, f)| match f {
+            Final::Conflict { kind, ours, theirs, .. } => Some((
+                p.clone(),
+                Sides {
+                    kind: kind.as_str().to_owned(),
+                    ours: version(*ours),
+                    theirs: version(*theirs),
+                },
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Which side `scn resolve` takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Ours,
+    Theirs,
 }
 
 /// Result of [`WorkingCopy::merge`].
@@ -357,7 +494,11 @@ impl WorkingCopy {
     }
 
     pub fn status(&self) -> Result<Status> {
-        Ok(self.changes()?.0)
+        let mut status = self.changes()?.0;
+        if let Some(c) = &self.state.conflict {
+            status.conflicted = c.paths.keys().cloned().collect();
+        }
+        Ok(status)
     }
 
     /// 本地改动的明细（供 diff 使用）：每个改动文件在当前快照中的版本，以及本地的新内容。
@@ -408,10 +549,41 @@ impl WorkingCopy {
         author: Option<(&str, &str)>,
         merge: Option<ObjectId>,
     ) -> Result<Option<CreatedChangeset>> {
+        // Finishing a sync or merge that stopped on conflicts: its message, author and merge
+        // parent are the defaults
+        let conflict = self.state.conflict.clone();
+        if let Some(c) = &conflict {
+            if !c.paths.is_empty() {
+                return Err(Error::Unresolved(c.paths.keys().cloned().collect()));
+            }
+        }
         let (_, changes) = self.changes()?;
         if changes.is_empty() {
+            if conflict.is_some() {
+                self.state.conflict = None;
+                self.paths.save_state(&self.state)?;
+            }
             return Ok(None);
         }
+        let saved_message = conflict.as_ref().and_then(|c| c.message.clone()).unwrap_or_default();
+        let message = if message.is_empty() {
+            saved_message.as_str()
+        } else {
+            message
+        };
+        let saved_author = conflict.as_ref().and_then(|c| c.author.clone());
+        let author = author.or(saved_author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())));
+        let merge = match merge {
+            Some(m) => Some(m),
+            None => conflict
+                .as_ref()
+                .and_then(|c| c.merge.as_deref())
+                .map(|m| {
+                    m.parse::<ObjectId>()
+                        .map_err(|e| Error::Corrupt(format!("conflict merge: {e}")))
+                })
+                .transpose()?,
+        };
         let mut b = client.changeset(self.state.current()?).message(message);
         if let Some(m) = merge {
             b = b.parent(m);
@@ -454,6 +626,7 @@ impl WorkingCopy {
         self.state.head_message = Some(message.to_owned());
         self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
         self.state.head_merge = merge.map(|m| m.to_string());
+        self.state.conflict = None;
         self.paths.save_state(&self.state)?;
         Ok(Some(created))
     }
@@ -523,6 +696,10 @@ impl WorkingCopy {
     /// (untracked) files are left alone and returned in [`Restored::kept_added`].
     pub async fn restore(&mut self, client: &Client, paths: &[String]) -> Result<Restored> {
         let _lock = self.paths.lock()?;
+        self.restore_locked(client, paths).await
+    }
+
+    async fn restore_locked(&mut self, client: &Client, paths: &[String]) -> Result<Restored> {
         let wanted: Vec<&str> = paths.iter().map(|p| p.trim_end_matches('/')).collect();
         let matches = |p: &str| {
             wanted.iter().any(|w| {
@@ -609,11 +786,166 @@ impl WorkingCopy {
             .transpose()
     }
 
+    /// Writes merge results that differ from `ours` (what is on disk) into the working tree:
+    /// versions and merged text as they are, content conflicts with markers; other conflicts
+    /// keep our file. Returns the paths it created.
+    async fn write_results(
+        &self,
+        client: &Client,
+        finals: &BTreeMap<String, Final>,
+        ours: &BTreeMap<String, TreeFile>,
+    ) -> Result<Vec<String>> {
+        let fetch: Vec<(&String, TreeFile)> = finals
+            .iter()
+            .filter_map(|(p, f)| match f {
+                Final::Version(Some(v)) if ours.get(p) != Some(v) => Some((p, *v)),
+                _ => None,
+            })
+            .collect();
+        for part in fetch.chunks(FETCH_BATCH) {
+            let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
+            for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
+                fsutil::write_file(self.root(), path, f.mode, &data)?;
+            }
+        }
+        let mut created = Vec::new();
+        for (path, f) in finals {
+            match f {
+                Final::Version(None) if ours.contains_key(path) => fsutil::remove_file(self.root(), path)?,
+                Final::Data(v, data) => {
+                    fsutil::write_file(self.root(), path, v.mode, data)?;
+                }
+                Final::Conflict {
+                    marked: Some(data),
+                    ours: o,
+                    ..
+                } => {
+                    let mode = o.map_or(Mode::File, |o| o.mode);
+                    fsutil::write_file(self.root(), path, mode, data)?;
+                }
+                _ => {}
+            }
+            let exists = !matches!(
+                f,
+                Final::Version(None)
+                    | Final::Conflict {
+                        ours: None,
+                        marked: None,
+                        ..
+                    }
+            );
+            if exists && !ours.contains_key(path) {
+                created.push(path.clone());
+            }
+        }
+        Ok(created)
+    }
+
+    /// Fails while a sync or merge waits for its conflicts to be resolved and committed.
+    fn check_no_conflict(&self) -> Result<()> {
+        match &self.state.conflict {
+            Some(c) if !c.paths.is_empty() => Err(Error::Unresolved(c.paths.keys().cloned().collect())),
+            Some(_) => Err(Error::Dirty),
+            None => Ok(()),
+        }
+    }
+
+    /// Marks conflicted `paths` (`.` for all) resolved. With `side`, first replaces each file
+    /// with that side's version (deleting it when that side has none); without, refuses files
+    /// that still contain conflict markers unless `force`. Returns the paths still unresolved.
+    pub async fn resolve(
+        &mut self,
+        client: &Client,
+        paths: &[String],
+        side: Option<Side>,
+        force: bool,
+    ) -> Result<Vec<String>> {
+        let _lock = self.paths.lock()?;
+        let Some(conflict) = &self.state.conflict else {
+            return Err(Error::NoConflict);
+        };
+        let wanted: Vec<String> = if paths.iter().any(|p| p == ".") {
+            conflict.paths.keys().cloned().collect()
+        } else {
+            for p in paths {
+                if !conflict.paths.contains_key(p) {
+                    return Err(Error::NotConflicted(p.clone()));
+                }
+            }
+            paths.to_vec()
+        };
+        match side {
+            Some(side) => {
+                let mut writes = Vec::new();
+                for p in &wanted {
+                    let sides = &conflict.paths[p];
+                    let v = match side {
+                        Side::Ours => &sides.ours,
+                        Side::Theirs => &sides.theirs,
+                    };
+                    match v {
+                        Some(v) => writes.push((
+                            p.clone(),
+                            v.mode,
+                            v.id.parse::<ObjectId>()
+                                .map_err(|e| Error::Corrupt(format!("conflict {p}: {e}")))?,
+                        )),
+                        None => fsutil::remove_file(self.root(), p)?,
+                    }
+                }
+                let ids: Vec<ObjectId> = writes.iter().map(|(_, _, id)| *id).collect();
+                for ((p, mode, _), data) in writes.iter().zip(client.get_objects(&ids).await?) {
+                    fsutil::write_file(self.root(), p, *mode, &data)?;
+                }
+            }
+            None if !force => {
+                let mut marked = Vec::new();
+                for p in &wanted {
+                    let path = self.root().join(p);
+                    if let Ok(data) = std::fs::read(&path) {
+                        if merge::has_markers(&data) {
+                            marked.push(p.clone());
+                        }
+                    }
+                }
+                if !marked.is_empty() {
+                    return Err(Error::MarkersRemain(marked));
+                }
+            }
+            None => {}
+        }
+        let conflict = self.state.conflict.as_mut().ok_or(Error::NoConflict)?;
+        for p in &wanted {
+            conflict.paths.remove(p);
+        }
+        let remaining = conflict.paths.keys().cloned().collect();
+        self.paths.save_state(&self.state)?;
+        Ok(remaining)
+    }
+
+    /// Abandons a merge that stopped on conflicts: tracked files go back to the snapshot and
+    /// files the merge created are removed.
+    pub async fn abort_merge(&mut self, client: &Client) -> Result<()> {
+        let _lock = self.paths.lock()?;
+        let created = match &self.state.conflict {
+            Some(c) if c.merge.is_some() => c.created.clone(),
+            _ => return Err(Error::NoMergeInProgress),
+        };
+        for p in &created {
+            fsutil::remove_file(self.root(), p)?;
+        }
+        self.restore_locked(client, &[".".to_owned()]).await?;
+        self.state.conflict = None;
+        self.paths.save_state(&self.state)?;
+        Ok(())
+    }
+
     /// Moves the working copy to another ref (creating it at the current snapshot when
     /// `create`). Needs no pending commit and no modified or deleted files; added files are
     /// kept unless the target has a file at the same path.
     pub async fn switch(&mut self, client: &Client, reference: &str, create: bool) -> Result<Switched> {
         let _lock = self.paths.lock()?;
+        self.check_no_conflict()?;
         if self.state.head.is_some() {
             return Err(Error::PendingCommit);
         }
@@ -669,6 +1001,7 @@ impl WorkingCopy {
         author: Option<(&str, &str)>,
     ) -> Result<MergeOutcome> {
         let _lock = self.paths.lock()?;
+        self.check_no_conflict()?;
         if self.state.head.is_some() {
             return Err(Error::PendingCommit);
         }
@@ -694,7 +1027,6 @@ impl WorkingCopy {
         message: String,
         author: Option<(&str, &str)>,
     ) -> Result<MergeOutcome> {
-        use merge::{Resolution, Step};
         let ours = self
             .state
             .current()?
@@ -714,81 +1046,55 @@ impl WorkingCopy {
             Some(id) => flatten(client, client.root_tree(&id.to_string()).await?, &full).await?,
             None => BTreeMap::new(),
         };
-
-        let mut changes: BTreeMap<String, Resolution> = BTreeMap::new();
-        let mut lines = Vec::new();
-        let mut conflicts = Vec::new();
-        for path in merge::all_paths([&b, &o, &t]) {
-            let (bf, of, tf) = (b.get(path).copied(), o.get(path).copied(), t.get(path).copied());
-            match merge::step(bf, of, tf) {
-                Step::Same => {}
-                Step::Done(r) => {
-                    changes.insert(path.clone(), r);
-                }
-                Step::Conflict(kind) => conflicts.push(MergeConflict {
-                    path: path.clone(),
-                    kind,
-                }),
-                Step::Lines { mode } => lines.push((path.clone(), mode, [bf, of, tf])),
-            }
-        }
-        for part in lines.chunks(FETCH_BATCH / 3) {
-            let ids: Vec<ObjectId> = part
-                .iter()
-                .flat_map(|(_, _, files)| files.iter().flatten().map(|f| f.id))
-                .collect();
-            let mut data = client.get_objects(&ids).await?.into_iter();
-            for (path, mode, _) in part {
-                let (bd, od, td) = (data.next(), data.next(), data.next());
-                let (Some(bd), Some(od), Some(td)) = (bd, od, td) else {
-                    return Err(Error::Corrupt(format!("no content fetched for {path}")));
-                };
-                match merge::merge_lines(&bd, &od, &td) {
-                    Ok(merged) => {
-                        let merged = Bytes::from(merged);
-                        let id = ObjectId::of_blob(&merged);
-                        changes.insert(path.clone(), Resolution::Merged(TreeFile { mode: *mode, id }, merged));
-                    }
-                    Err((kind, _)) => conflicts.push(MergeConflict {
-                        path: path.clone(),
-                        kind,
-                    }),
-                }
-            }
-        }
-        let mut result: std::collections::BTreeSet<String> = o.keys().cloned().collect();
-        for (path, r) in &changes {
-            match r {
-                Resolution::Take(None) => {
-                    result.remove(path);
-                }
-                _ => {
-                    result.insert(path.clone());
-                }
-            }
-        }
-        conflicts.extend(merge::path_clashes(&result).into_iter().map(|path| MergeConflict {
-            path,
-            kind: merge::ConflictKind::Path,
-        }));
-        if !conflicts.is_empty() {
-            conflicts.sort_by(|a, b| a.path.cmp(&b.path));
-            conflicts.dedup_by(|a, b| a.path == b.path);
-            return Err(Error::MergeConflicts(conflicts));
-        }
-
-        // Contents of files taken from theirs, so the merge commit can be created
-        let taken: Vec<(String, TreeFile)> = changes
-            .iter()
-            .filter_map(|(p, r)| match r {
-                Resolution::Take(Some(f)) => Some((p.clone(), *f)),
-                _ => None,
-            })
+        let paths: Vec<String> = merge::all_paths([&b, &o, &t]).into_iter().cloned().collect();
+        let changes: BTreeMap<String, Final> = three_way(client, paths, &b, &o, &t)
+            .await?
+            .into_iter()
+            .filter(|(p, f)| *f != Final::Version(o.get(p).copied()))
             .collect();
+        let sparse = self.sparse()?;
+        let sides = sides_of(&changes);
+        if !sides.is_empty() {
+            // The commit that finishes the merge is made from local files, so every change has
+            // to be inside the checkout
+            if changes.keys().any(|p| !sparse.includes_file(p)) {
+                return Err(Error::MergeConflicts(
+                    changes
+                        .iter()
+                        .filter_map(|(path, f)| match f {
+                            Final::Conflict { kind, .. } => Some(MergeConflict {
+                                path: path.clone(),
+                                kind: *kind,
+                            }),
+                            _ => None,
+                        })
+                        .collect(),
+                ));
+            }
+            let created = self.write_results(client, &changes, &o).await?;
+            let paths: Vec<String> = sides.keys().cloned().collect();
+            self.state.conflict = Some(ConflictState {
+                paths: sides,
+                message: Some(message),
+                author: author.map(|(n, e)| (n.to_owned(), e.to_owned())),
+                merge: Some(theirs.to_string()),
+                created,
+            });
+            self.paths.save_state(&self.state)?;
+            return Err(Error::Conflict(paths));
+        }
+
         let mut builder = client.changeset(Some(ours)).parent(theirs).message(message.clone());
         if let Some((name, email)) = author {
             builder = builder.author(name, email);
         }
+        let taken: Vec<(String, TreeFile)> = changes
+            .iter()
+            .filter_map(|(p, f)| match f {
+                Final::Version(Some(v)) => Some((p.clone(), *v)),
+                _ => None,
+            })
+            .collect();
         for part in taken.chunks(FETCH_BATCH) {
             let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
             for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
@@ -796,18 +1102,19 @@ impl WorkingCopy {
             }
         }
         let mut local = BTreeMap::new();
-        let sparse = self.sparse()?;
-        for (path, r) in changes {
-            let file = match r {
-                Resolution::Take(None) => {
-                    builder = builder.delete(&path);
-                    None
+        for (path, f) in changes {
+            let file = match f {
+                Final::Version(v) => {
+                    if v.is_none() {
+                        builder = builder.delete(&path);
+                    }
+                    v
                 }
-                Resolution::Take(Some(f)) => Some(f),
-                Resolution::Merged(f, data) => {
-                    builder = builder.put_with_mode(&path, f.mode.to_entry(), data);
-                    Some(f)
+                Final::Data(v, data) => {
+                    builder = builder.put_with_mode(&path, v.mode.to_entry(), data);
+                    Some(v)
                 }
+                Final::Conflict { .. } => unreachable!("conflicts returned above"),
             };
             if sparse.includes_file(&path) {
                 local.insert(path, file);
@@ -836,6 +1143,7 @@ impl WorkingCopy {
     /// [`Error::Conflict`]，否则把本地改动基于最新提交重新创建，并把上游改动更新到本地。
     pub async fn sync(&mut self, client: &Client) -> Result<SyncOutcome> {
         let _lock = self.paths.lock()?;
+        self.check_no_conflict()?;
         if !self.changes()?.0.is_clean() {
             return Err(Error::Dirty);
         }
@@ -986,40 +1294,106 @@ impl WorkingCopy {
             None => BTreeMap::new(),
         };
         let mut dirstate = self.paths.load_dirstate()?;
-        let mine = diff(&base_files, &snapshot(&dirstate)?);
-        let theirs = diff(&base_files, &flatten(client, onto_root, &sparse).await?);
-        let conflicts: Vec<String> = mine
-            .iter()
-            .filter(|(p, v)| theirs.get(*p).is_some_and(|t| t != *v))
-            .map(|(p, _)| p.clone())
+        let ours = snapshot(&dirstate)?;
+        let theirs = flatten(client, onto_root, &sparse).await?;
+        let paths: std::collections::BTreeSet<String> = diff(&base_files, &ours)
+            .into_keys()
+            .chain(diff(&base_files, &theirs).into_keys())
             .collect();
-        if !conflicts.is_empty() {
-            return Err(Error::Conflict(conflicts));
+        let finals = three_way(client, paths.iter().cloned(), &base_files, &ours, &theirs).await?;
+        let sides = sides_of(&finals);
+        if !sides.is_empty() {
+            // Stop: the working tree gets the merged result (conflicts with markers) as
+            // uncommitted changes on top of `onto`; `scn resolve` then `scn commit` finish it
+            let changes: BTreeMap<String, Final> = finals
+                .into_iter()
+                .filter(|(p, f)| *f != Final::Version(ours.get(p).copied()))
+                .collect();
+            self.write_results(client, &changes, &ours).await?;
+            for p in &paths {
+                match theirs.get(p) {
+                    Some(f) => {
+                        dirstate.files.insert(p.clone(), record(f.mode, f.id, 0, 0));
+                    }
+                    None => {
+                        dirstate.files.remove(p);
+                    }
+                }
+            }
+            self.paths.save_dirstate(&mut dirstate)?;
+            let conflicted: Vec<String> = sides.keys().cloned().collect();
+            self.state.conflict = Some(ConflictState {
+                paths: sides,
+                message: self.state.head_message.clone(),
+                author: self.state.head_author.clone(),
+                merge: None,
+                created: Vec::new(),
+            });
+            self.clear_head();
+            self.state.base = Some(onto.to_string());
+            self.paths.save_state(&self.state)?;
+            return Err(Error::Conflict(conflicted));
         }
-        // 双方完全相同的改动不必重复提交
-        let mine: BTreeMap<_, _> = mine.into_iter().filter(|(p, _)| !theirs.contains_key(p)).collect();
 
-        let new_head = if mine.is_empty() {
+        // The rebased commit: every result that differs from `onto`
+        let mut delta: BTreeMap<String, Option<TreeFile>> = BTreeMap::new();
+        let mut builder = client
+            .changeset(Some(onto))
+            .message(self.state.head_message.clone().unwrap_or_default());
+        if let Some((name, email)) = &self.state.head_author {
+            builder = builder.author(name.clone(), email.clone());
+        }
+        let mut fetch = Vec::new();
+        for (path, f) in &finals {
+            match f {
+                Final::Version(v) if *v == theirs.get(path).copied() => {}
+                Final::Version(None) => {
+                    builder = builder.delete(path);
+                    delta.insert(path.clone(), None);
+                }
+                Final::Version(Some(v)) => {
+                    if ours.get(path) == Some(v) {
+                        // Our version: the local file has it (the tree is clean)
+                        builder = builder.put_with_mode(
+                            path,
+                            v.mode.to_entry(),
+                            fsutil::read_content(self.root(), path, v.mode)?,
+                        );
+                    } else {
+                        fetch.push((path.clone(), *v));
+                    }
+                    delta.insert(path.clone(), Some(*v));
+                }
+                Final::Data(v, data) => {
+                    builder = builder.put_with_mode(path, v.mode.to_entry(), data.clone());
+                    delta.insert(path.clone(), Some(*v));
+                }
+                Final::Conflict { .. } => unreachable!("conflicts handled above"),
+            }
+        }
+        for part in fetch.chunks(FETCH_BATCH) {
+            let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
+            for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
+                builder = builder.put_with_mode(path, f.mode.to_entry(), data);
+            }
+        }
+        let new_head = if delta.is_empty() {
             None
         } else {
-            let message = self.state.head_message.clone().unwrap_or_default();
-            let mut b = client.changeset(Some(onto)).message(message);
-            if let Some((name, email)) = &self.state.head_author {
-                b = b.author(name.clone(), email.clone());
-            }
-            for (path, change) in &mine {
-                b = match change {
-                    Some(f) => b.put_with_mode(
-                        path,
-                        f.mode.to_entry(),
-                        fsutil::read_content(self.root(), path, f.mode)?,
-                    ),
-                    None => b.delete(path),
-                };
-            }
-            Some(b.create().await?.id)
+            Some(builder.create().await?.id)
         };
-        let (written, removed) = self.apply(client, &mut dirstate, &theirs).await?;
+        let mut target = theirs;
+        for (path, v) in delta {
+            match v {
+                Some(v) => {
+                    target.insert(path, v);
+                }
+                None => {
+                    target.remove(&path);
+                }
+            }
+        }
+        let (written, removed) = self.apply(client, &mut dirstate, &diff(&ours, &target)).await?;
         self.paths.save_dirstate(&mut dirstate)?;
         self.state.base = Some(onto.to_string());
         match new_head {

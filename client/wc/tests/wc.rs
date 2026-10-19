@@ -53,6 +53,7 @@ fn status(added: &[&str], modified: &[&str], deleted: &[&str]) -> Status {
         added: v(added),
         modified: v(modified),
         deleted: v(deleted),
+        conflicted: Vec::new(),
     }
 }
 
@@ -258,11 +259,96 @@ async fn rebase_conflict_reported_and_identical_changes_merge() {
         matches!(&err, Error::Conflict(p) if p == &vec!["shared.txt".to_string()]),
         "{err:?}"
     );
-    // 冲突时本地不变
+    // The working copy moved to the new tip; the file holds conflict markers
+    let marked = std::fs::read_to_string(b_dir.join("shared.txt")).expect("read");
+    assert!(
+        marked.contains("<<<<<<<") && marked.contains("bob") && marked.contains("alice"),
+        "{marked}"
+    );
+    assert_eq!(b.state().base, a.state().base);
+    assert!(b.state().head.is_none());
+    let st = b.status().expect("status");
+    assert_eq!(
+        (st.modified.as_slice(), st.conflicted.as_slice()),
+        (&["shared.txt".to_string()][..], &["shared.txt".to_string()][..])
+    );
+    // Nothing moves on until it is resolved
+    assert!(matches!(b.commit(&c, "", None).await, Err(Error::Unresolved(_))));
+    assert!(matches!(b.sync(&c).await, Err(Error::Unresolved(_))));
+    assert!(matches!(
+        b.resolve(&c, &["shared.txt".into()], None, false).await,
+        Err(Error::MarkersRemain(_))
+    ));
+    assert!(matches!(
+        b.resolve(&c, &["other.txt".into()], None, false).await,
+        Err(Error::NotConflicted(_))
+    ));
+    write(&b_dir, "shared.txt", "alice and bob\n");
+    assert!(
+        b.resolve(&c, &["shared.txt".into()], None, false)
+            .await
+            .expect("resolve")
+            .is_empty()
+    );
+    assert!(matches!(b.resolve(&c, &[".".into()], None, false).await, Ok(r) if r.is_empty()));
+    // Commit without a message reuses the pending commit's
+    b.commit(&c, "", None).await.expect("commit").expect("changes");
+    assert!(b.state().conflict.is_none());
+    b.land(&c).await.expect("land");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!(tip.message, "b");
+    assert!(matches!(
+        b.resolve(&c, &[".".into()], None, false).await,
+        Err(Error::NoConflict)
+    ));
+
+    // Different lines of one file merge cleanly during sync
+    a.sync(&c).await.expect("sync a");
+    write(&a_dir, "lines.txt", "1\n2\n3\n4\n5\n");
+    a.commit(&c, "lines", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    b.sync(&c).await.expect("sync b");
+    write(&a_dir, "lines.txt", "one\n2\n3\n4\n5\n");
+    a.commit(&c, "a lines", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    write(&b_dir, "lines.txt", "1\n2\n3\n4\nfive\n");
+    b.commit(&c, "b lines", None).await.expect("commit");
+    assert!(matches!(b.sync(&c).await, Ok(SyncOutcome::Rebased { .. })));
+    assert_eq!(
+        std::fs::read_to_string(b_dir.join("lines.txt")).expect("read"),
+        "one\n2\n3\n4\nfive\n"
+    );
+    assert!(b.status().expect("status").is_clean());
+    b.land(&c).await.expect("land merged lines");
+
+    // --theirs takes upstream's version; a delete/modify conflict can be resolved by choosing
+    a.sync(&c).await.expect("sync a");
+    write(&a_dir, "shared.txt", "from a\n");
+    write(&a_dir, "lines.txt", "gone soon\n");
+    a.commit(&c, "a again", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    write(&b_dir, "shared.txt", "from b\n");
+    std::fs::remove_file(b_dir.join("lines.txt")).expect("rm");
+    b.commit(&c, "b again", None).await.expect("commit");
+    assert!(matches!(b.sync(&c).await, Err(Error::Conflict(p)) if p.len() == 2));
+    assert_eq!(b.status().expect("status").conflicted, ["lines.txt", "shared.txt"]);
+    let left = b
+        .resolve(&c, &["shared.txt".into()], Some(scion_wc::Side::Theirs), false)
+        .await
+        .expect("theirs");
+    assert_eq!(left, ["lines.txt"]);
     assert_eq!(
         std::fs::read_to_string(b_dir.join("shared.txt")).expect("read"),
-        "bob\n"
+        "from a\n"
     );
+    b.resolve(&c, &["lines.txt".into()], Some(scion_wc::Side::Ours), false)
+        .await
+        .expect("ours: deleted");
+    assert!(!b_dir.join("lines.txt").exists());
+    // The only remaining change is the deletion
+    assert_eq!(b.status().expect("status"), status(&[], &[], &["lines.txt"]));
+    b.commit(&c, "", None).await.expect("commit").expect("changes");
+    b.land(&c).await.expect("land");
 
     // 双方做了完全相同的改动：rebase 后没有剩余改动，直接同步
     let c_dir = tmp.path().join("c");
@@ -930,19 +1016,76 @@ async fn merge_branches() {
     write(&dir, "a.txt", "uno\n2\n3\n4\nfive\n");
     wc.commit(&c, "main edit 2", None).await.expect("commit");
     wc.land(&c).await.expect("land");
-    match wc.merge(&c, "feat", Some("m"), None).await {
-        Err(Error::MergeConflicts(cs)) => {
-            assert_eq!(cs.len(), 1);
-            assert_eq!((cs[0].path.as_str(), cs[0].kind), ("a.txt", ConflictKind::Content));
-        }
-        other => panic!("expected a conflict, got {other:?}"),
-    }
+    // Overlapping edits stop the merge with markers; --abort puts everything back
+    write(&dir, "new-on-feat.txt", "n\n");
+    wc.commit(&c, "noise", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    assert!(matches!(wc.merge(&c, "feat", Some("m"), None).await, Err(Error::Conflict(p)) if p == ["a.txt"]));
+    let st = wc.status().expect("status");
+    assert_eq!(st.conflicted, ["a.txt"]);
+    assert!(
+        std::fs::read_to_string(dir.join("a.txt"))
+            .expect("a")
+            .contains("<<<<<<<")
+    );
+    assert!(matches!(wc.switch(&c, "feat", false).await, Err(Error::Unresolved(_))));
+    wc.abort_merge(&c).await.expect("abort");
     assert!(wc.status().expect("status").is_clean());
-    assert!(matches!(wc.land(&c).await, Err(Error::NothingToLand)));
+    assert!(matches!(wc.abort_merge(&c).await, Err(Error::NoMergeInProgress)));
+    // Again, resolved this time: the commit is a merge commit with the saved message
+    assert!(matches!(
+        wc.merge(&c, "feat", Some("m"), None).await,
+        Err(Error::Conflict(_))
+    ));
+    write(&dir, "a.txt", "uno ONE\n2\n3\n4\nfive\n");
+    wc.resolve(&c, &["a.txt".into()], None, false).await.expect("resolve");
+    wc.commit(&c, "", None).await.expect("commit").expect("changes");
+    wc.land(&c).await.expect("land");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!((tip.parents.len(), tip.message.as_str()), (2, "m"));
+    assert!(matches!(
+        wc.merge(&c, "feat", None, None).await,
+        Ok(MergeOutcome::UpToDate)
+    ));
     assert!(matches!(
         wc.merge(&c, "nope", None, None).await,
         Err(Error::RefNotFound(_))
     ));
+
+    // A file on one side and a directory on the other; theirs' new file is removed by --abort
+    wc.switch(&c, "feat", false).await.expect("feat");
+    write(&dir, "p/q.txt", "dir on feat\n");
+    write(&dir, "added-on-feat.txt", "x\n");
+    wc.commit(&c, "dir", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    wc.switch(&c, "main", false).await.expect("main");
+    write(&dir, "p", "file on main\n");
+    wc.commit(&c, "file", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    match wc.merge(&c, "feat", None, None).await {
+        Err(Error::Conflict(p)) => assert!(p.contains(&"p".to_string()), "{p:?}"),
+        other => panic!("expected a path conflict, got {other:?}"),
+    }
+    assert!(dir.join("added-on-feat.txt").exists());
+    wc.abort_merge(&c).await.expect("abort");
+    assert!(!dir.join("added-on-feat.txt").exists());
+    assert!(wc.status().expect("status").is_clean());
+    // Resolve by force, keeping our side of the path conflict (p stays a file)
+    assert!(wc.merge(&c, "feat", None, None).await.is_err());
+    assert!(
+        wc.resolve(&c, &[".".into()], None, true)
+            .await
+            .expect("force")
+            .is_empty()
+    );
+    assert!(dir.join("p").is_file());
+    wc.commit(&c, "", None).await.expect("commit").expect("changes");
+    // Amending the pending merge keeps it a merge
+    write(&dir, "extra.txt", "e\n");
+    wc.amend(&c, Some("merge feat, amended"), None).await.expect("amend");
+    wc.land(&c).await.expect("land");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!((tip.parents.len(), tip.message.as_str()), (2, "merge feat, amended"));
 }
 
 #[tokio::test]
@@ -992,4 +1135,112 @@ async fn merge_in_a_sparse_checkout_covers_the_whole_tree() {
     assert_eq!(c.read_file(&tip, "a/x.txt").await.expect("a").as_ref(), b"main\n");
     assert_eq!(c.read_file(&tip, "a/z.txt").await.expect("z").as_ref(), b"z\n");
     assert!(sparse_dir.join("a/z.txt").exists());
+
+    // A conflicting merge that also changes files outside the scope cannot be finished here
+    full.sync(&c).await.expect("sync full");
+    full.switch(&c, "feat", false).await.expect("feat");
+    full.sync(&c).await.expect("sync feat");
+    write(&full_dir, "a/x.txt", "feat edit\n");
+    write(&full_dir, "b/w.txt", "outside\n");
+    full.commit(&c, "feat 2", None).await.expect("commit");
+    full.land(&c).await.expect("land feat 2");
+    full.switch(&c, "main", false).await.expect("main");
+    write(&full_dir, "a/x.txt", "main edit\n");
+    full.commit(&c, "main 2", None).await.expect("commit");
+    full.land(&c).await.expect("land main 2");
+    sparse.sync(&c).await.expect("sync sparse");
+    match sparse.merge(&c, "feat", None, None).await {
+        Err(Error::MergeConflicts(cs)) => {
+            assert_eq!((cs[0].path.as_str(), cs[0].kind), ("a/x.txt", ConflictKind::Content))
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(sparse.status().expect("status").is_clean() && sparse.state().conflict.is_none());
+}
+
+#[cfg(unix)]
+fn chmod_x(root: &Path, rel: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(root.join(rel), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn sync_rebases_pending_changes_of_every_kind() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
+        .await
+        .expect("clone");
+    for (f, body) in [
+        ("keep.txt", "k\n"),
+        ("del.txt", "d\n"),
+        ("run.sh", "a\n"),
+        ("shared.txt", "s\n"),
+        ("up.txt", "u\n"),
+    ] {
+        write(&a_dir, f, body);
+    }
+    a.commit(&c, "base", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
+        .await
+        .expect("clone");
+    // Upstream: edits shared.txt, makes run.sh executable, deletes up.txt
+    write(&a_dir, "shared.txt", "s2\n");
+    chmod_x(&a_dir, "run.sh");
+    std::fs::remove_file(a_dir.join("up.txt")).expect("rm");
+    a.commit(&c, "upstream", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    // Pending: adds new.txt, deletes del.txt, edits run.sh's content
+    write(&b_dir, "new.txt", "n\n");
+    std::fs::remove_file(b_dir.join("del.txt")).expect("rm");
+    write(&b_dir, "run.sh", "b\n");
+    b.commit(&c, "mine", None).await.expect("commit");
+    assert!(matches!(b.sync(&c).await, Ok(SyncOutcome::Rebased { .. })));
+    assert!(b.status().expect("status").is_clean());
+    let landed = b.land(&c).await.expect("land").tip.to_string();
+    for (f, want) in [
+        ("shared.txt", "s2\n"),
+        ("run.sh", "b\n"),
+        ("new.txt", "n\n"),
+        ("keep.txt", "k\n"),
+    ] {
+        assert_eq!(c.read_file(&landed, f).await.expect(f).as_ref(), want.as_bytes(), "{f}");
+    }
+    assert!(c.read_file(&landed, "del.txt").await.is_err() && c.read_file(&landed, "up.txt").await.is_err());
+    let run = c.stat(&landed, "run.sh").await.expect("stat");
+    assert_eq!(
+        run.mode,
+        scion_client::EntryMode::Executable,
+        "mode from upstream, content from mine"
+    );
+    assert!(!b_dir.join("up.txt").exists() && !b_dir.join("del.txt").exists());
+
+    // A conflict whose resolution leaves nothing to commit, while upstream also deletes a file
+    a.sync(&c).await.expect("sync a");
+    write(&a_dir, "keep.txt", "from a\n");
+    std::fs::remove_file(a_dir.join("new.txt")).expect("rm");
+    a.commit(&c, "a", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    write(&b_dir, "keep.txt", "from b\n");
+    write(&b_dir, "new.txt", "n2\n");
+    b.commit(&c, "b", None).await.expect("commit");
+    assert!(matches!(b.sync(&c).await, Err(Error::Conflict(p)) if p == ["keep.txt", "new.txt"]));
+    b.resolve(&c, &["keep.txt".into()], Some(scion_wc::Side::Theirs), false)
+        .await
+        .expect("theirs");
+    // Resolved but not committed: other commands still wait
+    write(&b_dir, "x.txt", "stray\n");
+    std::fs::remove_file(b_dir.join("x.txt")).expect("rm");
+    b.resolve(&c, &["new.txt".into()], Some(scion_wc::Side::Theirs), true)
+        .await
+        .expect("theirs: deleted");
+    assert!(!b_dir.join("new.txt").exists());
+    assert!(matches!(b.sync(&c).await, Err(Error::Dirty)));
+    assert!(b.commit(&c, "", None).await.expect("commit").is_none(), "nothing left");
+    assert!(b.state().conflict.is_none());
+    assert!(matches!(b.sync(&c).await, Ok(SyncOutcome::UpToDate)));
 }

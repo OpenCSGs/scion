@@ -31,9 +31,21 @@ pub enum Error {
     /// `uncommit` / `commit --amend` without a pending (committed, not landed) commit.
     #[error("no pending commit; landed commits cannot be changed")]
     NoPendingCommit,
-    /// 本地未合入的改动与 ref 上的新提交改了同样的文件。
-    #[error("conflict: both you and upstream changed {}", .0.join(", "))]
+    /// A sync or merge stopped on conflicts; the files hold conflict markers.
+    #[error("conflict in {}", .0.join(", "))]
     Conflict(Vec<String>),
+    /// Conflicts are not resolved yet.
+    #[error("unresolved conflicts: {}", .0.join(", "))]
+    Unresolved(Vec<String>),
+    #[error("there are no conflicts to resolve")]
+    NoConflict,
+    #[error("{0} is not conflicted")]
+    NotConflicted(String),
+    /// `resolve` on files that still contain conflict markers.
+    #[error("conflict markers remain in {}", .0.join(", "))]
+    MarkersRemain(Vec<String>),
+    #[error("no merge is in progress")]
+    NoMergeInProgress,
     #[error("{0}")]
     Sparse(String),
     /// 稀疏检出范围外出现了文件：提交它们可能覆盖服务端上没有检出的内容。
@@ -76,7 +88,7 @@ mod tests {
         assert_eq!(Error::NothingToLand.to_string(), "nothing to land");
         assert_eq!(
             Error::Conflict(vec!["a".into(), "b".into()]).to_string(),
-            "conflict: both you and upstream changed a, b"
+            "conflict in a, b"
         );
         assert!(Error::RefNotFound("main".into()).to_string().contains("main"));
         assert!(Error::TargetNotEmpty("/d".into()).to_string().contains("not empty"));

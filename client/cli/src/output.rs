@@ -66,7 +66,9 @@ impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
             CliError::Usage(_) | CliError::Wc(scion_wc::Error::Sparse(_)) => EXIT_USAGE,
-            CliError::Wc(scion_wc::Error::Conflict(_) | scion_wc::Error::MergeConflicts(_)) => EXIT_CONFLICT,
+            CliError::Wc(
+                scion_wc::Error::Conflict(_) | scion_wc::Error::MergeConflicts(_) | scion_wc::Error::Unresolved(_),
+            ) => EXIT_CONFLICT,
             CliError::Wc(_) | CliError::Import(_) => EXIT_GENERAL,
             CliError::Client(e) => match e {
                 scion_client::Error::Rpc {
@@ -123,9 +125,15 @@ impl CliError {
                 Some("the git history was rewritten; import into a new ref with --ref")
             }
             CliError::Wc(scion_wc::Error::Conflict(_)) => Some(
-                "both sides changed these files; run `scn land` to let the server merge them, \
-                 or re-apply your change on a fresh `scn clone`",
+                "the files now hold conflict markers: fix them, then `scn resolve PATH` \
+                 (or --ours / --theirs), then `scn commit`; `scn merge --abort` undoes a merge",
             ),
+            CliError::Wc(scion_wc::Error::Unresolved(_)) => {
+                Some("finish the conflicts first: `scn status` lists them, `scn resolve` marks them done")
+            }
+            CliError::Wc(scion_wc::Error::MarkersRemain(_)) => {
+                Some("edit out the <<<<<<< / >>>>>>> sections, or pass --force, --ours or --theirs")
+            }
             _ => None,
         }
     }
@@ -396,6 +404,8 @@ mod tests {
             scion_wc::Error::NoPendingCommit,
             scion_wc::Error::PendingCommit,
             scion_wc::Error::MergeConflicts(vec![]),
+            scion_wc::Error::Unresolved(vec![]),
+            scion_wc::Error::MarkersRemain(vec![]),
         ] {
             assert!(CliError::Wc(e).hint().is_some());
         }

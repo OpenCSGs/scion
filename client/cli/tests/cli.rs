@@ -363,9 +363,40 @@ async fn clone_commit_land_sync_workflow() {
         let out = scn_in(&wc, &["merge", "topic"]);
         assert_eq!(out.status.code(), Some(3), "{out:?}");
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("src/lib.rs (Content)"),
+            String::from_utf8_lossy(&out.stderr).contains("conflict in src/lib.rs"),
             "{out:?}"
         );
+        let out = scn_in(&wc, &["status"]);
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("C src/lib.rs"),
+            "{out:?}"
+        );
+        // Abort, merge again, take theirs, commit without -m (the merge's message), land
+        json_of(&scn_in(&wc, &["merge", "--abort", "--json"]));
+        let v = json_of(&scn_in(&wc, &["status", "--json"]));
+        assert_eq!(v["conflicted"], serde_json::json!([]));
+        assert_eq!(scn_in(&wc, &["merge", "topic"]).status.code(), Some(3));
+        let out = scn_in(&wc, &["resolve", "src/lib.rs"]);
+        assert_eq!(out.status.code(), Some(1), "markers remain: {out:?}");
+        assert_eq!(
+            scn_in(&wc, &["commit", "--author", "Ada <ada@example.com>"])
+                .status
+                .code(),
+            Some(3),
+            "unresolved"
+        );
+        let v = json_of(&scn_in(&wc.join("src"), &["resolve", "lib.rs", "--theirs", "--json"]));
+        assert_eq!(v["remaining"], serde_json::json!([]));
+        assert_eq!(
+            std::fs::read_to_string(wc.join("src/lib.rs")).expect("lib"),
+            "pub fn f() -> u8 { 3 }\n"
+        );
+        json_of(&scn_in(&wc, &["commit", "--json"]));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let log = json_of(&scn_in(&wc, &["log", "-n", "1", "--json"]));
+        assert_eq!(log["entries"][0]["message"], "Merge topic into main");
+        assert_eq!(log["entries"][0]["parents"].as_array().map(Vec::len), Some(2));
+        assert_eq!(scn_in(&wc, &["commit"]).status.code(), Some(2), "-m required again");
 
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(

@@ -66,8 +66,9 @@ enum Command {
     Status,
     /// 把本地改动创建为提交（尚未合入）。
     Commit {
-        /// Required unless --amend (which keeps the old message by default).
-        #[arg(short, long, required_unless_present = "amend")]
+        /// Required, except with --amend (keeps the old message) or when finishing a sync or
+        /// merge that stopped on conflicts (keeps that commit's message).
+        #[arg(short, long)]
         message: Option<String>,
         /// Replace the pending (not yet landed) commit, adding the current local changes.
         #[arg(long)]
@@ -84,13 +85,31 @@ enum Command {
         create: bool,
     },
     /// Merge another branch into this one as a pending merge commit (`scn land` publishes it).
+    /// On conflicts the files get conflict markers; see `scn resolve`.
     Merge {
-        reference: String,
+        /// The branch to merge (not needed with --abort).
+        #[arg(required_unless_present = "abort")]
+        reference: Option<String>,
+        /// Abandon a merge that stopped on conflicts.
+        #[arg(long, conflicts_with_all = ["message", "author"])]
+        abort: bool,
         #[arg(short, long)]
         message: Option<String>,
         /// Author as "Name <email>"; defaults like `scn commit`.
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
+    },
+    /// Mark conflicted files resolved (after editing out the markers), or take one side's
+    /// version. Without PATHS, lists the conflicts. `.` means all.
+    Resolve {
+        paths: Vec<String>,
+        #[arg(long, conflicts_with = "theirs")]
+        ours: bool,
+        #[arg(long)]
+        theirs: bool,
+        /// Accept files that still contain conflict markers.
+        #[arg(long)]
+        force: bool,
     },
     /// Drop the pending (not yet landed) commit; its changes stay as uncommitted local changes.
     Uncommit,
@@ -375,19 +394,40 @@ async fn run(cli: Cli) -> ExitCode {
             author,
         } => emit(commands::amend(&ctx, message.as_deref(), author.as_deref()).await, json),
         Command::Commit { message, author, .. } => emit(
-            commands::commit(&ctx, message.as_deref().unwrap_or_default(), author.as_deref()).await,
+            commands::commit(&ctx, message.as_deref(), author.as_deref()).await,
             json,
         ),
         Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
         Command::Switch { reference, create } => emit(commands::switch(&ctx, &reference, create).await, json),
+        Command::Merge { abort: true, .. } => emit(commands::abort_merge(&ctx).await, json),
         Command::Merge {
             reference,
             message,
             author,
+            ..
         } => emit(
-            commands::merge(&ctx, &reference, message.as_deref(), author.as_deref()).await,
+            commands::merge(
+                &ctx,
+                reference.as_deref().unwrap_or_default(),
+                message.as_deref(),
+                author.as_deref(),
+            )
+            .await,
             json,
         ),
+        Command::Resolve {
+            paths,
+            ours,
+            theirs,
+            force,
+        } => {
+            let side = match (ours, theirs) {
+                (true, _) => Some(scion_wc::Side::Ours),
+                (_, true) => Some(scion_wc::Side::Theirs),
+                _ => None,
+            };
+            emit(commands::resolve(&ctx, &paths, side, force).await, json)
+        }
         Command::Restore { paths } => emit(commands::restore(&ctx, &paths).await, json),
         Command::Config(cmd) => {
             let path = config::path(|k| std::env::var(k).ok());
@@ -546,7 +586,7 @@ mod tests {
         assert!(
             matches!(cli.command, Command::Commit { ref message, amend: false, .. } if message.as_deref() == Some("msg"))
         );
-        assert!(Cli::try_parse_from(["scn", "commit"]).is_err(), "message required");
+        assert!(Cli::try_parse_from(["scn", "commit"]).is_ok(), "checked at run time");
         let cli = Cli::try_parse_from(["scn", "commit", "--amend"]).expect("parse");
         assert!(matches!(
             cli.command,

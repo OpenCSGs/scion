@@ -238,11 +238,14 @@ pub struct StatusOut {
     pub added: Vec<String>,
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
+    /// Paths with unresolved conflicts (see `scn resolve`).
+    pub conflicted: Vec<String>,
 }
 
 impl Render for StatusOut {
     fn text(&self) -> String {
         let mut lines = Vec::new();
+        lines.extend(self.conflicted.iter().map(|p| format!("C {p}")));
         lines.extend(self.added.iter().map(|p| format!("A {p}")));
         lines.extend(self.modified.iter().map(|p| format!("M {p}")));
         lines.extend(self.deleted.iter().map(|p| format!("D {p}")));
@@ -251,6 +254,12 @@ impl Render for StatusOut {
         }
         if let Some(p) = &self.pending {
             lines.push(format!("committed, not landed: {} (run `scn land`)", short(p)));
+        }
+        if !self.conflicted.is_empty() {
+            lines.push(
+                "fix the conflicted files, then `scn resolve PATH` (or --ours / --theirs), then `scn commit`"
+                    .to_owned(),
+            );
         }
         lines.join("\n")
     }
@@ -265,6 +274,7 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
         added: s.added,
         modified: s.modified,
         deleted: s.deleted,
+        conflicted: s.conflicted,
     }
 }
 
@@ -272,6 +282,77 @@ pub fn status(ctx: &Ctx) -> Result<StatusOut, CliError> {
     let wc = WorkingCopy::open(&ctx.cwd)?;
     let s = wc.status()?;
     Ok(status_out(&wc, s))
+}
+
+// ---------- conflicts ----------
+
+#[derive(Debug, Serialize)]
+pub struct ResolveOut {
+    pub schema: &'static str,
+    pub resolved: Vec<String>,
+    /// Paths still unresolved.
+    pub remaining: Vec<String>,
+}
+
+impl Render for ResolveOut {
+    fn text(&self) -> String {
+        if self.remaining.is_empty() {
+            "all conflicts resolved; run `scn commit`".to_owned()
+        } else {
+            format!("still conflicted: {}", self.remaining.join(", "))
+        }
+    }
+}
+
+/// `scn resolve`: paths are relative to the current directory; none lists the conflicts.
+pub async fn resolve(
+    ctx: &Ctx,
+    paths: &[String],
+    side: Option<scion_wc::Side>,
+    force: bool,
+) -> Result<ResolveOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    if paths.is_empty() {
+        let remaining: Vec<String> = match &wc.state().conflict {
+            Some(c) => c.paths.keys().cloned().collect(),
+            None => Vec::new(),
+        };
+        return Ok(ResolveOut {
+            schema: "scion.cli.resolve/v1",
+            resolved: Vec::new(),
+            remaining,
+        });
+    }
+    let rel = wc_relative(wc.root(), &ctx.cwd, paths)?;
+    let before: Vec<String> = match &wc.state().conflict {
+        Some(c) => c.paths.keys().cloned().collect(),
+        None => Vec::new(),
+    };
+    let remaining = wc.resolve(&client, &rel, side, force).await?;
+    Ok(ResolveOut {
+        schema: "scion.cli.resolve/v1",
+        resolved: before.into_iter().filter(|p| !remaining.contains(p)).collect(),
+        remaining,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct AbortOut {
+    pub schema: &'static str,
+}
+
+impl Render for AbortOut {
+    fn text(&self) -> String {
+        "merge aborted; the working copy is back where it was".to_owned()
+    }
+}
+
+pub async fn abort_merge(ctx: &Ctx) -> Result<AbortOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    wc.abort_merge(&client).await?;
+    Ok(AbortOut {
+        schema: "scion.cli.merge-abort/v1",
+    })
 }
 
 // ---------- commit / land / sync ----------
@@ -516,9 +597,24 @@ fn resolve_author(author: Option<&str>) -> Result<Option<(String, String)>, CliE
     })
 }
 
-pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<CommitOut, CliError> {
-    let author = resolve_author(author)?;
+/// `message` may be omitted only when finishing a sync or merge that stopped on conflicts (it
+/// then defaults to that commit's message).
+pub async fn commit(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> Result<CommitOut, CliError> {
+    if let Some(a) = author {
+        parse_author(a)?;
+    }
     let (mut wc, client) = open_wc(ctx).await?;
+    let message = match (message, &wc.state().conflict) {
+        (Some(m), _) => m.to_owned(),
+        (None, Some(_)) => String::new(),
+        (None, None) => return Err(CliError::Usage("a commit message is required (-m)".into())),
+    };
+    let message = message.as_str();
+    // The finished sync or merge keeps its own author unless one is given
+    let author = match (author, &wc.state().conflict) {
+        (None, Some(c)) if c.author.is_some() => None,
+        (a, _) => resolve_author(a)?,
+    };
     let created = wc
         .commit(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
         .await?;
@@ -954,8 +1050,28 @@ mod tests {
             added: vec![],
             modified: vec![],
             deleted: vec![],
+            conflicted: vec![],
         };
         assert_eq!(s.text(), "nothing to commit");
+        let c = StatusOut {
+            conflicted: vec!["x".into()],
+            modified: vec!["x".into()],
+            ..StatusOut {
+                schema: "s",
+                reference: "main".into(),
+                base: None,
+                pending: None,
+                added: vec![],
+                modified: vec![],
+                deleted: vec![],
+                conflicted: vec![],
+            }
+        };
+        assert!(
+            c.text().starts_with("C x\nM x\nfix the conflicted files"),
+            "{}",
+            c.text()
+        );
         let s = StatusOut {
             added: vec!["a".into()],
             modified: vec!["m".into()],
@@ -1115,7 +1231,10 @@ mod tests {
             status(&ctx),
             Err(CliError::Wc(scion_wc::Error::NotAWorkingCopy(_)))
         ));
-        assert!(matches!(commit(&ctx, "m", Some("bad")).await, Err(CliError::Usage(_))));
+        assert!(matches!(
+            commit(&ctx, Some("m"), Some("bad")).await,
+            Err(CliError::Usage(_))
+        ));
         assert!(matches!(
             import_git(&ctx, Path::new("."), "main", "main").await,
             Err(CliError::Usage(_))

@@ -36,6 +36,9 @@ pub struct State {
     /// The other parent when the pending commit is a merge (`scn merge`); kept across rebases.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_merge: Option<String>,
+    /// Set while a sync or merge stopped on conflicts, until the result is committed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictState>,
     /// 稀疏检出的目录；None 为全部检出。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sparse: Option<Vec<String>>,
@@ -53,6 +56,7 @@ impl State {
             head_message: None,
             head_author: None,
             head_merge: None,
+            conflict: None,
             sparse: None,
         }
     }
@@ -66,6 +70,38 @@ impl State {
 fn parse_id(s: &str) -> Result<ObjectId> {
     s.parse()
         .map_err(|e| Error::Corrupt(format!("bad object id {s:?}: {e}")))
+}
+
+/// A sync or merge that stopped on conflicts. Conflicted files hold conflict markers (text) or
+/// our version (everything else); the rest of the result is already in the working tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictState {
+    /// Paths not resolved yet.
+    pub paths: BTreeMap<String, Sides>,
+    /// Message and author for the commit that finishes it (the pending commit's, or the merge's).
+    pub message: Option<String>,
+    pub author: Option<(String, String)>,
+    /// For a merge: the other parent of the commit that finishes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge: Option<String>,
+    /// Files the merge created, which `scn merge --abort` removes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created: Vec<String>,
+}
+
+/// The two versions of a conflicted path (None: that side has no file).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Sides {
+    /// Conflict kind, e.g. `content` or `modify_delete`.
+    pub kind: String,
+    pub ours: Option<Version>,
+    pub theirs: Option<Version>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Version {
+    pub mode: Mode,
+    pub id: String,
 }
 
 /// 一个已检出文件的记录。

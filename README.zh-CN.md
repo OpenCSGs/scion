@@ -175,6 +175,9 @@ scn land                            # 合入 main；main 已前进时由服务�
 scn sync                            # 拉取别人合入的改动；有未合入的提交时自动做文件级 rebase
 scn switch -c feature               # 在当前快照创建分支并切换过去；`scn switch main` 切回
 scn merge feature                   # 把分支合并为一个未合入的合并提交（按行三方合并），之后 `scn land`
+# 冲突时（scn sync 或 scn merge）文件里写入 <<<<<<< / >>>>>>> 标记，`scn status` 显示 C：
+scn resolve src/main.rs             # 去掉标记后标记为已解决；或用 --ours / --theirs 取某一方
+scn commit                          # 完成，沿用原来的提交说明；`scn merge --abort` 放弃合并
 scn cat main:README.md              # 不需要工作副本也能读文件（工作副本外加 --repo）
 scn ls main:                        # 列目录；所有命令都支持 --json
 scn log --path src -n 10            # 历史，从新到旧，可按路径过滤

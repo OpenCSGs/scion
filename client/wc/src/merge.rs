@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bytes::Bytes;
-
 use crate::TreeFile;
 
 /// Files larger than this are not merged line by line.
@@ -20,8 +18,6 @@ pub const MAX_MERGE_BYTES: usize = 8 << 20;
 pub(crate) enum Resolution {
     /// The file from one side (or a three-way merged mode on an unchanged id); None deletes it.
     Take(Option<TreeFile>),
-    /// Line-merged content.
-    Merged(TreeFile, Bytes),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +30,28 @@ pub enum ConflictKind {
     TooLarge,
     Symlink,
     Path,
+}
+
+impl ConflictKind {
+    /// Name used in state files, JSON output and messages.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Content => "content",
+            Self::AddAdd => "add_add",
+            Self::ModifyDelete => "modify_delete",
+            Self::DeleteModify => "delete_modify",
+            Self::Binary => "binary",
+            Self::TooLarge => "too_large",
+            Self::Symlink => "symlink",
+            Self::Path => "path",
+        }
+    }
+}
+
+/// Whether `data` still has conflict markers: a line starting with `<<<<<<<` and one with `>>>>>>>`.
+pub fn has_markers(data: &[u8]) -> bool {
+    let starts = |m: &[u8]| data.split(|b| *b == b'\n').any(|l| l.starts_with(m));
+    starts(b"<<<<<<<") && starts(b">>>>>>>")
 }
 
 /// A path both sides changed in incompatible ways.
@@ -193,6 +211,25 @@ mod tests {
             merge_lines(&big, b"x", b"y").map_err(|e| e.0),
             Err(ConflictKind::TooLarge)
         );
+    }
+
+    #[test]
+    fn markers_and_kind_names() {
+        assert!(has_markers(b"a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\n"));
+        assert!(!has_markers(b"a <<<<<<< not at line start\n>>>>>>> b\n"));
+        assert!(!has_markers(b"<<<<<<< only one side\n"));
+        let kinds = [
+            ConflictKind::Content,
+            ConflictKind::AddAdd,
+            ConflictKind::ModifyDelete,
+            ConflictKind::DeleteModify,
+            ConflictKind::Binary,
+            ConflictKind::TooLarge,
+            ConflictKind::Symlink,
+            ConflictKind::Path,
+        ];
+        let names: std::collections::BTreeSet<_> = kinds.iter().map(|k| k.as_str()).collect();
+        assert_eq!(names.len(), kinds.len());
     }
 
     #[test]

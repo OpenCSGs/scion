@@ -27,7 +27,7 @@
 - [Redaction 与数据校验](docs/guide/redaction.md)：清除泄露的内容（redact、purge）、`scion admin fsck`、`scion admin lease ls`
 
 **设计与规范**
-- 设计文档：[服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md)
+- 设计文档：[服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md) · [路线图](docs/design/roadmap.md)（已规划、暂不做的大任务，例如虚拟化检出）
 - 对象格式规范：[`SPEC.md`](SPEC.md)，golden 测试向量在 [`testdata/vectors/`](testdata/vectors/)
 - 协议：[`proto/scion/v1/`](proto/scion/v1/)
 

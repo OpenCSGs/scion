@@ -1,127 +1,135 @@
-# 路线图：已规划、暂不做的大任务
+# Roadmap: large planned tasks we are not doing yet
 
-这份文档收集**工作量大、但目前不是必需**的任务，避免它们散落在各个设计文档和 PR 讨论里。
+This document collects tasks that are **large but not needed right now**, so they don't get lost across design docs and PR threads.
 
-- **进入条件**：每一项都写明做什么、为什么现在不做、什么时候该做，以及已知的设计要点。
-- **开始实现时**：从这里移到对应的设计文档，开 PR，完成后把这里的条目删掉或标为已完成。
+- **What each entry records**: what the task is, why it waits, when to start it, and the design points we already know.
+- **When work starts**: move the entry into the relevant design doc and open a PR. When it lands, delete the entry here or mark it done.
 
-当前正在做的是**本地开发闭环**：忽略文件、撤销与修改提交、切换分支与合并、本地解决冲突。这些不在本文档里，完成情况见 README 的 Status。
+The current focus is the **local development loop**: ignore files, undoing and amending commits, switching and merging branches, and resolving conflicts locally. That work is not tracked here; see Status in the README.
 
-图例：🔵 已有初步设计，⚪ 只有想法。
-
----
-
-## 1. 客户端
-
-### 1.1 虚拟化检出（`scion-vfs`）🔵
-- **做什么**：工作副本以虚拟文件系统挂载，目录和文件元数据立即可见，文件内容在第一次读取时才下载（`cat`、`sed`、编辑器打开时自动拉取）。
-  - Linux 用 FUSE（`fuser` crate）；
-  - macOS 用 NFSv3 loopback（与 EdenFS 相同，不需要内核扩展），以后可以评估 FSKit；
-  - Windows 用 ProjFS。
-- **现状**：clone 时下载检出范围内的全部文件。范围之外的文件可以用稀疏检出（`scn sparse add`）或 `scn cat` 获取。
-- **为什么现在不做**：工作量最大的单项（每个平台一套实现，加上缓存一致性、写入时转为真实文件、崩溃恢复）。稀疏检出已经覆盖“只要一部分目录”的主要场景。
-- **什么时候做**：出现稀疏检出也解决不了的超大单仓库（百万级文件、开发者不确定要哪些目录），或者 Agent 需要秒级打开任意版本。
-- **设计要点**：
-  - 读取路径复用 daemon 的 L1 缓存和 `GetObjects`；
-  - 写入时把文件转为本地实体文件（copy-on-write），dirstate 只追踪这些文件；
-  - `status` 只需比较实体文件；
-  - 与稀疏检出共用范围定义；
-  - 见[客户端设计文档](rust-client-architecture.md) M7。
-
-### 1.2 文件监听模式的 status 🔵
-- **做什么**：daemon 监听工作副本（Linux inotify / fanotify，macOS FSEvents），`scn status` 直接读变化列表，不再遍历目录。
-- **为什么现在不做**：stat 缓存在几万个文件以内已经足够快（本仓库的 status 几乎不耗时）。
-- **什么时候做**：检出范围内文件超过约 10 万个，或 status 超过 200 ms。
-- **设计要点**：监听丢事件（溢出、daemon 重启）时退回全量扫描；见客户端设计文档 M6。
-
-### 1.3 daemon 托管与指标 ⚪
-- **做什么**：
-  - `scn daemon install` 注册为 systemd user service 或 launchd agent；
-  - daemon 提供 `/metrics`（命中率、缓存大小、回源延迟）。
-- **什么时候做**：发布各平台安装包时一起做（见 3.2）。
-
-### 1.4 SDK 传递 traceparent ⚪
-- **做什么**：SDK 和 CLI 在请求中带上 W3C `traceparent`，把客户端操作和服务端追踪串起来。
-- **什么时候做**：排查客户端到服务端的延迟问题时。
+Legend: 🔵 has an initial design, ⚪ idea only.
 
 ---
 
-## 2. 服务端
+## 1. Client
 
-### 2.1 M5d：YugabyteDB 与档位迁移 🔵
-- **做什么**：
-  - Distributed 档（YugabyteDB）通过同一套 sqlx 代码运行，事务冲突的重试按 Dialect 统一处理；
-  - `scion admin migrate-meta --from … --to …`：SQLite → PostgreSQL → YugabyteDB；
-  - `scion admin blob-sync`：本地文件系统到 S3；
-  - 每晚在 YugabyteDB 上跑 conformance 测试。
-- **为什么现在不做**：单个 PostgreSQL 主库足以承受目前的写入规模（服务端设计文档 §「容量」）。
-- **什么时候做**：需要多 AZ 写入，或单 PG 主库接近写入上限；接入 starhub 的规模变大时。
+### 1.1 Virtualized checkout (`scion-vfs`) 🔵
+- **What**: mount the working copy as a virtual file system.
+  - Directory listings and file metadata appear immediately.
+  - File contents download on first read, so `cat`, `sed` or an editor fetch them automatically.
+- **Platforms**:
+  - Linux: FUSE (`fuser` crate).
+  - macOS: an NFSv3 loopback server, as EdenFS does, which needs no kernel extension. FSKit is worth evaluating later.
+  - Windows: ProjFS.
+- **Today**: `scn clone` downloads every file in the checkout scope. Files outside the scope can be fetched with sparse checkout (`scn sparse add`) or read with `scn cat`.
+- **Why it waits**:
+  - It is the largest single item: one implementation per platform, plus cache coherence, turning files into real files on write, and crash recovery.
+  - Sparse checkout already covers the main use case of only needing part of a repository.
+- **Start when**:
+  - a monorepo is too large even for sparse checkout (millions of files, and developers can't predict which directories they need); or
+  - agents need to open any revision in seconds.
+- **Design points**:
+  - Reads go through the daemon's L1 cache and `GetObjects`.
+  - Writes turn a file into a real local file (copy-on-write). The dirstate tracks only those files, so `status` compares only them.
+  - It shares its scope definition with sparse checkout.
+  - See M7 in the [client design](rust-client-architecture.md).
 
-### 2.2 M5e：生产部署与验证 🔵
-- **做什么**：
-  - Helm chart；
-  - 各平台发布构建（服务端镜像、`scn` 安装包）；
-  - 跨实现的 conformance 套件；
-  - 混沌测试：杀 L2、PG 主备切换、YugabyteDB leader 迁移、AZ 断网、S3 延迟注入；
-  - AZ 故障演练。
-- **什么时候做**：第一次生产部署之前。
+### 1.2 File-watcher status 🔵
+- **What**: the daemon watches the working copy (inotify / fanotify on Linux, FSEvents on macOS), and `scn status` reads the change list instead of walking the tree.
+- **Why it waits**: the stat cache is fast enough up to tens of thousands of files. `status` on this repository takes no measurable time.
+- **Start when**: a checkout scope has more than about 100,000 files, or `status` takes more than 200 ms.
+- **Design points**:
+  - If the watcher loses events (queue overflow, daemon restart), fall back to a full scan.
+  - See M6 in the client design.
 
-### 2.3 通用 Deriver 框架与独立的 deriver 进程 🔵
-- **做什么**：
-  - 把现在分散在合入路径和查询路径里的派生数据（代数、跳表、PathHistory、Blame、GitSha、LastCommitPerEntry、TreeStats）统一成一个框架：声明依赖、按版本失效、批量回填；
-  - 由独立进程跟随合入日志提前计算。
-- **为什么现在不做**：按需计算加缓存已经够快（见 README Performance）。
-- **什么时候做**：派生种类继续增加（LfsPointerIndex、Sha256、PathIndex），或者冷查询的延迟成为问题。
+### 1.3 Daemon service install and metrics ⚪
+- **What**:
+  - `scn daemon install` registers the daemon as a systemd user service or a launchd agent.
+  - The daemon serves `/metrics`: hit rate, cache size, upstream latency.
+- **Start when**: per-platform packages are built (see 2.2).
 
-### 2.4 更多派生数据与查询 ⚪
-- **`PathIndex`**：路径前缀搜索，供“跳转到文件”使用。
-- **`LfsPointerIndex`**：仓库中的 LFS 指针文件（starhub 的 GetRepoLfsPointers）。
-- **`Sha256`**：blob 的 sha256，供 LFS 和 HF 协议使用。
-- **`GetTrees`**：一次返回多层目录树（递归列目录）。
-- **按路径 log 跟踪重命名，blame 跨合并追溯**：现在都只沿第一父提交链，不识别重命名。
-- **LastCommits 的路径游标**：同一代的索引行超过一页时，现在退回扫描（结果正确，只是较慢）。
-
-### 2.5 git 兼容（git-gateway）🔵
-- **做什么**：新角色 `scion git-gateway`，实现 git smart HTTP / SSH（info-refs、upload-pack、receive-pack）。
-  - git 对象由 GitSha 派生数据按需生成；
-  - push 时把 packfile 解析成 changeset，再执行合入。
-- **为什么现在不做**：`scn` 已经覆盖读写；这是工作量最大的服务端任务。
-- **什么时候做**：需要让 git 客户端透明访问 Scion 仓库时（starhub S3 阶段）。见 [starhub 接入设计](starhub-integration.md)。
-
-### 2.6 服务端导入（ImportService）⚪
-- **做什么**：服务端从 git 远端或本地路径增量导入，用于 mirror 和批量迁移。现在的导入在客户端（`scn import git`）。
-- **什么时候做**：starhub S2（存量仓库迁移）。
-
-### 2.7 原生大文件 ⚪
-- **做什么**：
-  - 大文件改为 Scion 原生的分块 blob（按需拉取、全局去重）；
-  - `ExternalBlob` 类型直接引用对象存储中已有的 LFS 对象，迁移时不需要复制数据。
-- **什么时候做**：starhub S4。
-
-### 2.8 仓库管理的扩展 ⚪
-- **仓库配额**：大小、文件数，基于 TreeStats。
-- **仓库级事件**：创建、删除、fork 也进入事件流。
-- **异步 fork**：超大仓库的 fork 改为后台任务。
-
-### 2.9 缓存与多区域 ⚪
-- **冷 ref 自动识别**：长期不访问的 ref 不再预热和预取。
-- **敏感前缀的缓存隔离**：带路径权限的内容不进入共享缓存。
-- **多区域部署**：写入集中到主区域，读取走本区域缓存；需要 Distributed 档。
+### 1.4 traceparent from the SDK ⚪
+- **What**: the SDK and CLI send a W3C `traceparent`, so client operations join the server-side traces.
+- **Start when**: we need to debug latency between clients and the server.
 
 ---
 
-## 3. 集成
+## 2. Server
 
-### 3.1 接入 starhub-server 🔵
-- **Scion 侧（S1）**：已完成，包括仓库管理、外部身份与鉴权、合入前检查、事件、GitSha、LastCommitPerEntry、TreeStats、Archive。
-- **starhub 侧，还没开始**：
-  - `storage_backend` 字段与 `RoutingGitServer`；
-  - Go 适配层；
-  - NATS 消费者；
-  - `pre_land` / `introspect` / `authz` 内部接口；
-  - 两边一起的端到端联调。
-- 分阶段计划见 [starhub 接入设计](starhub-integration.md)。
+### 2.1 M5d: YugabyteDB and moving between tiers 🔵
+- **What**:
+  - Run the Distributed tier (YugabyteDB) on the same sqlx code, with transaction-conflict retries handled per dialect.
+  - `scion admin migrate-meta --from … --to …`: SQLite → PostgreSQL → YugabyteDB.
+  - `scion admin blob-sync`: copy objects from a local file system to S3.
+  - A nightly conformance run on YugabyteDB.
+- **Why it waits**: one PostgreSQL primary handles today's write load (see the capacity section of the server design).
+- **Start when**: we need writes across availability zones, a single PostgreSQL primary nears its write limit, or the starhub deployment grows large.
+
+### 2.2 M5e: production deployment and validation 🔵
+- **What**:
+  - A Helm chart.
+  - Release builds: server images and `scn` packages for each platform.
+  - A conformance suite that runs across implementations.
+  - Chaos tests: kill L2, PostgreSQL failover, YugabyteDB leader moves, availability-zone partitions, injected S3 latency.
+  - An availability-zone failure drill.
+- **Start when**: before the first production deployment.
+
+### 2.3 Deriver framework and a separate deriver process 🔵
+- **What**:
+  - Bring the derived data under one framework that declares dependencies, invalidates by version and backfills in batches. Today it is spread across the land path and the query path: generation, skip list, PathHistory, blame, GitSha, LastCommitPerEntry, TreeStats.
+  - A separate process follows the land log and computes ahead of time.
+- **Why it waits**: computing on demand with caching is fast enough today (see Performance in the README).
+- **Start when**: more kinds of derived data arrive (LfsPointerIndex, Sha256, PathIndex), or cold-query latency becomes a problem.
+
+### 2.4 More derived data and queries ⚪
+- **`PathIndex`**: path-prefix search, for "go to file".
+- **`LfsPointerIndex`**: the LFS pointer files in a repository, for starhub's `GetRepoLfsPointers`.
+- **`Sha256`**: the SHA-256 of each blob, for the LFS and HF protocols.
+- **`GetTrees`**: return several levels of a tree in one call, for recursive listings.
+- **Renames and merges in history**: path log and blame follow only the first-parent chain, and path log does not follow renames. Add rename tracking for path log, and blame through merges.
+- **A path cursor for ListLastCommits**: when one generation fills a whole page of index rows, it currently falls back to a scan. The result is correct, just slower.
+
+### 2.5 Git compatibility (`git-gateway`) 🔵
+- **What**: a new `scion git-gateway` role serving git smart HTTP and SSH (info-refs, upload-pack, receive-pack).
+  - Git objects are produced on demand from the GitSha derived data.
+  - Pushed packfiles are parsed into changesets and landed.
+- **Why it waits**: `scn` already covers reads and writes, and this is the largest server task.
+- **Start when**: git clients need transparent access to Scion repositories (starhub phase S3). See the [starhub integration design](starhub-integration.md).
+
+### 2.6 Server-side import (`ImportService`) ⚪
+- **What**: incremental import from a git remote or a local path, run by the server, for mirrors and bulk migration. Import currently runs in the client (`scn import git`).
+- **Start when**: starhub phase S2 (migrating existing repositories).
+
+### 2.7 Native large files ⚪
+- **What**:
+  - Store large files as Scion-native chunked blobs: fetched on demand, deduplicated globally.
+  - Add an `ExternalBlob` type that points at LFS objects already in object storage, so migration doesn't copy the data.
+- **Start when**: starhub phase S4.
+
+### 2.8 More repository management ⚪
+- **Repository quotas**: size and file count, based on TreeStats.
+- **Repository-level events**: creates, deletes and forks also go into the event feed.
+- **Async fork**: fork very large repositories as a background task.
+
+### 2.9 Caching and multiple regions ⚪
+- **Cold-ref detection**: stop warming and prefetching refs nobody reads.
+- **Isolating sensitive prefixes**: keep content under path-level permissions out of shared caches.
+- **Multi-region deployment**: writes go to the primary region and reads go to regional caches. This needs the Distributed tier.
+
+---
+
+## 3. Integrations
+
+### 3.1 starhub-server 🔵
+- **Scion side (S1)**: done. This covers repository management, external identity and authorization, the pre-land check, events, GitSha, LastCommitPerEntry, TreeStats and Archive.
+- **starhub side, not started**:
+  - a `storage_backend` field and `RoutingGitServer`;
+  - the Go adapter;
+  - the NATS consumer;
+  - the internal `pre_land`, `introspect` and `authz` endpoints;
+  - joint end-to-end tests.
+- The phased plan is in the [starhub integration design](starhub-integration.md).
 
 ### 3.2 CSGLite ⚪
-- **做什么**：CSGLite 内嵌 Lite 档（SQLite + 本地对象）。
-- 见 [starhub 接入设计 §8](starhub-integration.md)。
+- **What**: CSGLite embeds the Lite tier (SQLite plus local objects).
+- See section 8 of the [starhub integration design](starhub-integration.md).

@@ -174,6 +174,7 @@ scn commit --amend                  # 把更多本地改动并入未合入的提
 scn uncommit                        # 撤销未合入的提交，改动保留为本地改动
 scn land                            # 合入 main；main 已前进时由服务端 rebase（三方合并）
 scn sync                            # 拉取别人合入的改动；有未合入的提交时自动做文件级 rebase
+scn tag v1.0                        # 给当前提交打标签；`scn tag` 列出，`scn log v1.0` 直接使用
 scn switch -c feature               # 在当前快照创建分支并切换过去；`scn switch main` 切回
 scn merge feature                   # 把分支合并为一个未合入的合并提交（按行三方合并），之后 `scn land`
 # 冲突时（scn sync 或 scn merge）文件里写入 <<<<<<< / >>>>>>> 标记，`scn status` 显示 C：

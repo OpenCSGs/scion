@@ -79,6 +79,14 @@ enum Command {
         )]
         delete: Option<String>,
     },
+    /// Tags: fixed names for commits. `scn tag` lists, `scn tag NAME [REV]` creates (default
+    /// HEAD), `scn tag -d NAME` deletes. A tag name works as a revision (`scn log v1.0`).
+    Tag {
+        name: Option<String>,
+        revision: Option<String>,
+        #[arg(short = 'd', long = "delete", value_name = "NAME", conflicts_with = "name")]
+        delete: Option<String>,
+    },
     /// 显示本地改动。
     Status,
     /// 把本地改动创建为提交（尚未合入）。
@@ -498,6 +506,11 @@ async fn run(cli: Cli) -> ExitCode {
             (Some(BranchCmd::Rm { name }), _, _) | (None, None, Some(name)) => {
                 emit(repos::delete_branch(&ctx, &name).await, json)
             }
+        },
+        Command::Tag { name, revision, delete } => match (name, delete) {
+            (Some(name), _) => emit(repos::create_tag(&ctx, &name, revision.as_deref()).await, json),
+            (None, Some(name)) => emit(repos::delete_tag(&ctx, &name).await, json),
+            (None, None) => emit(repos::tags(&ctx).await, json),
         },
         Command::Status => emit(commands::status(&ctx), json),
         Command::Commit {

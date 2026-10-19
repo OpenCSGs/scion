@@ -30,6 +30,7 @@
 | `git branch` | `scn branch` (or `scn branch ls`) | |
 | `git branch NAME [REV]` | `scn branch NAME [REV]` (or `scn branch create`) | Branches are server refs. A branch named `ls`, `create` or `rm` needs the `create` form |
 | `git branch -d NAME` / `-D` | `scn branch -d NAME` / `-D` (or `scn branch rm`) | |
+| `git tag`, `git tag NAME [REV]`, `git tag -d NAME` | `scn tag`, `scn tag NAME [REV]`, `scn tag -d NAME` | Lightweight tags only (no messages). Stored as refs `tags/NAME` that the server never moves. A tag name works as a revision (`scn log v1.0`) unless a branch has the same name |
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | Refuses with a pending commit or modified files; added files are carried over |
 | `git merge B` | `scn merge B` | Makes a pending merge commit; `scn land` publishes it |
 | `git merge --abort` | `scn merge --abort` | |
@@ -75,6 +76,7 @@ Other forms, like `reset --hard HEAD~3` or `rebase --abort`, fail with a message
 | Form | Meaning |
 |---|---|
 | `main`, `feature/x` | A branch |
+| `v1.0`, `tags/v1.0` | A tag |
 | `c1…` | A Scion commit id |
 | 40 hex digits | A git SHA. Every commit has one; see [git-sha.md](git-sha.md) |
 | `HEAD`, `@` | The working copy's current commit: the pending one if any, else the synced one |
@@ -86,6 +88,6 @@ Suffixes combine as in git, for example `main~2^2`. A branch whose name literall
 ## Not available yet
 
 - **Working copy**: checking out an old revision, `revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
-- **Queries**: `tag`, `grep`, `bisect`, `reflog`.
+- **Queries**: annotated tags, `grep`, `bisect`, `reflog`.
 - **Collaboration**: `remote`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
 - **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. It drops the pending commit, and its changes stay as local changes on top of the new tip.

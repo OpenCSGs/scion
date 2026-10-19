@@ -824,6 +824,7 @@ fn error_conversions() {
         LandError::Corrupt(_)
     ));
     assert!(validate_ref_name("feature/x").is_ok());
+    assert!(is_tag("tags/v1") && !is_tag("tagsx") && !is_tag("main"));
     assert_eq!(validate_ref_name(""), Err(LandError::InvalidRef(String::new())));
     // 错误信息
     assert_eq!(
@@ -851,6 +852,18 @@ fn with_id<'a>(tip: ObjectId, id: &'a str) -> LandRequest<'a> {
         request_id: Some(id),
         ..req(REPO, "main", tip, false)
     }
+}
+
+#[tokio::test]
+async fn tags_never_take_lands() {
+    let fx = Fx::new().await;
+    let a = fx.commit(&[], &[("f", Some("1"))]).await;
+    let tag = LandError::TagImmutable("tags/v1".into());
+    assert_eq!(fx.lander().land(req(REPO, "tags/v1", a, false)).await, Err(tag.clone()));
+    assert_eq!(
+        coordinator(fx.w.clone()).land(req(REPO, "tags/v1", a, false)).await,
+        Err(tag)
+    );
 }
 
 #[tokio::test]

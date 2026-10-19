@@ -103,11 +103,24 @@ pub(crate) async fn resolve_revision(
     Ok(rec)
 }
 
-/// A revision without suffixes: a changeset id, a ref name, or a git SHA.
+/// A ref by name, else the tag of that name (`v1.0` finds `tags/v1.0`).
+async fn get_ref_or_tag(meta: &dyn MetaStore, repo: &str, name: &str) -> Result<Option<scion_store::RefState>, Status> {
+    if let Some(r) = meta.get_ref(repo, name).await.map_err(status::from_store)? {
+        return Ok(Some(r));
+    }
+    if scion_land::is_tag(name) {
+        return Ok(None);
+    }
+    meta.get_ref(repo, &format!("{}{name}", scion_land::TAG_PREFIX))
+        .await
+        .map_err(status::from_store)
+}
+
+/// A revision without suffixes: a changeset id, a ref name, a tag name, or a git SHA.
 async fn resolve_exact(meta: &dyn MetaStore, repo: &str, revision: &str) -> Result<Option<ChangesetRecord>, Status> {
     let cs_id = match revision.parse::<ObjectId>() {
         Ok(id) if id.kind() == ObjectKind::Changeset => id,
-        _ => match meta.get_ref(repo, revision).await.map_err(status::from_store)? {
+        _ => match get_ref_or_tag(meta, repo, revision).await? {
             Some(r) => r.target,
             // 40 位 git sha
             None => match scion_query::parse_git_sha(revision) {
@@ -215,6 +228,14 @@ mod tests {
         assert_eq!(id("nope~1").await, Err(Code::NotFound));
         let by_id = format!("{}^2", cs(4));
         assert_eq!(resolve_revision(&s, "r", &by_id).await.map(|r| r.id).ok(), Some(cs(3)));
+        // Tag names resolve without the tags/ prefix; a branch of the same name wins
+        s.cas_ref("r", "tags/v1", RefExpect::Absent, cs(2)).await.expect("tag");
+        assert_eq!(id("v1").await, Ok(cs(2)));
+        assert_eq!(id("tags/v1").await, Ok(cs(2)));
+        assert_eq!(id("v1~1").await, Ok(cs(1)));
+        s.cas_ref("r", "v1", RefExpect::Absent, cs(3)).await.expect("branch");
+        assert_eq!(id("v1").await, Ok(cs(3)));
+        assert_eq!(id("tags/nope").await, Err(Code::NotFound));
         // A ref literally named like a suffix wins
         s.cas_ref("r", "main~1", RefExpect::Absent, cs(3)).await.expect("ref");
         assert_eq!(id("main~1").await, Ok(cs(3)));

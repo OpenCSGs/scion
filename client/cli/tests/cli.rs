@@ -90,6 +90,14 @@ fn doctor_invalid_endpoint_exits_1() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// The working copy's current commit, from `scn log`.
+fn head_now(wc: &std::path::Path) -> String {
+    json_of(&scn_in(wc, &["log", "HEAD", "-n", "1", "--json"]))["entries"][0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned()
+}
+
 /// 在指定目录运行 scn。
 fn scn_in(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_scn"))
@@ -503,6 +511,32 @@ async fn clone_commit_land_sync_workflow() {
         assert_eq!(scn_in(&wc, &["rm", "missing.txt"]).status.code(), Some(2));
         assert_eq!(scn_in(&wc, &["mv", "missing.txt", "x"]).status.code(), Some(2));
         json_of(&scn_in(&wc, &["branch", "-d", "legacy", "--json"]));
+
+        // Tags
+        let v = json_of(&scn_in(&wc, &["tag", "v1.0", "--json"]));
+        assert_eq!(
+            (v["name"].as_str(), v["action"].as_str()),
+            (Some("v1.0"), Some("created"))
+        );
+        json_of(&scn_in(&wc, &["tag", "v0.9", "HEAD~1", "--json"]));
+        let v = json_of(&scn_in(&wc, &["tag", "--json"]));
+        let names: Vec<&str> = v["tags"]
+            .as_array()
+            .expect("tags")
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert_eq!(names, ["v0.9", "v1.0"]);
+        assert!(
+            !String::from_utf8_lossy(&scn_in(&wc, &["branch"]).stdout).contains("tags/"),
+            "tags are not branches"
+        );
+        let v = json_of(&scn_in(&wc, &["log", "v1.0", "-n", "1", "--json"]));
+        assert_eq!(v["entries"][0]["id"].as_str(), Some(head_now(&wc).as_str()));
+        assert_eq!(scn_in(&wc, &["tag", "v1.0"]).status.code(), Some(1), "already exists");
+        json_of(&scn_in(&wc, &["tag", "-d", "v0.9", "--json"]));
+        let v = json_of(&scn_in(&wc, &["tag", "--json"]));
+        assert_eq!(v["tags"].as_array().map(Vec::len), Some(1));
 
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(

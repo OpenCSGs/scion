@@ -206,6 +206,9 @@ impl Coordinator {
     /// 合入一个请求，语义与 [`crate::Lander::land`] 相同。
     pub async fn land(&self, req: LandRequest<'_>) -> Result<LandOutcome> {
         validate_ref_name(req.reference)?;
+        if crate::is_tag(req.reference) {
+            return Err(LandError::TagImmutable(req.reference.to_owned()));
+        }
         let meta = self.shared.writer.meta().as_ref();
         if !meta.repo_exists(req.repo).await? {
             return Err(LandError::RepoNotFound(req.repo.to_owned()));

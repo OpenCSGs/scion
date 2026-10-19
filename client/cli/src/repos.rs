@@ -225,6 +225,7 @@ pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
         .list_refs()
         .await?
         .into_iter()
+        .filter(|(name, _, _)| !name.starts_with(TAG_PREFIX))
         .map(|(name, id, version)| BranchOut {
             is_default: name == default,
             name,
@@ -268,9 +269,136 @@ pub async fn delete_branch(ctx: &Ctx, name: &str) -> Result<BranchChangeOut, Cli
     })
 }
 
+/// Tags are refs under this prefix (the server refuses to move them).
+pub const TAG_PREFIX: &str = "tags/";
+
+#[derive(Debug, Serialize)]
+pub struct TagOut {
+    pub name: String,
+    pub changeset: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagListOut {
+    pub schema: &'static str,
+    pub repo: String,
+    pub tags: Vec<TagOut>,
+}
+
+impl Render for TagListOut {
+    fn text(&self) -> String {
+        if self.tags.is_empty() {
+            return format!("no tags in {}", self.repo);
+        }
+        self.tags
+            .iter()
+            .map(|t| format!("{}  {}", t.name, short(&t.changeset)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct TagChangeOut {
+    pub schema: &'static str,
+    pub name: String,
+    /// created | deleted
+    pub action: &'static str,
+    pub changeset: Option<String>,
+}
+
+impl Render for TagChangeOut {
+    fn text(&self) -> String {
+        match &self.changeset {
+            Some(c) => format!("{} tag {} at {}", self.action, self.name, short(c)),
+            None => format!("{} tag {}", self.action, self.name),
+        }
+    }
+}
+
+pub async fn tags(ctx: &Ctx) -> Result<TagListOut, CliError> {
+    let (c, _) = query_client(ctx).await?;
+    let tags = c
+        .list_refs()
+        .await?
+        .into_iter()
+        .filter_map(|(name, id, _)| {
+            name.strip_prefix(TAG_PREFIX).map(|n| TagOut {
+                name: n.to_owned(),
+                changeset: id.to_string(),
+            })
+        })
+        .collect();
+    Ok(TagListOut {
+        schema: "scion.cli.tags/v1",
+        repo: c.repo_name().unwrap_or_default().to_owned(),
+        tags,
+    })
+}
+
+/// `scn tag NAME [REV]`: a fixed name for a commit (default HEAD in a working copy).
+pub async fn create_tag(ctx: &Ctx, name: &str, revision: Option<&str>) -> Result<TagChangeOut, CliError> {
+    let (c, default_rev) = query_client(ctx).await?;
+    let rev = match revision {
+        Some(r) => ctx.expand_rev(r)?,
+        None if ctx.has_working_copy() => ctx.expand_rev("HEAD")?,
+        None => default_rev,
+    };
+    let target = c.resolve_revision(&rev).await?.id;
+    let (target, _) = c.create_ref(&format!("{TAG_PREFIX}{name}"), &target).await?;
+    Ok(TagChangeOut {
+        schema: "scion.cli.tag/v1",
+        name: name.to_owned(),
+        action: "created",
+        changeset: Some(target.to_string()),
+    })
+}
+
+pub async fn delete_tag(ctx: &Ctx, name: &str) -> Result<TagChangeOut, CliError> {
+    let (c, _) = query_client(ctx).await?;
+    c.delete_ref(&format!("{TAG_PREFIX}{name}"), None).await?;
+    Ok(TagChangeOut {
+        schema: "scion.cli.tag/v1",
+        name: name.to_owned(),
+        action: "deleted",
+        changeset: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_texts() {
+        let empty = TagListOut {
+            schema: "s",
+            repo: "r".into(),
+            tags: vec![],
+        };
+        assert_eq!(empty.text(), "no tags in r");
+        let list = TagListOut {
+            tags: vec![TagOut {
+                name: "v1".into(),
+                changeset: "c1abcdefabcdef00".into(),
+            }],
+            ..empty
+        };
+        assert_eq!(list.text(), "v1  c1abcdefabcd");
+        let made = TagChangeOut {
+            schema: "s",
+            name: "v1".into(),
+            action: "created",
+            changeset: Some("c1abcdefabcdef00".into()),
+        };
+        assert_eq!(made.text(), "created tag v1 at c1abcdefabcd");
+        let gone = TagChangeOut {
+            changeset: None,
+            action: "deleted",
+            ..made
+        };
+        assert_eq!(gone.text(), "deleted tag v1");
+    }
 
     fn repo(purge: Option<i64>, fork: Option<&str>, description: &str) -> RepoOut {
         RepoOut {

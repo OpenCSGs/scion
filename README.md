@@ -135,6 +135,7 @@ scn commit --amend                  # fold more local changes into the pending c
 scn uncommit                        # drop the pending commit, keep its changes as local changes
 scn land                            # land on main; if main moved, the server rebases (three-way merge)
 scn sync                            # pull others' changes; rebases a pending commit at file level
+scn tag v1.0                        # tag the current commit; `scn tag` lists, `scn log v1.0` uses it
 scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
 scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`
 # On conflicts (scn sync or scn merge) files get <<<<<<< / >>>>>>> markers and `scn status` shows C:

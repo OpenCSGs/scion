@@ -77,6 +77,9 @@ impl Lander {
             request_id,
         } = req;
         validate_ref_name(reference)?;
+        if crate::is_tag(reference) {
+            return Err(LandError::TagImmutable(reference.to_owned()));
+        }
         let meta = self.writer.meta().as_ref();
         if !meta.repo_exists(repo).await? {
             return Err(LandError::RepoNotFound(repo.to_owned()));

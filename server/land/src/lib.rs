@@ -31,6 +31,9 @@ pub enum LandError {
     RepoNotFound(String),
     #[error("invalid ref name {0:?}")]
     InvalidRef(String),
+    /// Tags (`tags/…`) never move: create them once, delete and recreate to change one.
+    #[error("{0:?} is a tag; tags cannot move")]
+    TagImmutable(String),
     /// 引用的对象（父提交、文件内容、待合入的提交）还没有上传。
     #[error("{} objects not uploaded", .0.len())]
     ObjectsNotUploaded(Vec<ObjectId>),
@@ -128,6 +131,13 @@ impl From<QueryError> for LandError {
             other => Self::Corrupt(other.to_string()),
         }
     }
+}
+
+/// Refs under this prefix are tags: `scn tag v1.0` creates `tags/v1.0`.
+pub const TAG_PREFIX: &str = "tags/";
+
+pub fn is_tag(name: &str) -> bool {
+    name.starts_with(TAG_PREFIX)
 }
 
 /// ref 名规则与路径相同（`main`、`feature/x`），不允许空串、`.`、`..` 等。

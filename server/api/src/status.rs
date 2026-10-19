@@ -212,6 +212,7 @@ pub fn from_land(err: scion_land::LandError) -> Status {
     match err {
         E::RepoNotFound(repo) => repo_not_found(&repo),
         E::InvalidRef(name) => Status::invalid_argument(format!("invalid ref name {name:?}")),
+        e @ E::TagImmutable(_) => Status::failed_precondition(e.to_string()),
         E::ObjectsNotUploaded(ids) => objects_not_uploaded(&ids),
         E::InvalidChangeset { path, message } => invalid_changeset(&path, message),
         E::NotFastForward { tip } => with_reason(
@@ -465,6 +466,10 @@ mod tests {
         let id = ObjectId::hash(scion_object::ObjectKind::Changeset, b"c");
         assert_eq!(from_land(E::RepoNotFound("r".into())).code(), Code::NotFound);
         assert_eq!(from_land(E::InvalidRef("x".into())).code(), Code::InvalidArgument);
+        assert_eq!(
+            from_land(E::TagImmutable("tags/v1".into())).code(),
+            Code::FailedPrecondition
+        );
         assert_eq!(
             from_land(E::ObjectsNotUploaded(vec![id])).code(),
             Code::FailedPrecondition

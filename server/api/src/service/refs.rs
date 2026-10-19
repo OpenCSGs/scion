@@ -237,6 +237,11 @@ impl RefService for RefSvc {
     async fn update_ref(&self, request: Request<UpdateRefRequest>) -> Result<Response<UpdateRefResponse>, Status> {
         let p = principal(&request);
         let req = request.into_inner();
+        if scion_land::is_tag(&req.r#ref) {
+            return Err(status::from_land(scion_land::LandError::TagImmutable(
+                req.r#ref.clone(),
+            )));
+        }
         let target = self.writable(&p, &req.repo, &req.r#ref, &req.changeset_id).await?;
         let expect = match req.expected_version {
             0 => {
@@ -403,6 +408,22 @@ mod tests {
             .expect_err("missing");
         assert_eq!(err.code(), Code::NotFound, "OBJECT_MISSING");
 
+        // Tags can be created and deleted but never moved
+        refs.create_ref(Request::new(create("tags/v1", a.id)))
+            .await
+            .expect("tag");
+        let err = refs
+            .update_ref(Request::new(UpdateRefRequest {
+                repo: REPO.into(),
+                r#ref: "tags/v1".into(),
+                changeset_id: id(b.id),
+                expected_version: 0,
+            }))
+            .await
+            .expect_err("tags never move");
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.message().contains("tag"), "{err:?}");
+
         // 强制回退（不是快进）；带版本时检查版本
         let update = |target: ObjectId, expected_version: u64| UpdateRefRequest {
             repo: REPO.into(),
@@ -471,7 +492,10 @@ mod tests {
             .await
             .expect("list")
             .into_inner();
-        assert_eq!(left.refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["main"]);
+        assert_eq!(
+            left.refs.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["main", "tags/v1"]
+        );
     }
 
     #[tokio::test]

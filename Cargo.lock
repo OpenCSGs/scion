@@ -3615,6 +3615,7 @@ name = "scion-wc"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "diffy",
  "futures",
  "ignore",
  "scion-api",

@@ -7,6 +7,7 @@
 
 mod error;
 mod fsutil;
+mod merge;
 mod sparse;
 mod state;
 
@@ -18,6 +19,7 @@ use scion_client::{Client, CreatedChangeset, Landed};
 use scion_object::{EntryMode, ObjectId, Tree};
 
 pub use error::{Error, Result};
+pub use merge::{ConflictKind, MergeConflict};
 pub use sparse::Sparse;
 pub use state::{DirState, FileRecord, Mode, State};
 
@@ -80,9 +82,31 @@ enum Change {
 
 /// 目录树中的一个文件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TreeFile {
+pub(crate) struct TreeFile {
     mode: Mode,
     id: ObjectId,
+}
+
+/// Result of [`WorkingCopy::merge`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// The other branch has nothing this one lacks.
+    UpToDate,
+    /// A merge commit is pending (`scn land` publishes it); local files were updated.
+    Merged {
+        head: ObjectId,
+        written: usize,
+        removed: usize,
+    },
+}
+
+/// Result of [`WorkingCopy::switch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Switched {
+    /// The new ref's tip; None for a ref on an empty repository.
+    pub tip: Option<ObjectId>,
+    pub written: usize,
+    pub removed: usize,
 }
 
 /// Result of [`WorkingCopy::restore`].
@@ -374,7 +398,7 @@ impl WorkingCopy {
         author: Option<(&str, &str)>,
     ) -> Result<Option<CreatedChangeset>> {
         let _lock = self.paths.lock()?;
-        self.commit_locked(client, message, author).await
+        self.commit_locked(client, message, author, None).await
     }
 
     async fn commit_locked(
@@ -382,12 +406,16 @@ impl WorkingCopy {
         client: &Client,
         message: &str,
         author: Option<(&str, &str)>,
+        merge: Option<ObjectId>,
     ) -> Result<Option<CreatedChangeset>> {
         let (_, changes) = self.changes()?;
         if changes.is_empty() {
             return Ok(None);
         }
         let mut b = client.changeset(self.state.current()?).message(message);
+        if let Some(m) = merge {
+            b = b.parent(m);
+        }
         if let Some((name, email)) = author {
             b = b.author(name, email);
         }
@@ -425,6 +453,7 @@ impl WorkingCopy {
         self.state.head = Some(created.id.to_string());
         self.state.head_message = Some(message.to_owned());
         self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
+        self.state.head_merge = merge.map(|m| m.to_string());
         self.paths.save_state(&self.state)?;
         Ok(Some(created))
     }
@@ -441,9 +470,10 @@ impl WorkingCopy {
         let _lock = self.paths.lock()?;
         let old_message = self.state.head_message.clone().unwrap_or_default();
         let old_author = self.state.head_author.clone();
+        let old_merge = self.head_merge()?;
         self.uncommit_locked(client).await?;
         let author = author.or(old_author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())));
-        self.commit_locked(client, message.unwrap_or(&old_message), author)
+        self.commit_locked(client, message.unwrap_or(&old_message), author, old_merge)
             .await
     }
 
@@ -534,6 +564,16 @@ impl WorkingCopy {
                 .map_err(|e| Error::Corrupt(format!("head: {e}")))?,
             None => return Err(Error::NothingToLand),
         };
+        // The server lands a merge commit only as a fast-forward (it does not rebase merges)
+        if self.state.head_merge.is_some() {
+            let tip = client
+                .resolve_ref(&self.state.reference)
+                .await?
+                .map(|t| t.changeset.to_string());
+            if tip != self.state.base {
+                return Err(Error::MergeBehind(self.state.reference.clone()));
+            }
+        }
         let landed = if self.changes()?.0.is_clean() {
             client.land(&self.state.reference, &head).await?
         } else {
@@ -558,6 +598,236 @@ impl WorkingCopy {
         self.state.head = None;
         self.state.head_message = None;
         self.state.head_author = None;
+        self.state.head_merge = None;
+    }
+
+    fn head_merge(&self) -> Result<Option<ObjectId>> {
+        self.state
+            .head_merge
+            .as_deref()
+            .map(|m| m.parse().map_err(|e| Error::Corrupt(format!("head_merge: {e}"))))
+            .transpose()
+    }
+
+    /// Moves the working copy to another ref (creating it at the current snapshot when
+    /// `create`). Needs no pending commit and no modified or deleted files; added files are
+    /// kept unless the target has a file at the same path.
+    pub async fn switch(&mut self, client: &Client, reference: &str, create: bool) -> Result<Switched> {
+        let _lock = self.paths.lock()?;
+        if self.state.head.is_some() {
+            return Err(Error::PendingCommit);
+        }
+        let (status, _) = self.changes()?;
+        if !status.modified.is_empty() || !status.deleted.is_empty() {
+            return Err(Error::Dirty);
+        }
+        let tip = if create {
+            let from = self
+                .state
+                .current()?
+                .ok_or_else(|| Error::EmptyBranch(self.state.reference.clone()))?;
+            client.create_ref(reference, &from).await?;
+            Some(from)
+        } else {
+            match client.resolve_ref(reference).await? {
+                Some(t) => Some(t.changeset),
+                None => return Err(Error::RefNotFound(reference.to_owned())),
+            }
+        };
+        let target = match tip {
+            Some(t) => flatten(client, client.root_tree(&t.to_string()).await?, &self.sparse()?).await?,
+            None => BTreeMap::new(),
+        };
+        let clash: Vec<String> = status
+            .added
+            .iter()
+            .filter(|p| target.contains_key(*p))
+            .cloned()
+            .collect();
+        if !clash.is_empty() {
+            return Err(Error::WouldOverwrite(clash));
+        }
+        let mut dirstate = self.paths.load_dirstate()?;
+        let delta = diff(&snapshot(&dirstate)?, &target);
+        let (written, removed) = self.apply(client, &mut dirstate, &delta).await?;
+        self.paths.save_dirstate(&mut dirstate)?;
+        self.state.reference = reference.to_owned();
+        self.state.base = tip.map(|t| t.to_string());
+        self.paths.save_state(&self.state)?;
+        Ok(Switched { tip, written, removed })
+    }
+
+    /// Merges `other` (a ref) into the current branch as a pending merge commit with parents
+    /// (current snapshot, other's tip), and updates local files. `scn land` publishes it.
+    /// The merge covers the whole tree, also outside a sparse checkout; conflicts anywhere fail
+    /// it without touching anything.
+    pub async fn merge(
+        &mut self,
+        client: &Client,
+        other: &str,
+        message: Option<&str>,
+        author: Option<(&str, &str)>,
+    ) -> Result<MergeOutcome> {
+        let _lock = self.paths.lock()?;
+        if self.state.head.is_some() {
+            return Err(Error::PendingCommit);
+        }
+        if !self.changes()?.0.is_clean() {
+            return Err(Error::Dirty);
+        }
+        let theirs = client
+            .resolve_ref(other)
+            .await?
+            .ok_or_else(|| Error::RefNotFound(other.to_owned()))?
+            .changeset;
+        let message = message
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("Merge {other} into {}", self.state.reference));
+        self.merge_locked(client, theirs, message, author).await
+    }
+
+    /// Merges commit `theirs` into the current snapshot (no pending commit, clean tree).
+    async fn merge_locked(
+        &mut self,
+        client: &Client,
+        theirs: ObjectId,
+        message: String,
+        author: Option<(&str, &str)>,
+    ) -> Result<MergeOutcome> {
+        use merge::{Resolution, Step};
+        let ours = self
+            .state
+            .current()?
+            .ok_or_else(|| Error::EmptyBranch(self.state.reference.clone()))?;
+        if theirs == ours || client.is_ancestor(&theirs.to_string(), &ours.to_string()).await? {
+            return Ok(MergeOutcome::UpToDate);
+        }
+        let base = client
+            .merge_bases(&ours.to_string(), &theirs.to_string())
+            .await?
+            .first()
+            .copied();
+        let full = Sparse::full();
+        let o = flatten(client, client.root_tree(&ours.to_string()).await?, &full).await?;
+        let t = flatten(client, client.root_tree(&theirs.to_string()).await?, &full).await?;
+        let b = match base {
+            Some(id) => flatten(client, client.root_tree(&id.to_string()).await?, &full).await?,
+            None => BTreeMap::new(),
+        };
+
+        let mut changes: BTreeMap<String, Resolution> = BTreeMap::new();
+        let mut lines = Vec::new();
+        let mut conflicts = Vec::new();
+        for path in merge::all_paths([&b, &o, &t]) {
+            let (bf, of, tf) = (b.get(path).copied(), o.get(path).copied(), t.get(path).copied());
+            match merge::step(bf, of, tf) {
+                Step::Same => {}
+                Step::Done(r) => {
+                    changes.insert(path.clone(), r);
+                }
+                Step::Conflict(kind) => conflicts.push(MergeConflict {
+                    path: path.clone(),
+                    kind,
+                }),
+                Step::Lines { mode } => lines.push((path.clone(), mode, [bf, of, tf])),
+            }
+        }
+        for part in lines.chunks(FETCH_BATCH / 3) {
+            let ids: Vec<ObjectId> = part
+                .iter()
+                .flat_map(|(_, _, files)| files.iter().flatten().map(|f| f.id))
+                .collect();
+            let mut data = client.get_objects(&ids).await?.into_iter();
+            for (path, mode, _) in part {
+                let (bd, od, td) = (data.next(), data.next(), data.next());
+                let (Some(bd), Some(od), Some(td)) = (bd, od, td) else {
+                    return Err(Error::Corrupt(format!("no content fetched for {path}")));
+                };
+                match merge::merge_lines(&bd, &od, &td) {
+                    Ok(merged) => {
+                        let merged = Bytes::from(merged);
+                        let id = ObjectId::of_blob(&merged);
+                        changes.insert(path.clone(), Resolution::Merged(TreeFile { mode: *mode, id }, merged));
+                    }
+                    Err((kind, _)) => conflicts.push(MergeConflict {
+                        path: path.clone(),
+                        kind,
+                    }),
+                }
+            }
+        }
+        let mut result: std::collections::BTreeSet<String> = o.keys().cloned().collect();
+        for (path, r) in &changes {
+            match r {
+                Resolution::Take(None) => {
+                    result.remove(path);
+                }
+                _ => {
+                    result.insert(path.clone());
+                }
+            }
+        }
+        conflicts.extend(merge::path_clashes(&result).into_iter().map(|path| MergeConflict {
+            path,
+            kind: merge::ConflictKind::Path,
+        }));
+        if !conflicts.is_empty() {
+            conflicts.sort_by(|a, b| a.path.cmp(&b.path));
+            conflicts.dedup_by(|a, b| a.path == b.path);
+            return Err(Error::MergeConflicts(conflicts));
+        }
+
+        // Contents of files taken from theirs, so the merge commit can be created
+        let taken: Vec<(String, TreeFile)> = changes
+            .iter()
+            .filter_map(|(p, r)| match r {
+                Resolution::Take(Some(f)) => Some((p.clone(), *f)),
+                _ => None,
+            })
+            .collect();
+        let mut builder = client.changeset(Some(ours)).parent(theirs).message(message.clone());
+        if let Some((name, email)) = author {
+            builder = builder.author(name, email);
+        }
+        for part in taken.chunks(FETCH_BATCH) {
+            let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
+            for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
+                builder = builder.put_with_mode(path, f.mode.to_entry(), data);
+            }
+        }
+        let mut local = BTreeMap::new();
+        let sparse = self.sparse()?;
+        for (path, r) in changes {
+            let file = match r {
+                Resolution::Take(None) => {
+                    builder = builder.delete(&path);
+                    None
+                }
+                Resolution::Take(Some(f)) => Some(f),
+                Resolution::Merged(f, data) => {
+                    builder = builder.put_with_mode(&path, f.mode.to_entry(), data);
+                    Some(f)
+                }
+            };
+            if sparse.includes_file(&path) {
+                local.insert(path, file);
+            }
+        }
+        let created = builder.create().await?;
+
+        let mut dirstate = self.paths.load_dirstate()?;
+        let (written, removed) = self.apply(client, &mut dirstate, &local).await?;
+        self.paths.save_dirstate(&mut dirstate)?;
+        self.state.head = Some(created.id.to_string());
+        self.state.head_message = Some(message);
+        self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
+        self.state.head_merge = Some(theirs.to_string());
+        self.paths.save_state(&self.state)?;
+        Ok(MergeOutcome::Merged {
+            head: created.id,
+            written,
+            removed,
+        })
     }
 
     /// 更新到 ref 的最新提交。要求本地没有未提交的改动。
@@ -578,6 +848,9 @@ impl WorkingCopy {
         if self.state.head.is_some() {
             if self.state.base.as_deref() == Some(tip.changeset.to_string().as_str()) {
                 return Ok(SyncOutcome::UpToDate);
+            }
+            if let Some(theirs) = self.head_merge()? {
+                return self.redo_merge(client, tip.changeset, tip.root_tree, theirs).await;
             }
             return self.rebase(client, tip.changeset, tip.root_tree).await;
         }
@@ -656,6 +929,53 @@ impl WorkingCopy {
             }
         }
         Ok(())
+    }
+
+    /// A pending merge on an old base is not rebased file by file (that would only cover the
+    /// sparse scope and silently drop the other branch's changes outside it). Instead the
+    /// working copy moves to the new tip and the merge is computed again over the whole tree.
+    /// If it now conflicts, the working copy stays at the tip without the merge.
+    async fn redo_merge(
+        &mut self,
+        client: &Client,
+        onto: ObjectId,
+        onto_root: ObjectId,
+        theirs: ObjectId,
+    ) -> Result<SyncOutcome> {
+        let message = self.state.head_message.clone().unwrap_or_default();
+        let author = self.state.head_author.clone();
+        let target = flatten(client, onto_root, &self.sparse()?).await?;
+        let mut dirstate = self.paths.load_dirstate()?;
+        let delta = diff(&snapshot(&dirstate)?, &target);
+        let (mut written, mut removed) = self.apply(client, &mut dirstate, &delta).await?;
+        self.paths.save_dirstate(&mut dirstate)?;
+        self.clear_head();
+        self.state.base = Some(onto.to_string());
+        self.paths.save_state(&self.state)?;
+        let author = author.as_ref().map(|(n, e)| (n.as_str(), e.as_str()));
+        match self.merge_locked(client, theirs, message, author).await? {
+            MergeOutcome::Merged {
+                head,
+                written: w,
+                removed: r,
+            } => {
+                written += w;
+                removed += r;
+                Ok(SyncOutcome::Rebased {
+                    onto,
+                    head,
+                    written,
+                    removed,
+                })
+            }
+            // Someone else already merged it
+            MergeOutcome::UpToDate => Ok(SyncOutcome::Updated {
+                from: None,
+                to: onto,
+                written,
+                removed,
+            }),
+        }
     }
 
     async fn rebase(&mut self, client: &Client, onto: ObjectId, onto_root: ObjectId) -> Result<SyncOutcome> {

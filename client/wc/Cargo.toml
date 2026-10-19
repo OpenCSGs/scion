@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+diffy.workspace = true
 bytes.workspace = true
 scion-client.workspace = true
 scion-object.workspace = true

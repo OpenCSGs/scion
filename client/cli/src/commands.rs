@@ -404,8 +404,103 @@ fn wc_relative(root: &Path, cwd: &Path, paths: &[String]) -> Result<Vec<String>,
         .collect()
 }
 
-pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<CommitOut, CliError> {
-    let author = match author {
+#[derive(Debug, Serialize)]
+pub struct SwitchOut {
+    pub schema: &'static str,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub created: bool,
+    pub tip: Option<String>,
+    pub written: usize,
+    pub removed: usize,
+}
+
+impl Render for SwitchOut {
+    fn text(&self) -> String {
+        let verb = if self.created {
+            "created and switched to"
+        } else {
+            "switched to"
+        };
+        match &self.tip {
+            Some(t) => format!(
+                "{verb} {} at {} ({} written, {} removed)",
+                self.reference,
+                short(t),
+                self.written,
+                self.removed
+            ),
+            None => format!("{verb} {}", self.reference),
+        }
+    }
+}
+
+pub async fn switch(ctx: &Ctx, reference: &str, create: bool) -> Result<SwitchOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    let s = wc.switch(&client, reference, create).await?;
+    Ok(SwitchOut {
+        schema: "scion.cli.switch/v1",
+        reference: reference.to_owned(),
+        created: create,
+        tip: s.tip.map(|t| t.to_string()),
+        written: s.written,
+        removed: s.removed,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct MergeOut {
+    pub schema: &'static str,
+    /// The pending merge commit; None when already up to date.
+    pub changeset: Option<String>,
+    pub written: usize,
+    pub removed: usize,
+}
+
+impl Render for MergeOut {
+    fn text(&self) -> String {
+        match &self.changeset {
+            Some(c) => format!(
+                "merged as {} ({} written, {} removed; run `scn land` to publish)",
+                short(c),
+                self.written,
+                self.removed
+            ),
+            None => "already up to date".to_owned(),
+        }
+    }
+}
+
+pub async fn merge(ctx: &Ctx, other: &str, message: Option<&str>, author: Option<&str>) -> Result<MergeOut, CliError> {
+    let author = resolve_author(author)?;
+    let (mut wc, client) = open_wc(ctx).await?;
+    let o = wc
+        .merge(
+            &client,
+            other,
+            message,
+            author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())),
+        )
+        .await?;
+    Ok(match o {
+        scion_wc::MergeOutcome::UpToDate => MergeOut {
+            schema: "scion.cli.merge/v1",
+            changeset: None,
+            written: 0,
+            removed: 0,
+        },
+        scion_wc::MergeOutcome::Merged { head, written, removed } => MergeOut {
+            schema: "scion.cli.merge/v1",
+            changeset: Some(head.to_string()),
+            written,
+            removed,
+        },
+    })
+}
+
+/// `--author`, else the configured author (scn config, then git); a hint when there is none.
+fn resolve_author(author: Option<&str>) -> Result<Option<(String, String)>, CliError> {
+    Ok(match author {
         Some(a) => Some(parse_author(a)?),
         None => {
             let settings = crate::config::load(&crate::config::path(|k| std::env::var(k).ok()))?;
@@ -418,7 +513,11 @@ pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<Co
             }
             found
         }
-    };
+    })
+}
+
+pub async fn commit(ctx: &Ctx, message: &str, author: Option<&str>) -> Result<CommitOut, CliError> {
+    let author = resolve_author(author)?;
     let (mut wc, client) = open_wc(ctx).await?;
     let created = wc
         .commit(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))

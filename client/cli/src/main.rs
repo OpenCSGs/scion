@@ -77,6 +77,21 @@ enum Command {
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
     },
+    /// Move the working copy to another branch (-c creates it at the current snapshot).
+    Switch {
+        reference: String,
+        #[arg(short = 'c', long)]
+        create: bool,
+    },
+    /// Merge another branch into this one as a pending merge commit (`scn land` publishes it).
+    Merge {
+        reference: String,
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Author as "Name <email>"; defaults like `scn commit`.
+        #[arg(long, env = "SCION_AUTHOR")]
+        author: Option<String>,
+    },
     /// Drop the pending (not yet landed) commit; its changes stay as uncommitted local changes.
     Uncommit,
     /// Discard local changes to tracked files under PATHS (`.` for everything). Added files are kept.
@@ -364,6 +379,15 @@ async fn run(cli: Cli) -> ExitCode {
             json,
         ),
         Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
+        Command::Switch { reference, create } => emit(commands::switch(&ctx, &reference, create).await, json),
+        Command::Merge {
+            reference,
+            message,
+            author,
+        } => emit(
+            commands::merge(&ctx, &reference, message.as_deref(), author.as_deref()).await,
+            json,
+        ),
         Command::Restore { paths } => emit(commands::restore(&ctx, &paths).await, json),
         Command::Config(cmd) => {
             let path = config::path(|k| std::env::var(k).ok());

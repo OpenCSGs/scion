@@ -66,7 +66,7 @@ impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
             CliError::Usage(_) | CliError::Wc(scion_wc::Error::Sparse(_)) => EXIT_USAGE,
-            CliError::Wc(scion_wc::Error::Conflict(_)) => EXIT_CONFLICT,
+            CliError::Wc(scion_wc::Error::Conflict(_) | scion_wc::Error::MergeConflicts(_)) => EXIT_CONFLICT,
             CliError::Wc(_) | CliError::Import(_) => EXIT_GENERAL,
             CliError::Client(e) => match e {
                 scion_client::Error::Rpc {
@@ -112,6 +112,10 @@ impl CliError {
             CliError::Wc(scion_wc::Error::Dirty) => Some("run `scn commit -m <message>` first"),
             CliError::Wc(scion_wc::Error::NothingToLand) => Some("run `scn commit -m <message>` first"),
             CliError::Wc(scion_wc::Error::NotAWorkingCopy(_)) => Some("run `scn clone <repo>` first, or pass --repo"),
+            CliError::Wc(scion_wc::Error::PendingCommit) => Some("run `scn land` or `scn uncommit` first"),
+            CliError::Wc(scion_wc::Error::MergeConflicts(_)) => {
+                Some("nothing was changed; resolve the overlap on one branch (or merge the other way) and merge again")
+            }
             CliError::Wc(scion_wc::Error::NoPendingCommit) => {
                 Some("only a commit made with `scn commit` and not yet landed can be changed")
             }
@@ -334,6 +338,10 @@ mod tests {
             EXIT_CONFLICT
         );
         assert_eq!(CliError::Wc(scion_wc::Error::Dirty).exit_code(), EXIT_GENERAL);
+        assert_eq!(
+            CliError::Wc(scion_wc::Error::MergeConflicts(vec![])).exit_code(),
+            EXIT_CONFLICT
+        );
         assert_eq!(CliError::Usage("x".into()).exit_code(), EXIT_USAGE);
     }
 
@@ -386,6 +394,8 @@ mod tests {
             scion_wc::Error::NotAWorkingCopy("/x".into()),
             scion_wc::Error::Conflict(vec!["a".into()]),
             scion_wc::Error::NoPendingCommit,
+            scion_wc::Error::PendingCommit,
+            scion_wc::Error::MergeConflicts(vec![]),
         ] {
             assert!(CliError::Wc(e).hint().is_some());
         }

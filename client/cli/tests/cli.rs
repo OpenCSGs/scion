@@ -326,6 +326,47 @@ async fn clone_commit_land_sync_workflow() {
             "{out:?}"
         );
 
+        // switch -c / merge, including a conflict (exit code 3)
+        let v = json_of(&scn_in(&wc, &["switch", "-c", "topic", "--json"]));
+        assert_eq!((v["ref"].as_str(), v["created"].as_bool()), (Some("topic"), Some(true)));
+        std::fs::write(wc.join("topic.txt"), "t").expect("write");
+        std::fs::write(wc.join("src/lib.rs"), "pub fn f() -> u8 { 2 }\n").expect("edit");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "topic", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let v = json_of(&scn_in(&wc, &["switch", "main", "--json"]));
+        assert_eq!(v["removed"], 1);
+        let v = json_of(&scn_in(
+            &wc,
+            &["merge", "topic", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        assert!(v["changeset"].is_string());
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let out = scn_in(&wc, &["merge", "topic"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "already up to date");
+        json_of(&scn_in(&wc, &["switch", "topic", "--json"]));
+        std::fs::write(wc.join("src/lib.rs"), "pub fn f() -> u8 { 3 }\n").expect("edit");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "t3", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        json_of(&scn_in(&wc, &["switch", "main", "--json"]));
+        std::fs::write(wc.join("src/lib.rs"), "pub fn f() -> u8 { 4 }\n").expect("edit");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "m4", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let out = scn_in(&wc, &["merge", "topic"]);
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("src/lib.rs (Content)"),
+            "{out:?}"
+        );
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

@@ -7,7 +7,7 @@ use scion_api::{App, ServerConfig, serve};
 use scion_client::Client;
 use scion_proto::v1::ErrorReason;
 use scion_store::{MemStore, MetaStore};
-use scion_wc::{Error, Sparse, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{ConflictKind, Error, MergeOutcome, Sparse, Status, SyncOutcome, WorkingCopy};
 use tokio::net::TcpListener;
 
 struct Server {
@@ -808,4 +808,188 @@ async fn uncommit_and_amend_rewrite_the_pending_commit() {
     assert!(wc.amend(&c, Some("renamed"), None).await.expect("amend").is_none());
     assert!(wc.status().expect("status").is_clean());
     assert!(matches!(wc.land(&c).await, Err(Error::NothingToLand)));
+}
+
+#[tokio::test]
+async fn switch_between_branches() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
+        .await
+        .expect("clone");
+    assert!(matches!(wc.switch(&c, "feat", true).await, Err(Error::EmptyBranch(_))));
+    write(&dir, "a.txt", "main\n");
+    wc.commit(&c, "init", None).await.expect("commit");
+    assert!(matches!(wc.switch(&c, "feat", true).await, Err(Error::PendingCommit)));
+    wc.land(&c).await.expect("land");
+
+    // Create feat at the current snapshot, change it there
+    let s = wc.switch(&c, "feat", true).await.expect("create feat");
+    assert_eq!((s.written, s.removed), (0, 0));
+    assert_eq!(wc.state().reference, "feat");
+    write(&dir, "f.txt", "feature\n");
+    wc.commit(&c, "feature", None).await.expect("commit");
+    wc.land(&c).await.expect("land on feat");
+    assert!(c.resolve_ref("main").await.expect("main").is_some());
+
+    // Back to main: f.txt goes away, an untracked file is carried along
+    write(&dir, "notes.txt", "mine\n");
+    let s = wc.switch(&c, "main", false).await.expect("switch");
+    assert_eq!((s.written, s.removed), (0, 1));
+    assert!(!dir.join("f.txt").exists());
+    assert_eq!(wc.status().expect("status"), status(&["notes.txt"], &[], &[]));
+    // An untracked file where the target has one is not overwritten
+    write(&dir, "f.txt", "local\n");
+    assert!(matches!(wc.switch(&c, "feat", false).await, Err(Error::WouldOverwrite(p)) if p == ["f.txt"]));
+    std::fs::remove_file(dir.join("f.txt")).expect("rm");
+    write(&dir, "a.txt", "edited\n");
+    assert!(matches!(wc.switch(&c, "feat", false).await, Err(Error::Dirty)));
+    write(&dir, "a.txt", "main\n");
+    assert!(matches!(wc.switch(&c, "nope", false).await, Err(Error::RefNotFound(r)) if r == "nope"));
+    wc.switch(&c, "feat", false).await.expect("switch to feat");
+    assert_eq!(std::fs::read_to_string(dir.join("f.txt")).expect("f"), "feature\n");
+}
+
+#[tokio::test]
+async fn merge_branches() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let other_dir = tmp.path().join("other");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&dir, "a.txt", "1\n2\n3\n4\n5\n");
+    write(&dir, "c.txt", "c\n");
+    wc.commit(&c, "init", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    wc.switch(&c, "feat", true).await.expect("feat");
+    write(&dir, "a.txt", "one\n2\n3\n4\n5\n");
+    write(&dir, "f.txt", "feature\n");
+    std::fs::remove_file(dir.join("c.txt")).expect("rm");
+    wc.commit(&c, "feature", None).await.expect("commit");
+    wc.land(&c).await.expect("land feat");
+    wc.switch(&c, "main", false).await.expect("main");
+    write(&dir, "a.txt", "1\n2\n3\n4\nfive\n");
+    wc.commit(&c, "main edit", None).await.expect("commit");
+    wc.land(&c).await.expect("land main");
+
+    // A clean merge: lines from both sides, theirs' new and deleted files
+    let MergeOutcome::Merged { head, .. } = wc
+        .merge(&c, "feat", None, Some(("Ada", "ada@example.com")))
+        .await
+        .expect("merge")
+    else {
+        panic!("expected a merge commit");
+    };
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a.txt")).expect("a"),
+        "one\n2\n3\n4\nfive\n"
+    );
+    assert!(dir.join("f.txt").exists() && !dir.join("c.txt").exists());
+    assert!(wc.status().expect("status").is_clean());
+    assert!(matches!(
+        wc.merge(&c, "feat", None, None).await,
+        Err(Error::PendingCommit)
+    ));
+
+    // main moved after the merge: land refuses, sync redoes the merge on top, keeping both parents
+    let mut other = WorkingCopy::clone(&c, &srv.url, "mono", "main", &other_dir, Sparse::full())
+        .await
+        .expect("clone other");
+    write(&other_dir, "o.txt", "other\n");
+    other.commit(&c, "other", None).await.expect("commit");
+    other.land(&c).await.expect("land other");
+    assert!(matches!(wc.land(&c).await, Err(Error::MergeBehind(r)) if r == "main"));
+    let SyncOutcome::Rebased { head: rebased, .. } = wc.sync(&c).await.expect("sync") else {
+        panic!("expected a rebase");
+    };
+    assert_ne!(rebased, head);
+    let landed = wc.land(&c).await.expect("land merge");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    assert_eq!(tip.id, landed.tip);
+    assert_eq!(tip.parents.len(), 2, "still a merge commit");
+    assert_eq!(tip.message, "Merge feat into main");
+    assert_eq!(tip.author.name, "Ada");
+    let feat_tip = c.resolve_ref("feat").await.expect("feat").expect("tip").changeset;
+    assert_eq!(tip.parents[1], feat_tip);
+    assert!(matches!(
+        wc.merge(&c, "feat", None, None).await,
+        Ok(MergeOutcome::UpToDate)
+    ));
+
+    // Overlapping edits conflict and change nothing
+    wc.switch(&c, "feat", false).await.expect("feat");
+    write(&dir, "a.txt", "ONE\n2\n3\n4\n5\n");
+    wc.commit(&c, "feat edit", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    wc.switch(&c, "main", false).await.expect("main");
+    write(&dir, "a.txt", "uno\n2\n3\n4\nfive\n");
+    wc.commit(&c, "main edit 2", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    match wc.merge(&c, "feat", Some("m"), None).await {
+        Err(Error::MergeConflicts(cs)) => {
+            assert_eq!(cs.len(), 1);
+            assert_eq!((cs[0].path.as_str(), cs[0].kind), ("a.txt", ConflictKind::Content));
+        }
+        other => panic!("expected a conflict, got {other:?}"),
+    }
+    assert!(wc.status().expect("status").is_clean());
+    assert!(matches!(wc.land(&c).await, Err(Error::NothingToLand)));
+    assert!(matches!(
+        wc.merge(&c, "nope", None, None).await,
+        Err(Error::RefNotFound(_))
+    ));
+}
+
+#[tokio::test]
+async fn merge_in_a_sparse_checkout_covers_the_whole_tree() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (full_dir, sparse_dir) = (tmp.path().join("full"), tmp.path().join("sparse"));
+    let mut full = WorkingCopy::clone(&c, &srv.url, "mono", "main", &full_dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&full_dir, "a/x.txt", "x\n");
+    write(&full_dir, "b/y.txt", "y\n");
+    full.commit(&c, "init", None).await.expect("commit");
+    full.land(&c).await.expect("land");
+    // feat changes b/, outside the sparse scope used below
+    full.switch(&c, "feat", true).await.expect("feat");
+    write(&full_dir, "b/y.txt", "feature\n");
+    full.commit(&c, "feat", None).await.expect("commit");
+    full.land(&c).await.expect("land feat");
+    full.switch(&c, "main", false).await.expect("main");
+
+    let mut sparse = WorkingCopy::clone(
+        &c,
+        &srv.url,
+        "mono",
+        "main",
+        &sparse_dir,
+        Sparse::dirs(&["a"]).expect("dirs"),
+    )
+    .await
+    .expect("sparse clone");
+    write(&full_dir, "a/x.txt", "main\n");
+    full.commit(&c, "main", None).await.expect("commit");
+    full.land(&c).await.expect("land main");
+    sparse.sync(&c).await.expect("sync");
+    sparse.merge(&c, "feat", None, None).await.expect("merge");
+    assert!(!sparse_dir.join("b").exists(), "nothing written outside the scope");
+    // main moves again: sync redoes the merge over the whole tree
+    write(&full_dir, "a/z.txt", "z\n");
+    full.commit(&c, "more", None).await.expect("commit");
+    full.land(&c).await.expect("land more");
+    assert!(matches!(sparse.sync(&c).await, Ok(SyncOutcome::Rebased { .. })));
+    let landed = sparse.land(&c).await.expect("land merge");
+    let tip = landed.tip.to_string();
+    assert_eq!(c.read_file(&tip, "b/y.txt").await.expect("b").as_ref(), b"feature\n");
+    assert_eq!(c.read_file(&tip, "a/x.txt").await.expect("a").as_ref(), b"main\n");
+    assert_eq!(c.read_file(&tip, "a/z.txt").await.expect("z").as_ref(), b"z\n");
+    assert!(sparse_dir.join("a/z.txt").exists());
 }

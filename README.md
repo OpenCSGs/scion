@@ -134,6 +134,8 @@ scn commit --amend                  # fold more local changes into the pending c
 scn uncommit                        # drop the pending commit, keep its changes as local changes
 scn land                            # land on main; if main moved, the server rebases (three-way merge)
 scn sync                            # pull others' changes; rebases a pending commit at file level
+scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
+scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`
 scn cat main:README.md              # read files without a working copy (add --repo outside one)
 scn ls main:                        # list a directory; every command supports --json
 scn log --path src -n 10            # history, newest first, optionally limited to a path

@@ -16,6 +16,18 @@ pub enum Error {
     Dirty,
     #[error("nothing to land")]
     NothingToLand,
+    /// `switch` / `merge` while a commit is pending.
+    #[error("you have a pending commit; land it or `scn uncommit` it first")]
+    PendingCommit,
+    /// `merge` into a branch with no commits.
+    #[error("{0} has no commits yet; land something on it first")]
+    EmptyBranch(String),
+    /// A pending merge commit can only land as a fast-forward; the ref moved since.
+    #[error("{0} moved since the merge; run `scn sync` to redo the merge on top of it, then land")]
+    MergeBehind(String),
+    /// Paths the merge could not combine.
+    #[error("merge conflict: {}", .0.iter().map(|c| format!("{} ({:?})", c.path, c.kind)).collect::<Vec<_>>().join(", "))]
+    MergeConflicts(Vec<crate::MergeConflict>),
     /// `uncommit` / `commit --amend` without a pending (committed, not landed) commit.
     #[error("no pending commit; landed commits cannot be changed")]
     NoPendingCommit,

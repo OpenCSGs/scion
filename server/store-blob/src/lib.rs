@@ -99,6 +99,9 @@ struct Packs {
     bytes: Cache<[u8; 32], Bytes>,
     /// Objects recently used as delta bases: reading history walks the same chains.
     bases: Cache<ObjectId, Bytes>,
+    /// Blocks of large packs: a commit's objects, and the versions of a delta chain, are mostly
+    /// close together, so one block read serves many objects.
+    blocks: Cache<([u8; 32], u64), Bytes>,
 }
 
 /// An object for [`ObjectBlobStore::repack`], and the object to store it as a delta against
@@ -186,6 +189,11 @@ const PACK_TAIL_READ: u64 = 64 << 10;
 const PACK_BYTES_CACHE: u64 = 64 << 20;
 /// Bytes of delta bases kept in memory.
 const BASE_CACHE: u64 = 64 << 20;
+/// Large packs are read in blocks of this size, keeping this many bytes of blocks in memory.
+/// Objects spanning more than a few blocks are read directly.
+const PACK_BLOCK: u64 = 1 << 20;
+const BLOCK_CACHE: u64 = 128 << 20;
+const MAX_BLOCKS_PER_READ: u64 = 4;
 /// Longest delta chain repack writes, and the longest a read follows (damaged data could loop).
 const MAX_DELTA_DEPTH: u8 = 16;
 const MAX_READ_DEPTH: u8 = 64;
@@ -253,6 +261,10 @@ impl ObjectBlobStore {
                 .build(),
             bases: Cache::builder()
                 .max_capacity(BASE_CACHE)
+                .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
+                .build(),
+            blocks: Cache::builder()
+                .max_capacity(BLOCK_CACHE)
                 .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
                 .build(),
         });
@@ -471,10 +483,9 @@ impl ObjectBlobStore {
         let held = self.packs.as_ref().and_then(|p| p.bytes.get(&loc.pack));
         let stored = match held {
             Some(b) if end <= b.len() as u64 => b.slice(start as usize..end as usize),
-            _ => match self.store.get_range(&self.pack_path(&loc.pack), start..end).await {
-                Ok(b) => b,
-                Err(object_store::Error::NotFound { .. }) => return Ok(Packed::Gone),
-                Err(e) => return Err(backend("get packed object", e)),
+            _ => match self.pack_range(&loc.pack, start, end).await? {
+                Some(b) => b,
+                None => return Ok(Packed::Gone),
             },
         };
         let oid = *id;
@@ -541,6 +552,49 @@ impl ObjectBlobStore {
             }
             self.get_loose(id).await
         })
+    }
+
+    /// Bytes `start..end` of a pack, through the block cache. None when the pack is gone.
+    async fn pack_range(&self, name: &[u8; 32], start: u64, end: u64) -> Result<Option<Bytes>> {
+        let path = self.pack_path(name);
+        let direct = |e: object_store::Error| match e {
+            object_store::Error::NotFound { .. } => Ok(None),
+            e => Err(backend("get packed object", e)),
+        };
+        let Some(p) = &self.packs else {
+            return self.store.get_range(&path, start..end).await.map(Some).or_else(direct);
+        };
+        let (first, last) = (start / PACK_BLOCK, end.saturating_sub(1) / PACK_BLOCK);
+        if end <= start || last - first >= MAX_BLOCKS_PER_READ {
+            return self.store.get_range(&path, start..end).await.map(Some).or_else(direct);
+        }
+        let mut out = bytes::BytesMut::with_capacity((end - start) as usize);
+        for b in first..=last {
+            let block = match p.blocks.get(&(*name, b)) {
+                Some(x) => x,
+                None => {
+                    // The last block may be short: a bounded range past the end returns the rest
+                    let opts = object_store::GetOptions {
+                        range: Some(object_store::GetRange::Bounded(b * PACK_BLOCK..(b + 1) * PACK_BLOCK)),
+                        ..Default::default()
+                    };
+                    let x = match self.store.get_opts(&path, opts).await {
+                        Ok(r) => r.bytes().await.map_err(|e| backend("read pack block", e))?,
+                        Err(e) => return direct(e),
+                    };
+                    p.blocks.insert((*name, b), x.clone());
+                    x
+                }
+            };
+            let lo = start.max(b * PACK_BLOCK) - b * PACK_BLOCK;
+            let hi = end.min((b + 1) * PACK_BLOCK) - b * PACK_BLOCK;
+            if hi as usize > block.len() {
+                // Shorter than the location says: a damaged pack, or not the pack it names
+                return Ok(Some(Bytes::new()));
+            }
+            out.extend_from_slice(&block[lo as usize..hi as usize]);
+        }
+        Ok(Some(out.freeze()))
     }
 
     /// Forgets a damaged packed copy, so that uploading the object again stores a good one.
@@ -843,6 +897,9 @@ impl ObjectBlobStore {
         packs.index.delete_pack_locations(&[*id]).await?;
         packs.bytes.invalidate(&loc.pack);
         packs.learned.invalidate(&loc.pack);
+        for b in 0..=(bytes.len() as u64 / PACK_BLOCK) {
+            packs.blocks.invalidate(&(loc.pack, b));
+        }
         match self.store.delete(&old).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
             Err(e) => Err(backend("delete pack", e)),
@@ -1333,8 +1390,8 @@ mod tests {
         assert_eq!(reader.get(&small[4].0).await.as_ref(), Ok(&Some(small[4].1.clone())));
         assert_eq!(
             reader.get(&large[4].0).await,
-            Ok(None),
-            "large packs are read from storage"
+            Ok(Some(large[4].1.clone())),
+            "large packs: the blocks already read are kept"
         );
         // A damaged trailer: the object is still read through its own location
         let objs = objects(3, "bad trailer");
@@ -1517,6 +1574,76 @@ mod tests {
             .await
             .expect("upload again");
         assert_eq!(reader.get(&obj_id).await, Ok(Some(obj)));
+    }
+
+    #[tokio::test]
+    async fn large_packs_are_read_in_cached_blocks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        // 3 MiB of incompressible objects of 300 KB: several cross a block boundary
+        let objs: Vec<(ObjectId, Bytes)> = (0..10u8)
+            .map(|i| {
+                let mut d = noise(300_000).to_vec();
+                d[0] = i;
+                let d = Bytes::from(d);
+                (ObjectId::of_blob(&d), d)
+            })
+            .collect();
+        s.put_many(&objs).await.expect("put");
+        s.repack(
+            &objs
+                .iter()
+                .map(|(id, _)| RepackItem { id: *id, base: None })
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("repack");
+        s.prune(std::time::Duration::ZERO).await.expect("prune");
+        let reader = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        for (id, d) in &objs {
+            assert_eq!(reader.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+        // Everything is in cached blocks now: reads no longer need the pack
+        for f in files(dir.path(), "packs") {
+            std::fs::remove_file(f).expect("remove");
+        }
+        for (id, d) in &objs {
+            assert_eq!(reader.get(id).await.as_ref(), Ok(&Some(d.clone())), "from blocks");
+        }
+        // An object larger than a few blocks is read directly, not through the cache
+        let big = noise(5 << 20);
+        let big_id = ObjectId::of_blob(&big);
+        s.repack(&[RepackItem { id: big_id, base: None }])
+            .await
+            .expect("missing is fine");
+        s.put(big_id, big.clone()).await.expect("loose");
+        let stats = s
+            .repack(&[RepackItem { id: big_id, base: None }])
+            .await
+            .expect("repack big");
+        assert_eq!(stats.packed, 1);
+        let reader = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        assert_eq!(reader.get(&big_id).await, Ok(Some(big)));
+        // A location pointing past the end of its pack is an error, not other bytes
+        let loc = index.pack_locations(&[big_id]).await.expect("loc")[&big_id];
+        let past = scion_store::PackedObject {
+            id: objs[0].0,
+            offset: loc.offset + loc.len + 2 * PACK_BLOCK,
+            len: 10,
+            base: None,
+        };
+        index
+            .put_pack_locations(&loc.pack, &[past])
+            .await
+            .expect("bad location");
+        let reader = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        assert!(reader.get(&objs[0].0).await.is_err());
     }
 
     #[test]

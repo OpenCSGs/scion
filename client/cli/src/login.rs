@@ -47,6 +47,7 @@ async fn direct(endpoint: &str, auth: Auth) -> Result<Client, CliError> {
         .endpoint(endpoint)
         .auth(auth)
         .client_name("scn")
+        .tls(scion_client::Tls::from_env()?)
         .connect_timeout(Duration::from_secs(5))
         .build()
         .await?)

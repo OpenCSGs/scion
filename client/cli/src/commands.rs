@@ -69,6 +69,7 @@ pub async fn connect(endpoint: &str, repo: Option<&str>) -> Result<Client, CliEr
         .endpoint(endpoint)
         .auth(crate::login::auth_for(endpoint, |k| std::env::var(k).ok()))
         .client_name("scn")
+        .tls(scion_client::Tls::from_env()?)
         .connect_timeout(Duration::from_secs(5));
     if let Some(r) = repo {
         b = b.repo(r);

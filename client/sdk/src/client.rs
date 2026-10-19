@@ -9,7 +9,7 @@ use scion_proto::v1::object_service_client::ObjectServiceClient;
 use scion_proto::v1::server_info_service_client::ServerInfoServiceClient;
 use scion_proto::v1::{GetObjectsRequest, GetServerInfoRequest, HasObjectsRequest, ObjectWant};
 use tonic::metadata::MetadataValue;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 
 use crate::error::{Error, Result};
 use crate::info::ServerInfo;
@@ -152,6 +152,55 @@ impl Auth {
 
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Which certificate authorities an `https://` endpoint is checked against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Tls {
+    /// Also trust the operating system's store. Off by default: reading it can take many seconds
+    /// (the macOS keychain evaluates every certificate), on every connection.
+    pub native_roots: bool,
+    /// Extra CA certificates (PEM), for a private CA.
+    pub ca_pem: Option<Vec<u8>>,
+}
+
+impl Tls {
+    /// From `SCION_TLS_ROOTS=native` (also trust the system store) and `SCION_TLS_CA_FILE` (a PEM
+    /// file of extra CAs). The bundled Mozilla roots are always trusted.
+    pub fn from_env() -> Result<Self> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self> {
+        let native_roots = match lookup("SCION_TLS_ROOTS").as_deref().map(str::trim) {
+            None | Some("" | "bundled") => false,
+            Some("native") => true,
+            Some(other) => {
+                return Err(Error::InvalidEndpoint(format!(
+                    "SCION_TLS_ROOTS must be bundled or native, not {other:?}"
+                )));
+            }
+        };
+        let ca_pem = match lookup("SCION_TLS_CA_FILE").filter(|p| !p.trim().is_empty()) {
+            Some(path) => Some(std::fs::read(path.trim()).map_err(|e| Error::Connect {
+                endpoint: String::new(),
+                message: format!("SCION_TLS_CA_FILE {path}: {e}"),
+            })?),
+            None => None,
+        };
+        Ok(Self { native_roots, ca_pem })
+    }
+
+    fn client_config(&self) -> ClientTlsConfig {
+        let mut c = ClientTlsConfig::new().with_webpki_roots();
+        if self.native_roots {
+            c = c.with_native_roots();
+        }
+        if let Some(pem) = &self.ca_pem {
+            c = c.ca_certificate(Certificate::from_pem(pem));
+        }
+        c
+    }
+}
+
 /// redaction 的一次变化（[`Client::list_redacted_objects`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RedactedObject {
@@ -180,6 +229,7 @@ pub struct ClientBuilder {
     connect_timeout: Duration,
     read_endpoints: ReadEndpoints,
     daemon_socket: Option<std::path::PathBuf>,
+    tls: Tls,
 }
 
 /// 读取对象时是否使用服务端推荐的只读端点（区域缓存）。
@@ -207,6 +257,7 @@ impl Default for ClientBuilder {
             connect_timeout: DEFAULT_CONNECT_TIMEOUT,
             read_endpoints: ReadEndpoints::Auto,
             daemon_socket: None,
+            tls: Tls::default(),
         }
     }
 }
@@ -232,6 +283,12 @@ impl ClientBuilder {
     /// 上报给服务端的客户端名称（仅用于日志和统计）。
     pub fn client_name(mut self, name: impl Into<String>) -> Self {
         self.client_name = name.into();
+        self
+    }
+
+    /// Certificate authorities for `https://` endpoints (default: the bundled Mozilla roots).
+    pub fn tls(mut self, tls: Tls) -> Self {
+        self.tls = tls;
         self
     }
 
@@ -268,12 +325,10 @@ impl ClientBuilder {
             .http2_keep_alive_interval(Duration::from_secs(30))
             .keep_alive_while_idle(true);
         if is_tls {
-            ep = ep
-                .tls_config(ClientTlsConfig::new().with_native_roots())
-                .map_err(|e| Error::Connect {
-                    endpoint: url.clone(),
-                    message: e.to_string(),
-                })?;
+            ep = ep.tls_config(self.tls.client_config()).map_err(|e| Error::Connect {
+                endpoint: url.clone(),
+                message: e.to_string(),
+            })?;
         }
         Ok((url, ep))
     }
@@ -756,6 +811,31 @@ mod tests {
         assert_eq!(b.repo.as_deref(), Some("r"));
         assert_eq!(b.client_name, "scn");
         assert_eq!(b.connect_timeout, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn tls_from_env() {
+        let one = |key: &'static str, value: String| move |k: &str| (k == key).then(|| value.clone());
+        assert_eq!(Tls::from_lookup(|_| None).expect("default"), Tls::default());
+        let native = Tls::from_lookup(one("SCION_TLS_ROOTS", "native".into())).expect("native");
+        assert!(native.native_roots);
+        let bundled = Tls::from_lookup(one("SCION_TLS_ROOTS", " bundled ".into())).expect("bundled");
+        assert!(!bundled.native_roots);
+        assert!(Tls::from_lookup(one("SCION_TLS_ROOTS", "nope".into())).is_err());
+        assert!(Tls::from_lookup(one("SCION_TLS_CA_FILE", "/nonexistent/ca.pem".into())).is_err());
+        let path = std::env::temp_dir().join(format!("scion-ca-{}.pem", std::process::id()));
+        std::fs::write(&path, b"-----BEGIN CERTIFICATE-----\n").expect("write");
+        let tls = Tls::from_lookup(one("SCION_TLS_CA_FILE", path.to_string_lossy().into_owned())).expect("ca");
+        std::fs::remove_file(&path).ok();
+        assert!(tls.ca_pem.is_some());
+        // Without native roots, building the configuration does not read the system store
+        let t = std::time::Instant::now();
+        let _ = tls.client_config();
+        let _ = Client::builder()
+            .endpoint("https://scion.example.com")
+            .endpoint_config()
+            .expect("https");
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
     }
 
     #[tokio::test]

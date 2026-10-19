@@ -41,6 +41,7 @@ impl Upstream {
                 Client::builder()
                     .endpoint(&self.url)
                     .client_name("scn-daemon")
+                    .tls(scion_client::Tls::from_env().map_err(|e| e.to_status())?)
                     .connect_timeout(Duration::from_secs(5))
                     .build()
                     .await

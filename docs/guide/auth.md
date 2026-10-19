@@ -210,3 +210,4 @@ scn logout
 
 - **凭据存放**：按服务端地址保存。macOS 存进钥匙串，其它平台存进 `~/.config/scion/credentials.json`（权限 0600）。`SCION_CREDENTIALS_FILE` 可以指定文件。
 - **CI**：设置 `SCION_TOKEN`（PAT 或外部令牌），优先于保存的凭据。
+- **TLS**: `https://` servers are checked against the Mozilla root certificates built into `scn`. `SCION_TLS_CA_FILE=PATH` adds a private CA (PEM); `SCION_TLS_ROOTS=native` also trusts the operating system's store, which on macOS can add many seconds to every connection.

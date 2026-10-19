@@ -72,6 +72,8 @@ scn import git ~/src/my-repo --repo mono --git-ref release/1.x --ref release/1.x
 
 两个分支共有的提交不会重复上传，也会得到相同的 Scion 提交 id。
 
+Tags: import a git tag into `tags/NAME` to create a Scion tag at the same commit, for example `scn import git ~/src/my-repo --repo mono --git-ref v1.0 --ref tags/v1.0`. The tag is created in one step (tags never move); importing it again is a no-op, and a tag that already points elsewhere is reported instead of moved.
+
 ## 导入了什么
 
 | git | Scion | 说明 |

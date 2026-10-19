@@ -290,6 +290,44 @@ async fn reimport_is_idempotent_and_incremental_import_fast_forwards() {
     assert!(matches!(err, Error::Diverged { .. }), "{err:?}");
 }
 
+/// A git tag imported into `tags/…` is created at its commit in one step (the server never
+/// moves tags); importing it again is a no-op, a tag pointing elsewhere is reported.
+#[tokio::test(flavor = "multi_thread")]
+async fn tags_are_created_at_the_tagged_commit() {
+    let srv = server().await;
+    let c = Client::builder()
+        .endpoint(&srv.url)
+        .repo("imported")
+        .build()
+        .await
+        .expect("connect");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path();
+    git(dir, &["init", "-q", "-b", "main"]);
+    write(dir, "a", b"1");
+    commit(dir, "one", "1700000000 +0000");
+    write(dir, "a", b"2");
+    commit(dir, "two", "1700000100 +0000");
+    git(dir, &["tag", "v1"]);
+    let s = import(&c, dir, "v1", "tags/v1", |_, _| {}).await.expect("tag");
+    let tag = c.resolve_ref("tags/v1").await.expect("ok").expect("tag");
+    assert_eq!((Some(tag.changeset), tag.version), (s.tip, 1));
+    assert_eq!(
+        c.log("v1", None, 10, None).await.expect("log").entries.len(),
+        2,
+        "the short name works"
+    );
+    import(&c, dir, "v1", "tags/v1", |_, _| {}).await.expect("again: no-op");
+    git(dir, &["tag", "-d", "v1"]);
+    write(dir, "a", b"3");
+    commit(dir, "three", "1700000200 +0000");
+    git(dir, &["tag", "v1"]);
+    let err = import(&c, dir, "v1", "tags/v1", |_, _| {})
+        .await
+        .expect_err("moved tag");
+    assert!(matches!(err, Error::Diverged { .. }), "{err:?}");
+}
+
 /// 历史超过服务端单次合入上限时分段快进，每个提交的 change id 都被记录。
 #[tokio::test(flavor = "multi_thread")]
 async fn long_history_lands_in_steps() {

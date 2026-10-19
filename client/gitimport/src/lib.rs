@@ -14,6 +14,9 @@ use thiserror::Error;
 
 pub use git::{Change, Commit, GitMode, Ident, parse_commit, parse_ident, parse_raw_diff};
 
+/// Refs under this prefix are tags (the server never moves them).
+pub const TAG_PREFIX: &str = "tags/";
+
 /// 记录 git 提交 sha 的扩展字段。
 pub const GIT_SHA1_EXTENSION: &str = "git.sha1";
 
@@ -185,7 +188,22 @@ async fn land_chain(
     step: usize,
 ) -> Result<()> {
     let current = client.resolve_ref(target_ref).await?.map(|t| t.changeset);
-    let mut chain = Vec::new();
+    // A tag (`tags/…`) is never moved by the server: create it at the tip in one step. Importing
+    // the same tag again is a no-op; a tag that points elsewhere is reported, not moved.
+    if target_ref.starts_with(TAG_PREFIX) {
+        return match current {
+            None => {
+                client.create_ref(target_ref, &tip).await?;
+                Ok(())
+            }
+            Some(c) if c == tip => Ok(()),
+            Some(c) => Err(Error::Diverged {
+                reference: target_ref.to_owned(),
+                current: c,
+            }),
+        };
+    }
+    let mut chain: Vec<ObjectId> = Vec::new();
     let mut cur = Some(tip);
     while let Some(c) = cur {
         if Some(c) == current {

@@ -50,8 +50,11 @@ pub struct LogLine {
     pub parents: Vec<String>,
     pub author: String,
     pub email: String,
+    /// Author date (what `git log` shows).
     pub time_ms: i64,
     pub tz_offset_minutes: i32,
+    pub committer: String,
+    pub committer_time_ms: i64,
     pub message: String,
     pub generation: u64,
 }
@@ -90,10 +93,13 @@ fn log_line(e: LogItem) -> LogLine {
     LogLine {
         id: e.id.to_string(),
         parents: e.parents.iter().map(ToString::to_string).collect(),
+        // Author and author date, as `git log` shows them
+        time_ms: e.author.time_ms,
+        tz_offset_minutes: e.author.tz_offset_minutes,
+        committer: e.committer.name,
+        committer_time_ms: e.committer.time_ms,
         author: e.author.name,
         email: e.author.email,
-        time_ms: e.committer.time_ms,
-        tz_offset_minutes: e.committer.tz_offset_minutes,
         message: e.message,
         generation: e.generation,
     }
@@ -528,6 +534,8 @@ mod tests {
             email: "ada@x".into(),
             time_ms: 0,
             tz_offset_minutes: 0,
+            committer: "c".into(),
+            committer_time_ms: 0,
             message: "subject\n\nbody".into(),
             generation: 3,
         };
@@ -678,6 +686,8 @@ mod tests {
             email: "a@x".into(),
             time_ms: 0,
             tz_offset_minutes: 0,
+            committer: "c".into(),
+            committer_time_ms: 0,
             message: "subject\n\nbody".into(),
             generation: 1,
         };

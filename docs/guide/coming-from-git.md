@@ -46,6 +46,30 @@
 | `.gitignore` | `.gitignore` and `.scionignore` | Same syntax; `.scionignore` wins in the same directory |
 | `git fast-import` | `scn import git PATH --repo R` | Keeps the original git SHAs |
 
+## Transitional git spellings
+
+To ease the move, these git commands also work. Each runs the scn command on the right and prints a hint on stderr naming it, for example:
+
+```
+hint: `scn push` is a transitional git-style spelling; use `scn land` instead
+```
+
+They are not listed in `scn --help` and may be removed later, so scripts should use the scn names.
+
+| You type | scn runs |
+|---|---|
+| `scn push` | `scn land` |
+| `scn pull [--rebase]` | `scn sync` |
+| `scn checkout BRANCH`, `scn checkout -b NAME` | `scn switch BRANCH`, `scn switch -c NAME` |
+| `scn checkout -- PATH`, `scn checkout PATH` (an existing path) | `scn restore PATH` |
+| `scn reset --soft [HEAD~1]` | `scn uncommit` |
+| `scn reset --hard [HEAD]` | `scn restore .` |
+| `scn rebase --continue`, `scn merge --continue` | `scn commit` |
+| `scn add ...` | nothing: there is no staging area |
+| `scn rm [-r] PATH...`, `scn mv FROM TO` | deletes / moves the files; the next `scn commit` picks it up |
+
+Other forms, like `reset --hard HEAD~3` or `rebase --abort`, fail with a message that explains the scn way.
+
 ## Revisions
 
 | Form | Meaning |

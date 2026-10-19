@@ -108,17 +108,67 @@ enum Command {
     /// On conflicts the files get conflict markers; see `scn resolve`.
     Merge {
         /// The branch to merge (not needed with --abort).
-        #[arg(required_unless_present = "abort")]
+        #[arg(required_unless_present_any = ["abort", "cont"])]
         reference: Option<String>,
         /// Abandon a merge that stopped on conflicts.
         #[arg(long, conflicts_with_all = ["message", "author"])]
         abort: bool,
+        /// git's `merge --continue`: transitional spelling of `scn commit`.
+        #[arg(long = "continue", hide = true, conflicts_with = "abort")]
+        cont: bool,
         #[arg(short, long)]
         message: Option<String>,
         /// Author as "Name <email>"; defaults like `scn commit`.
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
     },
+    // ---- Transitional git spellings: run the scn command and print a hint (hidden from --help)
+    #[command(hide = true)]
+    Push,
+    #[command(hide = true)]
+    Pull {
+        #[arg(long)]
+        rebase: bool,
+    },
+    #[command(hide = true)]
+    Checkout {
+        /// `-b NAME`: create the branch and switch to it.
+        #[arg(short = 'b')]
+        create: bool,
+        target: Option<String>,
+        #[arg(last = true)]
+        paths: Vec<String>,
+    },
+    #[command(hide = true)]
+    Reset {
+        #[arg(long)]
+        soft: bool,
+        #[arg(long, conflicts_with = "soft")]
+        hard: bool,
+        target: Option<String>,
+    },
+    #[command(hide = true)]
+    Rebase {
+        #[arg(long = "continue")]
+        cont: bool,
+        #[arg(long, conflicts_with = "cont")]
+        abort: bool,
+    },
+    #[command(hide = true)]
+    Add {
+        #[arg(short = 'A', long = "all")]
+        all: bool,
+        paths: Vec<String>,
+    },
+    #[command(hide = true)]
+    Rm {
+        #[arg(short = 'r')]
+        recursive: bool,
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    #[command(hide = true)]
+    Mv { from: PathBuf, to: PathBuf },
     /// Mark conflicted files resolved (after editing out the markers), or take one side's
     /// version. Without PATHS, lists the conflicts. `.` means all.
     Resolve {
@@ -342,6 +392,11 @@ enum ImportCmd {
     },
 }
 
+/// A git spelling accepted while people move over: says which scn command to use instead.
+fn transitional(git: &str, scn: &str) {
+    eprintln!("hint: `scn {git}` is a transitional git-style spelling; use `scn {scn}` instead");
+}
+
 /// `--path P` or git's `-- P`; history queries filter by one path.
 fn one_path(flag: Option<String>, rest: Vec<String>) -> Result<Option<String>, CliError> {
     match (flag, rest.as_slice()) {
@@ -458,6 +513,128 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
         Command::Switch { reference, create } => emit(commands::switch(&ctx, &reference, create).await, json),
         Command::Merge { abort: true, .. } => emit(commands::abort_merge(&ctx).await, json),
+        Command::Merge { cont: true, .. } => {
+            transitional("merge --continue", "commit");
+            emit(commands::commit(&ctx, None, None).await, json)
+        }
+        Command::Push => {
+            transitional("push", "land");
+            emit(commands::land(&ctx).await, json)
+        }
+        Command::Pull { .. } => {
+            transitional("pull", "sync");
+            emit(commands::sync(&ctx).await, json)
+        }
+        Command::Checkout { create, target, paths } => match (create, target, paths.is_empty()) {
+            (false, target, false) => {
+                let mut all = paths;
+                all.extend(target);
+                transitional("checkout -- PATH", "restore PATH");
+                emit(commands::restore(&ctx, &all).await, json)
+            }
+            (true, Some(name), true) => {
+                transitional("checkout -b NAME", "switch -c NAME");
+                emit(commands::switch(&ctx, &name, true).await, json)
+            }
+            // A path in the current directory restores it, anything else is a branch
+            (false, Some(t), true) if ctx.cwd.join(&t).exists() => {
+                transitional("checkout PATH", "restore PATH");
+                emit(commands::restore(&ctx, &[t]).await, json)
+            }
+            (false, Some(name), true) => {
+                transitional("checkout BRANCH", "switch BRANCH");
+                emit(commands::switch(&ctx, &name, false).await, json)
+            }
+            _ => fail(
+                &CliError::Usage(
+                    "scn supports `checkout BRANCH`, `checkout -b NAME` and `checkout -- PATH`; \
+                     use `scn switch` / `scn restore`"
+                        .into(),
+                ),
+                json,
+            ),
+        },
+        Command::Reset { soft, hard, target } => {
+            let head = matches!(target.as_deref(), None | Some("HEAD" | "@"));
+            let parent = matches!(
+                target.as_deref(),
+                None | Some("HEAD~1" | "HEAD~" | "HEAD^" | "@~1" | "@^")
+            );
+            if soft && parent {
+                transitional("reset --soft HEAD~1", "uncommit");
+                emit(commands::uncommit(&ctx).await, json)
+            } else if hard && head {
+                transitional("reset --hard", "restore .");
+                emit(commands::restore(&ctx, &[".".to_owned()]).await, json)
+            } else {
+                fail(
+                    &CliError::Usage(
+                        "scn maps only `reset --soft HEAD~1` (scn uncommit) and `reset --hard` (scn restore .)".into(),
+                    ),
+                    json,
+                )
+            }
+        }
+        Command::Rebase { cont, abort } => {
+            if cont {
+                transitional("rebase --continue", "commit");
+                emit(commands::commit(&ctx, None, None).await, json)
+            } else if abort {
+                fail(
+                    &CliError::Usage(
+                        "a sync that stopped on conflicts cannot be aborted: resolve the files (`scn resolve`) \
+                         and `scn commit`, or `scn restore` them to drop your changes"
+                            .into(),
+                    ),
+                    json,
+                )
+            } else {
+                fail(
+                    &CliError::Usage("scn rebases with `scn sync` (and on the server during `scn land`)".into()),
+                    json,
+                )
+            }
+        }
+        Command::Add { .. } => {
+            transitional("add", "commit");
+            eprintln!("note: there is no staging area; `scn commit` takes every local change");
+            ExitCode::SUCCESS
+        }
+        Command::Rm { paths, recursive } => {
+            transitional("rm", "commit (after deleting the files yourself)");
+            let mut first_error = None;
+            for p in &paths {
+                let path = ctx.cwd.join(p);
+                let r = if recursive && path.is_dir() {
+                    std::fs::remove_dir_all(&path)
+                } else {
+                    std::fs::remove_file(&path)
+                };
+                if let Err(e) = r {
+                    first_error.get_or_insert_with(|| CliError::Usage(format!("rm {p}: {e}")));
+                }
+            }
+            match first_error {
+                Some(e) => fail(&e, json),
+                None => ExitCode::SUCCESS,
+            }
+        }
+        Command::Mv { from, to } => {
+            transitional("mv", "commit (after moving the files yourself)");
+            let (from, to) = (ctx.cwd.join(from), ctx.cwd.join(to));
+            let to = if to.is_dir() {
+                match from.file_name() {
+                    Some(name) => to.join(name),
+                    None => to,
+                }
+            } else {
+                to
+            };
+            match std::fs::rename(&from, &to) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&CliError::Usage(format!("mv {}: {e}", from.display())), json),
+            }
+        }
         Command::Merge {
             reference,
             message,
@@ -720,6 +897,25 @@ mod tests {
             assert_eq!(got, want, "{args:?}");
         }
         assert!(Cli::try_parse_from(["scn", "branch", "x", "-d", "y"]).is_err());
+        // Transitional git spellings
+        for args in [
+            &["scn", "push"][..],
+            &["scn", "pull", "--rebase"],
+            &["scn", "checkout", "-b", "x"],
+            &["scn", "checkout", "--", "a", "b"],
+            &["scn", "reset", "--soft", "HEAD~1"],
+            &["scn", "reset", "--hard"],
+            &["scn", "rebase", "--continue"],
+            &["scn", "merge", "--continue"],
+            &["scn", "add", "-A"],
+            &["scn", "rm", "-r", "dir"],
+            &["scn", "mv", "a", "b"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["scn", "reset", "--soft", "--hard"]).is_err());
+        assert!(Cli::try_parse_from(["scn", "merge", "--continue", "--abort"]).is_err());
+        assert!(Cli::try_parse_from(["scn", "rm"]).is_err());
         assert_eq!(one_path(Some("a".into()), vec![]).ok(), Some(Some("a".into())));
         assert_eq!(one_path(None, vec!["src/".into()]).ok(), Some(Some("src".into())));
         assert!(one_path(Some("a".into()), vec!["b".into()]).is_err());

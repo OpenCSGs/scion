@@ -452,6 +452,58 @@ async fn clone_commit_land_sync_workflow() {
         );
         assert_eq!(scn_in(&wc, &["log", "--path", "a", "--", "b"]).status.code(), Some(2));
 
+        // Transitional git spellings: they work and point at the scn command
+        let hinted = |out: &std::process::Output, scn: &str| {
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains(&format!("use `scn {scn}` instead")), "{err}");
+            assert!(out.status.success(), "{out:?}");
+        };
+        let author = ["--author", "Ada <ada@example.com>"];
+        hinted(&scn_in(&wc, &["checkout", "-b", "legacy"]), "switch -c NAME");
+        std::fs::write(wc.join("old.txt"), "o").expect("write");
+        hinted(&scn_in(&wc, &["add", "-A"]), "commit");
+        json_of(&scn_in(
+            &wc,
+            &[&["commit", "-m", "old", "--json"][..], &author].concat(),
+        ));
+        hinted(&scn_in(&wc, &["push"]), "land");
+        hinted(
+            &scn_in(&wc, &["mv", "old.txt", "src"]),
+            "commit (after moving the files yourself)",
+        );
+        assert!(wc.join("src/old.txt").exists() && !wc.join("old.txt").exists());
+        hinted(
+            &scn_in(&wc, &["rm", "src/old.txt"]),
+            "commit (after deleting the files yourself)",
+        );
+        let v = json_of(&scn_in(&wc, &["status", "--json"]));
+        assert_eq!(v["deleted"], serde_json::json!(["old.txt"]), "a move then a delete");
+        hinted(&scn_in(&wc, &["reset", "--hard"]), "restore .");
+        assert!(wc.join("old.txt").exists());
+        std::fs::write(wc.join("old.txt"), "changed").expect("edit");
+        hinted(&scn_in(&wc, &["checkout", "--", "old.txt"]), "restore PATH");
+        assert_eq!(std::fs::read_to_string(wc.join("old.txt")).expect("old"), "o");
+        std::fs::write(wc.join("old.txt"), "changed again").expect("edit");
+        json_of(&scn_in(&wc, &[&["commit", "-m", "c", "--json"][..], &author].concat()));
+        hinted(&scn_in(&wc, &["reset", "--soft", "HEAD~1"]), "uncommit");
+        let v = json_of(&scn_in(&wc, &["status", "--json"]));
+        assert_eq!(v["modified"], serde_json::json!(["old.txt"]));
+        hinted(&scn_in(&wc, &["checkout", "old.txt"]), "restore PATH");
+        hinted(&scn_in(&wc, &["pull", "--rebase"]), "sync");
+        hinted(&scn_in(&wc, &["checkout", "main"]), "switch BRANCH");
+        assert_eq!(scn_in(&wc, &["reset", "--hard", "HEAD~3"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["rebase", "--abort"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["rebase"]).status.code(), Some(2));
+        for cont in [&["rebase", "--continue"][..], &["merge", "--continue"]] {
+            let out = scn_in(&wc, cont);
+            assert_eq!(out.status.code(), Some(2), "nothing to continue: {out:?}");
+            assert!(String::from_utf8_lossy(&out.stderr).contains("use `scn commit` instead"));
+        }
+        assert_eq!(scn_in(&wc, &["checkout"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["rm", "missing.txt"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["mv", "missing.txt", "x"]).status.code(), Some(2));
+        json_of(&scn_in(&wc, &["branch", "-d", "legacy", "--json"]));
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

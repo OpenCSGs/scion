@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Side-by-side: starhub's git stack (Gitaly v16.4.6 + MinIO) vs Scion (PostgreSQL + MinIO)."""
+"""Side-by-side: starhub's git stack (Gitaly v16.4.6 + MinIO) vs Scion (PostgreSQL + MinIO), with
+libgit2 on a bare copy of the same repository as the lower bound for git (no server, no network)."""
 import json, os, random, shutil, statistics, subprocess, threading, time, zipfile
 from pathlib import Path
 
@@ -146,8 +147,17 @@ def clones():
 
 
 # ------------------------------------------------------------------ harness runs
+def cold(service, probe):
+    """Restart a server before its workload, so that no system starts with objects in memory
+    (the checkouts before read everything on main)."""
+    dc("restart", service)
+    wait_ready(probe)
+    time.sleep(3)
+
+
 def harnesses():
     print("=== API workload (gitaly)", flush=True)
+    cold("gitaly", lambda: run(["git", "ls-remote", GITURL])[0].returncode == 0)
     s = Sampler()
     s.start()
     r, ms = run([str(C / "gitalybench/gitalybench"), "run", str(C / "plan.json"), str(C / "gitaly-results.json")])
@@ -155,7 +165,19 @@ def harnesses():
     s.join()
     rec("api", "gitalybench total", ms=round(ms), ok=r.returncode == 0, err=r.stderr.decode()[-200:] if r.returncode else "")
     out["peak_gitaly"] = {"mem_mib": {k: round(v) for k, v in s.peak.items()}, "cpu_max": {k: max(v) for k, v in s.cpu.items()}}
+    print("=== API workload (libgit2, in process)", flush=True)
+    s = Sampler()
+    s.start()
+    script = ("rm -rf /tmp/r && git clone -q --mirror /bench/starhub.bundle /tmp/r && "
+              "gitbench /tmp/r /bench/plan.json /bench/git-results.json")
+    r, ms = run(["docker", "run", "--rm", "--name", "scioncmp-gitbench-1", "-v", f"{C}:/bench",
+                 "--entrypoint", "sh", "gitbench", "-c", script])
+    s.stop = True
+    s.join()
+    rec("api", "gitbench total", ms=round(ms), ok=r.returncode == 0, err=r.stderr.decode()[-200:] if r.returncode else "")
+    out["peak_git"] = {"mem_mib": {k: round(v) for k, v in s.peak.items()}, "cpu_max": {k: max(v) for k, v in s.cpu.items()}}
     print("=== API workload (scion)", flush=True)
+    cold("scion", lambda: run([str(SCN), "doctor"])[0].returncode == 0)
     s = Sampler()
     s.start()
     r, ms = run([str(C / "scionbench/target/release/scionbench"), str(C / "plan.json"), str(C / "scion-results.json")])
@@ -191,15 +213,18 @@ def pushes():
 # ------------------------------------------------------------------ correctness
 def correctness():
     print("=== correctness", flush=True)
-    g = json.load(open(C / "gitaly-results.json"))
-    s = json.load(open(C / "scion-results.json"))
-    for op in ["read_file", "list_dir", "last_commits", "log_50", "path_log_50", "show_commit", "diff_names", "blame"]:
-        gv, sv = g["values"].get(op, {}), s["values"].get(op, {})
-        keys = sorted(set(gv) | set(sv))
-        same = [k for k in keys if gv.get(k) == sv.get(k)]
-        diff = [k for k in keys if gv.get(k) != sv.get(k)]
-        rec("correct", op, compared=len(keys), equal=len(same), different=len(diff), example=diff[0][:60] if diff else "")
-        out.setdefault("diffs", {})[op] = {k: {"gitaly": gv.get(k), "scion": sv.get(k)} for k in diff[:5]}
+    res = {name: json.load(open(C / f"{name}-results.json"))["values"] for name in ("gitaly", "scion", "git")}
+    ops = ["read_file", "list_dir", "last_commits", "log_50", "path_log_50", "show_commit", "diff_names", "blame"]
+    # (label, side a, op on a, side b, op on b); the raw-RPC variants answer the same questions
+    checks = [(f"{a} vs {b}: {op}", a, op, b, op) for a, b in [("gitaly", "scion"), ("git", "gitaly"), ("git", "scion")] for op in ops]
+    checks += [(f"git vs gitaly raw rpc: {op}", "git", op, "gitaly", f"{op}_raw") for op in ("list_dir", "show_commit")]
+    for label, a, aop, b, bop in checks:
+        av, bv = res[a].get(aop, {}), res[b].get(bop, {})
+        keys = sorted(set(av) | set(bv))
+        diff = [k for k in keys if av.get(k) != bv.get(k)]
+        rec("correct", label, compared=len(keys), equal=len(keys) - len(diff), different=len(diff),
+            example=diff[0][:60] if diff else "")
+        out.setdefault("diffs", {})[label] = {k: {a: av.get(k), b: bv.get(k)} for k in diff[:5]}
     # archives: same files and contents (both zip, prefix starhub/)
     for rev in json.load(open(C / "plan.json"))["archives"]:
         def content(p):
@@ -207,6 +232,8 @@ def correctness():
                 return {n: z.read(n) for n in z.namelist() if not n.endswith("/")}
         try:
             a, b = content(f"{C}/gitaly-results.json.gitaly-{rev}.zip"), content(f"{C}/scion-results.json.scion-{rev}.zip")
+            g = content(f"{C}/git-results.json.git-{rev}.zip")
+            rec("correct", f"archive {rev[:8]} (git vs gitaly)", same_files=set(g) == set(a), same_content=g == a)
             rec("correct", f"archive {rev[:8]}", files=len(a), same_files=set(a) == set(b), same_content=a == b,
                 only_gitaly=len(set(a) - set(b)), only_scion=len(set(b) - set(a)))
         except Exception as e:  # noqa: BLE001
@@ -243,6 +270,32 @@ def reset():
     rec("import", "bundle size", mb=round((C / "starhub.bundle").stat().st_size / 1e6, 1))
 
 
+# ------------------------------------------------------------------ latency summary
+def latency():
+    print("=== latency p50 / p95 / p99 (ms)", flush=True)
+    res = {name: json.load(open(C / f"{name}-results.json")) for name in ("git", "gitaly", "scion")}
+    ops = sorted(set().union(*(r["timings"] for r in res.values())))
+
+    def pct(v, q):
+        v = sorted(v)
+        return round(v[min(len(v) - 1, int(len(v) * q))], 1)
+
+    for op in ops:
+        row = {}
+        for name, r in res.items():
+            v = r["timings"].get(op)
+            if v:
+                row[name] = f"{pct(v, .5)} / {pct(v, .95)} / {pct(v, .99)}"
+                errs = len(r.get("errors", {}).get(op, []) or [])
+                if errs:
+                    row[name] += f" ({errs} failed)"
+        rec("latency", op, **row)
+    for name, r in res.items():
+        for op, v in r["values"].items():
+            if op.startswith("read_concurrency_") or op.startswith("concurrent_commit"):
+                rec("values", f"{name} {op}", **v)
+
+
 def main():
     reset()
     deployment()
@@ -251,6 +304,7 @@ def main():
     harnesses()
     pushes()
     correctness()
+    latency()
     storage("after the write workload")
     json.dump(out, open(C / "compare-results.json", "w"), indent=1)
     print("written", C / "compare-results.json")

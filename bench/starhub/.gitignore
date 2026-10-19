@@ -11,3 +11,4 @@ serve.log
 *.txt
 gitalybench/gitalybench
 scionbench/target/
+gitbench/target/

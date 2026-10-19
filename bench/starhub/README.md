@@ -17,15 +17,16 @@ The script:
 
 Each check compares Scion's answer with git's where possible.
 
-## Round 2: side by side with Gitaly + MinIO
+## Round 2: side by side with Gitaly + MinIO, and with libgit2
 
 | File | What |
 |---|---|
 | `docker-compose.yml`, `gitaly.config.toml` | Gitaly v16.4.6 and MinIO (as in starhub-server's `docker-compose-gitaly.yml`); scion server with PostgreSQL 16 and the same MinIO |
-| `gitalybench/` | Go. It drives Gitaly through **starhub's own client** (`builder/git/gitserver/gitaly`), plus raw Gitaly RPCs for blame, path history and bundle import. `serve` runs a git smart HTTP proxy built from starhub's `InfoRefsResponse` / `UploadPack` / `ReceivePack`, and a stub of starhub's internal hook API |
+| `gitalybench/` | Go. It drives Gitaly through **starhub's own client** (`builder/git/gitserver/gitaly`), plus raw Gitaly RPCs for blame, path history, bundle import, and the `_raw` rows (listing and single commit without starhub's extra work). `serve` runs a git smart HTTP proxy built from starhub's `InfoRefsResponse` / `UploadPack` / `ReceivePack`, and a stub of starhub's internal hook API |
+| `gitbench/` | Rust, in Docker next to Gitaly. The same workload directly on a bare clone of the bundle through libgit2, with the git command line where libgit2 has no API: git's lower bound, with no server or network |
 | `scionbench/` | Rust. The same workload through Scion's SDK |
 | `makeplan.py` | The shared workload. Every revision is a git SHA, so both sides answer the same requests |
-| `compare.py` | Resets both systems and imports into them. Then it measures deployment, storage, checkout, the API workload (sampling `docker stats`) and push vs land, and compares results request by request |
+| `compare.py` | Resets both systems and imports into them. Then it measures deployment, storage, checkout, the API workload (sampling `docker stats`) and push vs land, and compares the three systems request by request. Each server restarts before its workload |
 
 To run it:
 
@@ -33,6 +34,7 @@ To run it:
 docker build -t scion:compare .                   # from the repository root
 (cd bench/starhub/gitalybench && go build -o gitalybench .)
 (cd bench/starhub/scionbench && cargo build --release)
+docker build -t gitbench bench/starhub/gitbench   # --build-arg DEBIAN_MIRROR=… behind a slow mirror
 cargo build --release -p scion-cli
 python3 bench/starhub/compare.py                  # summary in bench/starhub/compare-results.json
 ```

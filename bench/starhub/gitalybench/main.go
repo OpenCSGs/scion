@@ -84,6 +84,14 @@ func rawConn() *grpc.ClientConn {
 	return conn
 }
 
+// GetTreeEntries names the root "."
+func pathOrDot(p string) string {
+	if p == "" {
+		return "."
+	}
+	return p
+}
+
 func must(err error) {
 	if err != nil {
 		log.Fatal(err)
@@ -252,6 +260,7 @@ func run(planPath, outPath string) {
 	must(err)
 	conn := rawConn()
 	commitC := gitalypb.NewCommitServiceClient(conn)
+	diffC := gitalypb.NewDiffServiceClient(conn)
 	ctx := context.Background()
 	res := &Result{Timings: map[string][]float64{}, Values: map[string]any{}, Errors: map[string][]string{}}
 	base := func(rev, path string) gitserver.GetRepoInfoByPathReq {
@@ -286,6 +295,58 @@ func run(planPath, outPath string) {
 			}
 			res.put("last_commits", d.Rev+":"+d.Path, m)
 			return err
+		})
+	}
+	// The same reads through raw Gitaly RPCs, without starhub's extras (last commits and blob
+	// contents for a listing, the patch for a commit), to match what the other systems do
+	for _, d := range plan.Dirs {
+		res.time("list_dir_raw", func() error {
+			st, err := commitC.GetTreeEntries(ctx, &gitalypb.GetTreeEntriesRequest{Repository: repo(), Revision: []byte(d.Rev), Path: []byte(pathOrDot(d.Path))})
+			if err != nil {
+				return err
+			}
+			names := []string{}
+			for {
+				r, err := st.Recv()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return err
+				}
+				for _, x := range r.Entries {
+					p := string(x.Path)
+					names = append(names, p[strings.LastIndex(p, "/")+1:])
+				}
+			}
+			sort.Strings(names)
+			res.put("list_dir_raw", d.Rev+":"+d.Path, names)
+			return nil
+		})
+	}
+	for _, rev := range plan.Commits {
+		res.time("show_commit_raw", func() error {
+			cr, err := commitC.FindCommit(ctx, &gitalypb.FindCommitRequest{Repository: repo(), Revision: []byte(rev)})
+			if err != nil {
+				return err
+			}
+			left := "4b825dc642cb6eb9a060e54bf8d69288fbee4904" // empty tree
+			if len(cr.Commit.ParentIds) > 0 {
+				left = cr.Commit.ParentIds[0]
+			}
+			st, err := diffC.FindChangedPaths(ctx, &gitalypb.FindChangedPathsRequest{Repository: repo(), Requests: []*gitalypb.FindChangedPathsRequest_Request{{Type: &gitalypb.FindChangedPathsRequest_Request_TreeRequest_{TreeRequest: &gitalypb.FindChangedPathsRequest_Request_TreeRequest{LeftTreeRevision: left, RightTreeRevision: rev}}}}})
+			if err != nil {
+				return err
+			}
+			for {
+				if _, err := st.Recv(); err == io.EOF {
+					break
+				} else if err != nil {
+					return err
+				}
+			}
+			res.put("show_commit_raw", rev, cr.Commit.Id)
+			return nil
 		})
 	}
 	for _, rev := range plan.Logs {

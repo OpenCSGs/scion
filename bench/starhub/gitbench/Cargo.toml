@@ -1,0 +1,15 @@
+[package]
+name = "gitbench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The comparison workload directly on a bare git repository through libgit2 (lower bound for git)"
+
+[workspace]
+
+[dependencies]
+git2 = { version = "0.20", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+hex = "0.4"

@@ -1,0 +1,29 @@
+# Gitaly v16.4.6 as starhub-server's docker-compose-gitaly.yml runs it.
+listen_addr = "0.0.0.0:8075"
+bin_dir = "/usr/local/bin"
+runtime_dir = "/home/git/run"
+
+[git]
+use_bundled_binaries = true
+ignore_gitconfig = true
+
+[[storage]]
+name = "default"
+path = "/home/git/repositories"
+
+[auth]
+token = "abc123secret"
+
+[gitlab]
+url = "http://192.168.65.254:28090"
+secret_file = "/srv/gitlab-shell/.gitlab_shell_secret"
+
+[gitlab-shell]
+dir = "/srv/gitlab-shell"
+
+[hooks]
+custom_hooks_dir = "/home/git/hooks"
+
+[logging]
+format = "json"
+level = "warn"

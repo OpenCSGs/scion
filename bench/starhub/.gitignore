@@ -1,0 +1,13 @@
+# outputs of compare.py / fulltest.py
+work/
+full/
+*.bundle
+*.zip
+*-results.json
+compare-results.json
+plan.json
+cfg.json
+serve.log
+*.txt
+gitalybench/gitalybench
+scionbench/target/

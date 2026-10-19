@@ -12,6 +12,7 @@ A server-first source control system: history, merges and rebases are computed o
 
 **Guides**
 - [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
+- [Test report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, and a side-by-side comparison with starhub's Gitaly + MinIO stack
 - [Coming from git](docs/guide/coming-from-git.md): git commands and their scn equivalents, revision syntax (`HEAD~1`, `A..B`)
 - [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
 - [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check

@@ -1,0 +1,52 @@
+# Side-by-side test: starhub's git stack (Gitaly + MinIO) and Scion (PostgreSQL + MinIO).
+name: scioncmp
+services:
+  minio:
+    image: opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/bitnami/minio:2023
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: Password_123
+      MINIO_SCHEME: http
+      MINIO_DEFAULT_BUCKETS: opencsg-server-lfs:public,scion-objects
+    ports: ["19000:9000"]
+    volumes: [minio-data:/bitnami/minio/data]
+
+  gitaly:
+    image: opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/gitaly:v16.4.6
+    command: ["bash", "-c", "mkdir -p /home/git/repositories /home/git/run /home/git/hooks && rm -rf /srv/gitlab-shell/hooks/* && touch /srv/gitlab-shell/.gitlab_shell_secret && exec /usr/bin/env GITALY_CONFIG_FILE=/home/gitaly.config.toml /scripts/process-wrapper"]
+    environment: [GITALY_CONFIG_FILE=/home/gitaly.config.toml]
+    user: root
+    ports: ["18075:8075"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - gitaly-repos:/home/git/repositories
+      - ./gitaly.config.toml:/home/gitaly.config.toml:ro
+
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16
+    environment: {POSTGRES_USER: scion, POSTGRES_PASSWORD: scion, POSTGRES_DB: scion}
+    volumes: [pg-data:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U scion"], interval: 2s, retries: 60}
+
+  scion:
+    image: scion:compare
+    command: ["server"]
+    environment:
+      SCION_LISTEN: 0.0.0.0:7080
+      SCION_META: postgres://scion:scion@postgres:5432/scion
+      SCION_BLOBS: s3://scion-objects
+      SCION_S3_ENDPOINT: http://minio:9000
+      SCION_S3_ACCESS_KEY_ID: admin
+      SCION_S3_SECRET_ACCESS_KEY: Password_123
+      SCION_S3_PROVIDER: minio
+      SCION_S3_REGION: cn-beijing
+    depends_on:
+      postgres: {condition: service_healthy}
+      minio: {condition: service_started}
+    restart: on-failure
+    ports: ["17080:7080"]
+
+volumes:
+  minio-data:
+  gitaly-repos:
+  pg-data:

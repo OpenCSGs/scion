@@ -12,6 +12,7 @@
 
 **使用指南**
 - [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
+- [测试报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案的平行对比
 - [从 git 迁移](docs/guide/coming-from-git.md)（英文）：git 命令与 scn 的对照、版本号写法（`HEAD~1`、`A..B`）
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream

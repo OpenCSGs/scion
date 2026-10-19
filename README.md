@@ -27,7 +27,7 @@ A server-first source control system: history, merges and rebases are computed o
 - [Redaction and data checks](docs/guide/redaction.md) (Chinese): removing leaked content (redact, purge), `scion admin fsck`, `scion admin lease ls`
 
 **Design and specifications** (Chinese)
-- Design docs: [server](docs/design/rust-server-architecture.md) · [client](docs/design/rust-client-architecture.md) · [starhub / CSGLite integration](docs/design/starhub-integration.md)
+- Design docs: [server](docs/design/rust-server-architecture.md) · [client](docs/design/rust-client-architecture.md) · [starhub / CSGLite integration](docs/design/starhub-integration.md) · [roadmap](docs/design/roadmap.md) (Chinese; large planned tasks that are not needed yet, such as virtualized checkout)
 - Object format: [`SPEC.md`](SPEC.md), with golden test vectors in [`testdata/vectors/`](testdata/vectors/)
 - Protocol: [`proto/scion/v1/`](proto/scion/v1/)
 

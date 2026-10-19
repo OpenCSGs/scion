@@ -241,7 +241,9 @@ pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
 
 pub async fn create_branch(ctx: &Ctx, name: &str, revision: Option<&str>) -> Result<BranchChangeOut, CliError> {
     let (c, default_rev) = query_client(ctx).await?;
-    let rev = c.resolve_revision(revision.unwrap_or(&default_rev)).await?;
+    let rev = c
+        .resolve_revision(&ctx.expand_rev(revision.unwrap_or(&default_rev))?)
+        .await?;
     let (target, version) = c.create_ref(name, &rev.id).await?;
     Ok(BranchChangeOut {
         schema: "scion.cli.branch/v1",

@@ -12,6 +12,7 @@
 
 **使用指南**
 - [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
+- [从 git 迁移](docs/guide/coming-from-git.md)（英文）：git 命令与 scn 的对照、版本号写法（`HEAD~1`、`A..B`）
 - [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
 - [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
 - [打包下载](docs/guide/archive.md)：用 `scn archive` 把某个版本或目录打包成 tar.gz、zip 或 tar
@@ -180,7 +181,7 @@ scn resolve src/main.rs             # 去掉标记后标记为已解决；或用
 scn commit                          # 完成，沿用原来的提交说明；`scn merge --abort` 放弃合并
 scn cat main:README.md              # 不需要工作副本也能读文件（工作副本外加 --repo）
 scn ls main:                        # 列目录；所有命令都支持 --json
-scn log --path src -n 10            # 历史，从新到旧，可按路径过滤
+scn log -n 10 -- src                # 历史，从新到旧，可按路径过滤（git 写法：HEAD~1、A..B）
 scn diff                            # 本地未提交的改动（unified diff）
 scn diff main                       # main 最新提交引入的改动；`scn diff A B` 比较两个版本
 scn blame src/lib.rs                # 每一行最后被哪个提交改动

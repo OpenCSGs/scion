@@ -102,7 +102,7 @@ fn log_line(e: LogItem) -> LogLine {
 /// 自动翻页直到凑够 `limit` 条或历史结束。
 pub async fn log(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, limit: usize) -> Result<LogOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
-    let revision = revision.map_or(default_rev, str::to_owned);
+    let revision = ctx.expand_rev(&revision.map_or(default_rev, str::to_owned))?;
     let mut entries = Vec::new();
     let mut token: Option<String> = None;
     while entries.len() < limit {
@@ -171,6 +171,8 @@ fn split_lines(data: &[u8]) -> Vec<&[u8]> {
 pub async fn blame(ctx: &Ctx, spec: &str) -> Result<BlameOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_spec(spec, &default_rev);
+    let rev = ctx.expand_rev(rev)?;
+    let rev = rev.as_str();
     let info = client.blame(rev, path).await?;
     let data = client.get_object(&info.blob).await?;
     let raw = split_lines(&data);
@@ -340,44 +342,126 @@ async fn remote_files(
     Ok(files)
 }
 
+/// git's range forms: `A..B` → (A, B, false); `A...B` → (A, B, true), meaning "from the merge
+/// base of A and B". An empty side means HEAD.
+pub(crate) fn split_range(rev: &str) -> Option<(&str, &str, bool)> {
+    if let Some((a, b)) = rev.split_once("...") {
+        return Some((a, b, true));
+    }
+    rev.split_once("..").map(|(a, b)| (a, b, false))
+}
+
 /// - 不带版本：工作副本里尚未提交的改动；
 /// - 一个版本：该提交相对第一个父提交引入的改动；
-/// - 两个版本：两者之间的差异。
+/// - 两个版本，或 `A..B`：两者之间的差异；`A...B`：B 相对两者的公共祖先的改动。
 pub async fn diff(ctx: &Ctx, revs: &[String], path: Option<&str>, name_only: bool) -> Result<DiffOut, CliError> {
-    match revs {
-        [] => local_diff(ctx, path, name_only).await,
-        [rev] => {
-            let (client, _) = query_client(ctx).await?;
-            let page = client.log(rev, None, 1, None).await?;
-            let entry = page
-                .entries
-                .into_iter()
-                .next()
-                .ok_or_else(|| CliError::Usage(format!("{rev} has no history")))?;
-            let from = entry.parents.first().map(ToString::to_string);
-            let to = entry.id.to_string();
-            let changes = client.diff(from.as_deref(), &to, path).await?;
-            Ok(DiffOut {
-                schema: "scion.cli.diff/v1",
-                files: remote_files(&client, changes, name_only).await?,
-                from,
-                to,
-                name_only,
-            })
+    let or_head = |r: &str| if r.is_empty() { "HEAD".to_owned() } else { r.to_owned() };
+    let (from, to) = match revs {
+        [] => return local_diff(ctx, path, name_only).await,
+        [r] => match split_range(r) {
+            Some((a, b, three_dots)) => {
+                let (a, b) = (ctx.expand_rev(&or_head(a))?, ctx.expand_rev(&or_head(b))?);
+                if three_dots {
+                    let (client, _) = query_client(ctx).await?;
+                    let base = client
+                        .merge_bases(&a, &b)
+                        .await?
+                        .first()
+                        .map(ToString::to_string)
+                        .ok_or_else(|| CliError::Usage(format!("{a} and {b} have no common ancestor")))?;
+                    (Some(base), b)
+                } else {
+                    (Some(a), b)
+                }
+            }
+            None => {
+                let rev = ctx.expand_rev(r)?;
+                let (client, _) = query_client(ctx).await?;
+                let page = client.log(&rev, None, 1, None).await?;
+                let entry = page
+                    .entries
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| CliError::Usage(format!("{rev} has no history")))?;
+                (entry.parents.first().map(ToString::to_string), entry.id.to_string())
+            }
+        },
+        [a, b] => (Some(ctx.expand_rev(a)?), ctx.expand_rev(b)?),
+        _ => return Err(CliError::Usage("scn diff takes at most two revisions".into())),
+    };
+    let (client, _) = query_client(ctx).await?;
+    let changes = client.diff(from.as_deref(), &to, path).await?;
+    Ok(DiffOut {
+        schema: "scion.cli.diff/v1",
+        files: remote_files(&client, changes, name_only).await?,
+        from,
+        to,
+        name_only,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShowOut {
+    pub schema: &'static str,
+    pub commit: LogLine,
+    pub diff: DiffOut,
+}
+
+impl Render for ShowOut {
+    fn text(&self) -> String {
+        let c = &self.commit;
+        let mut out = format!("commit {}\n", c.id);
+        if c.parents.len() > 1 {
+            let short: Vec<&str> = c.parents.iter().map(|p| &p[..p.len().min(12)]).collect();
+            out.push_str(&format!("Merge: {}\n", short.join(" ")));
         }
-        [from, to] => {
-            let (client, _) = query_client(ctx).await?;
-            let changes = client.diff(Some(from), to, path).await?;
-            Ok(DiffOut {
-                schema: "scion.cli.diff/v1",
-                files: remote_files(&client, changes, name_only).await?,
-                from: Some(from.clone()),
-                to: to.clone(),
-                name_only,
-            })
+        out.push_str(&format!(
+            "Author: {} <{}>\nDate:   {}\n\n",
+            c.author,
+            c.email,
+            format_time(c.time_ms, c.tz_offset_minutes)
+        ));
+        for line in c.message.lines() {
+            out.push_str(&format!("    {line}\n"));
         }
-        _ => Err(CliError::Usage("scn diff takes at most two revisions".into())),
+        let diff = self.diff.text();
+        if !diff.is_empty() {
+            out.push('\n');
+            out.push_str(&diff);
+        }
+        out
     }
+}
+
+/// `scn show [REV] [-- PATH]`: the commit's metadata and the changes it introduced (relative to
+/// its first parent). REV defaults to HEAD in a working copy, else to the default ref.
+pub async fn show(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, name_only: bool) -> Result<ShowOut, CliError> {
+    let (client, default_rev) = query_client(ctx).await?;
+    let rev = match revision {
+        Some(r) => ctx.expand_rev(r)?,
+        None if ctx.has_working_copy() => ctx.expand_rev("HEAD")?,
+        None => default_rev,
+    };
+    let page = client.log(&rev, None, 1, None).await?;
+    let entry = page
+        .entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| CliError::Usage(format!("{rev} has no history")))?;
+    let id = entry.id.to_string();
+    let from = entry.parents.first().map(ToString::to_string);
+    let changes = client.diff(from.as_deref(), &id, path).await?;
+    Ok(ShowOut {
+        schema: "scion.cli.show/v1",
+        diff: DiffOut {
+            schema: "scion.cli.diff/v1",
+            files: remote_files(&client, changes, name_only).await?,
+            from,
+            to: id,
+            name_only,
+        },
+        commit: log_line(entry),
+    })
 }
 
 fn in_path(file: &str, path: Option<&str>) -> bool {
@@ -425,6 +509,48 @@ async fn local_diff(ctx: &Ctx, path: Option<&str>, name_only: bool) -> Result<Di
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranges() {
+        assert_eq!(split_range("a..b"), Some(("a", "b", false)));
+        assert_eq!(split_range("main...feat"), Some(("main", "feat", true)));
+        assert_eq!(split_range("..b"), Some(("", "b", false)));
+        assert_eq!(split_range("a..."), Some(("a", "", true)));
+        assert_eq!(split_range("main~1"), None);
+    }
+
+    #[test]
+    fn show_text() {
+        let commit = LogLine {
+            id: "c1aaaaaaaaaaaaaaaa".into(),
+            parents: vec!["c1bbbbbbbbbbbbbbbb".into(), "c1cccccccccccccccc".into()],
+            author: "Ada".into(),
+            email: "ada@x".into(),
+            time_ms: 0,
+            tz_offset_minutes: 0,
+            message: "subject\n\nbody".into(),
+            generation: 3,
+        };
+        let diff = DiffOut {
+            schema: "d",
+            from: None,
+            to: "x".into(),
+            files: vec![],
+            name_only: true,
+        };
+        let text = ShowOut {
+            schema: "s",
+            commit,
+            diff,
+        }
+        .text();
+        assert!(
+            text.starts_with(
+                "commit c1aaaaaaaaaaaaaaaa\nMerge: c1bbbbbbbbbb c1cccccccccc\nAuthor: Ada <ada@x>\nDate:   1970-01-01 00:00 +0000\n\n    subject\n    \n    body\n"
+            ),
+            "{text}"
+        );
+    }
 
     #[test]
     fn format_time_known_values() {

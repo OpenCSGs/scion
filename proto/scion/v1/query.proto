@@ -6,6 +6,7 @@ import "scion/v1/common.proto";
 import "scion/v1/write.proto";
 
 // 不需要本地仓库的查询（「源码管理即 API」）。revision 为 ref 名或提交 id 的文本形式（c1…）。
+// A revision may also be a 40-hex git SHA, and take git-style suffixes: REV~N, REV^, REV^N.
 service QueryService {
   // 读取文件内容，分块流式返回；断开后用 offset 续传。
   rpc ReadFile(ReadFileRequest) returns (stream ReadFileResponse);

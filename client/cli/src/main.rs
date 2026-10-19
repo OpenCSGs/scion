@@ -50,7 +50,8 @@ enum Command {
         #[arg(long = "ref", default_value = "main")]
         reference: String,
         /// 稀疏检出：只检出这些目录（逗号分隔）和根目录下的文件。
-        #[arg(long, value_name = "DIRS", value_delimiter = ',')]
+        /// Can be repeated: `--sparse src --sparse docs`.
+        #[arg(long, value_name = "DIRS", value_delimiter = ',', num_args = 1)]
         sparse: Option<Vec<String>>,
     },
     /// 稀疏检出的范围。
@@ -60,8 +61,24 @@ enum Command {
     #[command(subcommand)]
     Repo(RepoCmd),
     /// 分支：列出、创建、删除（当前工作副本的仓库，或 --repo）。
-    #[command(subcommand)]
-    Branch(BranchCmd),
+    /// git-style forms also work: `scn branch` (list), `scn branch NAME [REV]`, `scn branch -d NAME`.
+    #[command(args_conflicts_with_subcommands = true)]
+    Branch {
+        #[command(subcommand)]
+        cmd: Option<BranchCmd>,
+        /// Create this branch (at REV, default the current ref).
+        name: Option<String>,
+        revision: Option<String>,
+        /// Delete this branch.
+        #[arg(
+            short = 'd',
+            long = "delete",
+            short_alias = 'D',
+            value_name = "NAME",
+            conflicts_with = "name"
+        )]
+        delete: Option<String>,
+    },
     /// 显示本地改动。
     Status,
     /// 把本地改动创建为提交（尚未合入）。
@@ -73,6 +90,9 @@ enum Command {
         /// Replace the pending (not yet landed) commit, adding the current local changes.
         #[arg(long)]
         amend: bool,
+        /// Accepted for git compatibility (`-am`); scn always commits every local change.
+        #[arg(short = 'a', long = "all")]
+        all: bool,
         /// Author as "Name <email>". Defaults to `scn config` `user.name` / `user.email`, then git's
         /// `user.name` / `user.email`.
         #[arg(long, env = "SCION_AUTHOR")]
@@ -145,24 +165,44 @@ enum Command {
     /// 历史：从 REV（默认当前 ref）开始，按时间从新到旧。
     Log {
         revision: Option<String>,
-        /// 只显示改动了该路径的提交。
+        /// 只显示改动了该路径的提交。Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
         /// 最多显示的条数。
         #[arg(short = 'n', long = "max-count", default_value_t = 20)]
         max_count: usize,
+        /// Accepted for git compatibility; the output is one line per commit already.
+        #[arg(long)]
+        oneline: bool,
+        /// `-- PATH`, as in git.
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
+    },
+    /// Show a commit (default HEAD) and the changes it introduced, like `git show`.
+    Show {
+        revision: Option<String>,
+        /// Only list file names and status (A / M / D).
+        #[arg(long)]
+        name_only: bool,
+        /// `-- PATH`: only changes under this path.
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
     },
     /// 逐行显示最后改动的提交：[REV:]PATH。
     Blame { spec: String },
     /// 差异：不带参数为本地未提交的改动；一个 REV 为该提交引入的改动；两个 REV 为两者之间的差异。
+    /// Revisions may be `A B`, `A..B` or `A...B` (from their common ancestor), as in git.
     Diff {
         revisions: Vec<String>,
-        /// 只比较该路径。
+        /// 只比较该路径。Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
         /// 只列出文件名与状态（A / M / D）。
         #[arg(long)]
         name_only: bool,
+        /// `-- PATH`, as in git.
+        #[arg(last = true, value_name = "PATH")]
+        paths: Vec<String>,
     },
     /// 导入外部历史。
     #[command(subcommand)]
@@ -302,6 +342,15 @@ enum ImportCmd {
     },
 }
 
+/// `--path P` or git's `-- P`; history queries filter by one path.
+fn one_path(flag: Option<String>, rest: Vec<String>) -> Result<Option<String>, CliError> {
+    match (flag, rest.as_slice()) {
+        (p, []) => Ok(p),
+        (None, [p]) => Ok(Some(p.trim_end_matches('/').to_owned())),
+        _ => Err(CliError::Usage("give one path, with --path or after --".into())),
+    }
+}
+
 fn emit<T: Render>(v: Result<T, CliError>, json: bool) -> ExitCode {
     match v {
         Ok(v) => {
@@ -380,18 +429,27 @@ async fn run(cli: Cli) -> ExitCode {
             RepoCmd::Restore { name } => emit(repos::restore(&ctx, &name).await, json),
             RepoCmd::Fork { source, target } => emit(repos::fork(&ctx, &source, &target).await, json),
         },
-        Command::Branch(cmd) => match cmd {
-            BranchCmd::Ls => emit(repos::branches(&ctx).await, json),
-            BranchCmd::Create { name, revision } => {
+        Command::Branch {
+            cmd,
+            name,
+            revision,
+            delete,
+        } => match (cmd, name, delete) {
+            (Some(BranchCmd::Ls), _, _) | (None, None, None) => emit(repos::branches(&ctx).await, json),
+            (Some(BranchCmd::Create { name, revision }), _, _) => {
                 emit(repos::create_branch(&ctx, &name, revision.as_deref()).await, json)
             }
-            BranchCmd::Rm { name } => emit(repos::delete_branch(&ctx, &name).await, json),
+            (None, Some(name), _) => emit(repos::create_branch(&ctx, &name, revision.as_deref()).await, json),
+            (Some(BranchCmd::Rm { name }), _, _) | (None, None, Some(name)) => {
+                emit(repos::delete_branch(&ctx, &name).await, json)
+            }
         },
         Command::Status => emit(commands::status(&ctx), json),
         Command::Commit {
             message,
             amend: true,
             author,
+            ..
         } => emit(commands::amend(&ctx, message.as_deref(), author.as_deref()).await, json),
         Command::Commit { message, author, .. } => emit(
             commands::commit(&ctx, message.as_deref(), author.as_deref()).await,
@@ -465,16 +523,36 @@ async fn run(cli: Cli) -> ExitCode {
             revision,
             path,
             max_count,
-        } => emit(
-            history::log(&ctx, revision.as_deref(), path.as_deref(), max_count).await,
-            json,
-        ),
+            paths,
+            ..
+        } => match one_path(path, paths) {
+            Ok(path) => emit(
+                history::log(&ctx, revision.as_deref(), path.as_deref(), max_count).await,
+                json,
+            ),
+            Err(e) => fail(&e, json),
+        },
+        Command::Show {
+            revision,
+            name_only,
+            paths,
+        } => match one_path(None, paths) {
+            Ok(path) => emit(
+                history::show(&ctx, revision.as_deref(), path.as_deref(), name_only).await,
+                json,
+            ),
+            Err(e) => fail(&e, json),
+        },
         Command::Blame { spec } => emit(history::blame(&ctx, &spec).await, json),
         Command::Diff {
             revisions,
             path,
             name_only,
-        } => emit(history::diff(&ctx, &revisions, path.as_deref(), name_only).await, json),
+            paths,
+        } => match one_path(path, paths) {
+            Ok(path) => emit(history::diff(&ctx, &revisions, path.as_deref(), name_only).await, json),
+            Err(e) => fail(&e, json),
+        },
         Command::Login { token, with_token } => {
             let token = if with_token {
                 let mut s = String::new();
@@ -578,7 +656,10 @@ mod tests {
         let cli = Cli::try_parse_from(["scn", "branch", "create", "dev", "main"]).expect("parse");
         assert!(matches!(
             cli.command,
-            Command::Branch(BranchCmd::Create { revision: Some(_), .. })
+            Command::Branch {
+                cmd: Some(BranchCmd::Create { revision: Some(_), .. }),
+                ..
+            }
         ));
         let cli = Cli::try_parse_from(["scn", "sparse", "disable"]).expect("parse");
         assert!(matches!(cli.command, Command::Sparse(SparseCmd::Disable)));
@@ -608,6 +689,41 @@ mod tests {
         assert!(matches!(cli.command, Command::Import(ImportCmd::Git { ref git_ref, .. }) if git_ref == "dev"));
         let cli = Cli::try_parse_from(["scn", "log", "main", "--path", "src", "-n", "5"]).expect("parse");
         assert!(matches!(cli.command, Command::Log { max_count: 5, .. }));
+        let cli = Cli::try_parse_from(["scn", "log", "HEAD~1", "--oneline", "--", "src"]).expect("parse");
+        assert!(matches!(cli.command, Command::Log { ref paths, oneline: true, .. } if paths == &["src"]));
+        let cli = Cli::try_parse_from(["scn", "show", "main^2", "--", "a"]).expect("parse");
+        assert!(matches!(cli.command, Command::Show { revision: Some(_), ref paths, .. } if paths.len() == 1));
+        let cli = Cli::try_parse_from(["scn", "commit", "-am", "msg"]).expect("parse");
+        assert!(
+            matches!(cli.command, Command::Commit { all: true, ref message, .. } if message.as_deref() == Some("msg"))
+        );
+        let cli = Cli::try_parse_from(["scn", "clone", "r", "--sparse", "a,b", "--sparse", "c"]).expect("parse");
+        assert!(matches!(cli.command, Command::Clone { sparse: Some(ref d), .. } if d.len() == 3));
+        for (args, want) in [
+            (&["scn", "branch"][..], "ls"),
+            (&["scn", "branch", "ls"][..], "ls"),
+            (&["scn", "branch", "feat"][..], "create"),
+            (&["scn", "branch", "feat", "main~1"][..], "create"),
+            (&["scn", "branch", "create", "feat"][..], "create"),
+            (&["scn", "branch", "-d", "feat"][..], "rm"),
+            (&["scn", "branch", "-D", "feat"][..], "rm"),
+            (&["scn", "branch", "rm", "feat"][..], "rm"),
+        ] {
+            let Command::Branch { cmd, name, delete, .. } = Cli::try_parse_from(args).expect("parse").command else {
+                panic!("{args:?}");
+            };
+            let got = match (cmd, name, delete) {
+                (Some(BranchCmd::Ls), ..) | (None, None, None) => "ls",
+                (Some(BranchCmd::Create { .. }), ..) | (None, Some(_), _) => "create",
+                _ => "rm",
+            };
+            assert_eq!(got, want, "{args:?}");
+        }
+        assert!(Cli::try_parse_from(["scn", "branch", "x", "-d", "y"]).is_err());
+        assert_eq!(one_path(Some("a".into()), vec![]).ok(), Some(Some("a".into())));
+        assert_eq!(one_path(None, vec!["src/".into()]).ok(), Some(Some("src".into())));
+        assert!(one_path(Some("a".into()), vec!["b".into()]).is_err());
+        assert!(one_path(None, vec!["a".into(), "b".into()]).is_err());
         let cli = Cli::try_parse_from(["scn", "diff", "a", "b", "--name-only"]).expect("parse");
         assert!(matches!(cli.command, Command::Diff { ref revisions, name_only: true, .. } if revisions.len() == 2));
         let cli = Cli::try_parse_from(["scn", "ls"]).expect("parse");

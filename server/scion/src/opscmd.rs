@@ -201,12 +201,12 @@ mod tests {
         let args = RedactArgs {
             repo: "r".into(),
             ids: vec![],
-            paths: vec!["main~0:docs/secret.txt".into()],
+            paths: vec!["nope:docs/secret.txt".into()],
             reason: "leaked password".into(),
             all_repos: false,
             by: None,
         };
-        // main~0 不是合法的 revision
+        // An unknown revision
         assert!(redact(&args, fx.meta.clone(), fx.blobs.clone(), no_env).await.is_err());
         let first = scion_query::all_records(fx.meta.as_ref(), "r", 16)
             .await

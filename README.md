@@ -12,6 +12,7 @@ A server-first source control system: history, merges and rebases are computed o
 
 **Guides**
 - [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
+- [Coming from git](docs/guide/coming-from-git.md): git commands and their scn equivalents, revision syntax (`HEAD~1`, `A..B`)
 - [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
 - [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check
 - [Archives](docs/guide/archive.md) (Chinese): download a revision or a directory as tar.gz, zip or tar with `scn archive`
@@ -141,7 +142,7 @@ scn resolve src/main.rs             # after editing out the markers; or --ours /
 scn commit                          # finishes it, reusing the original message; `scn merge --abort` undoes a merge
 scn cat main:README.md              # read files without a working copy (add --repo outside one)
 scn ls main:                        # list a directory; every command supports --json
-scn log --path src -n 10            # history, newest first, optionally limited to a path
+scn log -n 10 -- src                # history, newest first, optionally limited to a path (git-style: HEAD~1, A..B)
 scn diff                            # uncommitted local changes (unified diff)
 scn diff main                       # what the tip of main changed; `scn diff A B` compares two revisions
 scn blame src/lib.rs                # the commit that last changed each line

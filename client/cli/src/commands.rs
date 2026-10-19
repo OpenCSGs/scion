@@ -27,6 +27,28 @@ impl Ctx {
         WorkingCopy::open(&self.cwd).ok()
     }
 
+    pub fn has_working_copy(&self) -> bool {
+        self.working_copy().is_some()
+    }
+
+    /// Expands git's `HEAD` / `@` (alone or followed by `~N` / `^N`, e.g. `HEAD~1`) to the
+    /// working copy's current commit: the pending commit if any, else the synced one. Other
+    /// revisions, including suffixes on refs and ids, are resolved by the server.
+    pub fn expand_rev(&self, rev: &str) -> Result<String, CliError> {
+        let rest = match rev.strip_prefix("HEAD").or_else(|| rev.strip_prefix('@')) {
+            Some(r) if r.is_empty() || r.starts_with(['~', '^']) => r,
+            _ => return Ok(rev.to_owned()),
+        };
+        let wc = self
+            .working_copy()
+            .ok_or_else(|| CliError::Usage(format!("{rev}: HEAD needs a working copy")))?;
+        let current = wc
+            .state()
+            .current()?
+            .ok_or_else(|| CliError::Usage(format!("{rev}: the working copy has no commits yet")))?;
+        Ok(format!("{current}{rest}"))
+    }
+
     /// 服务端地址：命令行或环境变量 > 当前工作副本记录 > 默认值。
     pub fn endpoint_or_default(&self) -> String {
         self.endpoint_or(self.working_copy().as_ref())
@@ -812,6 +834,8 @@ impl Render for CatOut {
 pub async fn cat(ctx: &Ctx, spec: &str) -> Result<CatOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_spec(spec, &default_rev);
+    let rev = ctx.expand_rev(rev)?;
+    let rev = rev.as_str();
     let data = client.read_file(rev, path).await?;
     let binary = std::str::from_utf8(&data).is_err();
     Ok(CatOut {
@@ -861,6 +885,8 @@ pub async fn archive(
         .ok_or_else(|| CliError::Usage(format!("unknown archive format {format:?} (tar.gz, zip or tar)")))?;
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_spec(spec.unwrap_or(""), &default_rev);
+    let rev = ctx.expand_rev(rev)?;
+    let rev = rev.as_str();
     let (changeset, bytes) = match output {
         Some(file) => {
             let f =
@@ -933,6 +959,8 @@ pub fn kind(m: EntryMode) -> &'static str {
 pub async fn ls(ctx: &Ctx, spec: Option<&str>) -> Result<LsOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_spec(spec.unwrap_or(""), &default_rev);
+    let rev = ctx.expand_rev(rev)?;
+    let rev = rev.as_str();
     let entries = client.list_dir(rev, path).await?;
     Ok(LsOut {
         schema: "scion.cli.ls/v1",
@@ -982,6 +1010,26 @@ mod tests {
         for bad in ["Ada", "<a@b>", "Ada <>", "Ada <a@b", ""] {
             assert!(matches!(parse_author(bad), Err(CliError::Usage(_))), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn expand_rev_outside_a_working_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ctx = Ctx {
+            cwd: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        assert_eq!(ctx.expand_rev("main~1").ok().as_deref(), Some("main~1"));
+        assert_eq!(
+            ctx.expand_rev("HEADS-up").ok().as_deref(),
+            Some("HEADS-up"),
+            "a ref name"
+        );
+        assert_eq!(ctx.expand_rev("@home").ok().as_deref(), Some("@home"));
+        for head in ["HEAD", "@", "HEAD~2", "@^"] {
+            assert!(matches!(ctx.expand_rev(head), Err(CliError::Usage(_))), "{head}");
+        }
+        assert!(!ctx.has_working_copy());
     }
 
     #[test]

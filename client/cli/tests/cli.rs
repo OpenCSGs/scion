@@ -398,6 +398,60 @@ async fn clone_commit_land_sync_workflow() {
         assert_eq!(log["entries"][0]["parents"].as_array().map(Vec::len), Some(2));
         assert_eq!(scn_in(&wc, &["commit"]).status.code(), Some(2), "-m required again");
 
+        // git-style revisions and arguments
+        let head = json_of(&scn_in(&wc, &["log", "-n", "1", "--json"]))["entries"][0]["id"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let v = json_of(&scn_in(&wc, &["log", "HEAD^2", "-n", "1", "--oneline", "--json"]));
+        assert_eq!(v["entries"][0]["message"], "t3", "second parent of the merge");
+        let v = json_of(&scn_in(&wc, &["log", "@~1", "-n", "1", "--json"]));
+        assert_eq!(v["entries"][0]["message"], "m4");
+        let v = json_of(&scn_in(&wc, &["log", "-n", "5", "--json", "--", "topic.txt"]));
+        assert!(v["entries"].as_array().is_some_and(|e| !e.is_empty()));
+        let v = json_of(&scn_in(&wc, &["diff", "HEAD~1..HEAD", "--name-only", "--json"]));
+        assert_eq!(v["files"][0]["path"], "src/lib.rs");
+        assert_eq!(v["to"], head);
+        let v = json_of(&scn_in(&wc, &["diff", "HEAD~1...HEAD^2", "--name-only", "--json"]));
+        assert!(
+            v["files"]
+                .as_array()
+                .is_some_and(|f| f.iter().any(|f| f["path"] == "src/lib.rs"))
+        );
+        let v = json_of(&scn_in(&wc, &["diff", "HEAD^", "--json", "--", "src"]));
+        assert!(v["files"].as_array().is_some_and(|f| {
+            f.iter()
+                .all(|f| f["path"].as_str().is_some_and(|p| p.starts_with("src/")))
+        }));
+        let out = scn_in(&wc, &["show"]);
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.starts_with(&format!("commit {head}\nMerge: ")), "{text}");
+        assert!(text.contains("    Merge topic into main"), "{text}");
+        let v = json_of(&scn_in(&wc, &["show", "HEAD^2", "--name-only", "--json"]));
+        assert_eq!(v["commit"]["message"], "t3");
+        assert_eq!(v["diff"]["files"][0]["path"], "src/lib.rs");
+        let out = scn_in(&wc, &["cat", "HEAD~1:src/lib.rs"]);
+        assert_eq!(out.stdout, b"pub fn f() -> u8 { 4 }\n");
+        json_of(&scn_in(&wc, &["branch", "old", "HEAD~1", "--json"]));
+        let out = scn_in(&wc, &["branch"]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("old"), "{out:?}");
+        json_of(&scn_in(&wc, &["branch", "-d", "old", "--json"]));
+        assert!(!String::from_utf8_lossy(&scn_in(&wc, &["branch"]).stdout).contains("old"));
+        std::fs::write(wc.join("am.txt"), "am").expect("write");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-am", "am", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        assert_eq!(
+            scn_in(&root, &["log", "HEAD", "--repo", "team/app", "--endpoint", &u])
+                .status
+                .code(),
+            Some(2),
+            "HEAD needs a working copy"
+        );
+        assert_eq!(scn_in(&wc, &["log", "--path", "a", "--", "b"]).status.code(), Some(2));
+
         // 第二个工作副本落后后 sync
         let v = json_of(&scn_in(
             &root,

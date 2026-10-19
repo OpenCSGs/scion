@@ -111,14 +111,12 @@ Legend: 🔵 has an initial design, ⚪ idea only.
 - **Repository-level events**: creates, deletes and forks also go into the event feed.
 - **Async fork**: fork very large repositories as a background task.
 
-### 2.9 Packing small objects ⚪
-- **What**: store small objects together in pack files (with an index), instead of one file or S3 object each.
-- **Why it waits**: objects are already zstd-compressed (starhub-server: 227 MB of bytes, against git's 392 MB pack). On S3/MinIO you pay for bytes, so it barely matters there.
-- **Start when**: a local file system holds a large repository (84% of starhub-server's objects are under 4 KB, so it takes 404 MB on disk with 4 KB blocks), or per-request S3 costs dominate.
-- **Design points**:
-  - Content addressing stays the same.
-  - Packs are immutable and written by a background compactor.
-  - Deltas between versions of a file (git-style) could go on top, for history-heavy repositories.
+### 2.9 Storage follow-ups ⚪
+Packs, deltas and `scion admin repack` are done ([object storage](../guide/object-storage.md#packs)): starhub-server takes 111 MB of MinIO against git's 82 MB. What is left:
+- **Repack on its own**: a server-side schedule (after large imports, or nightly) instead of an admin command.
+- **Better delta bases**: try several candidates (other versions of the path, similar sizes) instead of only the next newer version, as git does.
+- **Pack locations**: a repack rewrites every row; partition by pack generation, or rewrite the table, so it does not grow at each repack.
+- **Incremental repack**: only the objects written since the last one, appended as new packs.
 
 ### 2.10 Caching and multiple regions ⚪
 - **Cold-ref detection**: stop warming and prefetching refs nobody reads.

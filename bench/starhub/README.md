@@ -26,12 +26,13 @@ Each check compares Scion's answer with git's where possible.
 | `gitbench/` | Rust, in Docker next to Gitaly. The same workload directly on a bare clone of the bundle through libgit2, with the git command line where libgit2 has no API: git's lower bound, with no server or network |
 | `scionbench/` | Rust. The same workload through Scion's SDK |
 | `makeplan.py` | The shared workload. Every revision is a git SHA, so both sides answer the same requests |
-| `compare.py` | Resets both systems and imports into them. Then it measures deployment, storage, checkout, the API workload (sampling `docker stats`) and push vs land, and compares the three systems request by request. Each server restarts before its workload |
+| `compare.py` | Resets both systems, imports into them and runs `scion admin repack`. Then it measures deployment, storage, checkout, the API workload (sampling `docker stats`) and push vs land, and compares the three systems request by request. Each server restarts before its workload |
 
 To run it:
 
 ```sh
-docker build -t scion:compare .                   # from the repository root
+docker build -t scion:compare .                   # from the repository root; behind a proxy add
+                                                  # --build-arg https_proxy=http://<host>:<port>
 (cd bench/starhub/gitalybench && go build -o gitalybench .)
 (cd bench/starhub/scionbench && cargo build --release)
 docker build -t gitbench bench/starhub/gitbench   # --build-arg DEBIAN_MIRROR=… behind a slow mirror

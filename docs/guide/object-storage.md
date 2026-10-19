@@ -39,8 +39,10 @@ scion admin repack --meta postgres://… --blobs s3://scion-objects   # --dry-ru
 ```
 
 - **Deltas**: an older version is stored as zstd with the newer version as a reference (what `zstd --patch-from` does). The newest versions, which are read most, stay whole. Chains are at most 16 long; reads follow them and cache the bases they use.
-- **Effect** on starhub-server (6,326 commits): 70,206 objects in 1 pack of 51.5 MB, 44,397 of them deltas, in 74 s. git's pack for the same history is 82 MB. Objects over 8 MB stay loose.
+- **Effect** on starhub-server (6,338 commits, PostgreSQL + MinIO): 67,847 objects in 1 pack of 51 MB, 43,291 of them deltas, in 19 s. MinIO goes from 283 MB to 111 MB (the rest is three committed binaries over 8 MB, which stay loose); git's pack for the same history is 82 MB.
 - **Removing what it superseded**: packs none of whose objects live there any more, once older than `--prune-after` (default 1 hour, so that packs being written are not touched), and loose objects that are also packed.
+- **Reads** fetch large packs in 1 MiB blocks and keep 128 MiB of them, so a commit's objects and the versions of a delta chain mostly come from memory.
+- **Metadata**: the repack rewrites every pack location. On PostgreSQL it vacuums the table afterwards, so the space is reused by later writes, but the table stays at its larger size (9 MB more for starhub-server).
 - **Redaction**: purging an object that others are stored against first rewrites those others whole.
 
 ## 连接参数

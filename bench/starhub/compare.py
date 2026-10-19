@@ -296,8 +296,19 @@ def latency():
                 rec("values", f"{name} {op}", **v)
 
 
+def repack():
+    """Scion's `git gc`: after a large import, rewrite objects into packs with deltas."""
+    print("=== repack", flush=True)
+    r, ms = run(["docker", "compose", "-f", str(C / "docker-compose.yml"), "run", "--rm", "-T", "scion",
+                 "admin", "repack", "--prune-after", "0s"])
+    lines = [l for l in r.stdout.decode().strip().split("\n") if l and "Container" not in l]
+    rec("import", "scion admin repack", ms=round(ms), ok=r.returncode == 0, out=" | ".join(lines)[-300:])
+
+
 def main():
     reset()
+    storage("after import, before repack")
+    repack()
     deployment()
     storage()
     clones()

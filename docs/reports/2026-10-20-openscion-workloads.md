@@ -35,7 +35,7 @@ The scripts are in [`bench/openscion/`](../../bench/openscion/README.md).
 
 10 directories of 4 KiB pseudorandom files. Median milliseconds; 7 runs at 1,000 files, 5 at 10,000.
 
-| Scenario | Git, 1k | CarterT27, 1k | Scion, 1k | Git, 10k | CarterT27, 10k | Scion, 10k |
+| Scenario | Git, 1k | CarterT27, 1k | CSG Scion, 1k | Git, 10k | CarterT27, 10k | CSG Scion, 10k |
 |---|---:|---:|---:|---:|---:|---:|
 | Import a directory | 375 | 32.8 | **29.6** | 3,342 | 414 | **362** |
 | Commit one changed file | 29.7 | 29.2 | **13.4** | 227 | 143 | **42.2** |
@@ -48,24 +48,28 @@ CarterT27's README, measured on an M4 Pro, has Git ahead for the 10k commit (167
 
 ## t3code
 
-| | Git | Scion | Scion ÷ Git | CarterT27 (README) | CarterT27 ÷ Git |
-|---|---:|---:|---:|---:|---:|
-| Full checkout (28,068 files) | 2.65 s | **2.28 s** | **0.86** | 14.96 s (Git 2.90 s) | 5.2 |
-| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 1.03 | 0.97 s (Git 0.21 s) | 4.6 |
-| First checkout after a restart, full / `apps/web` | 2.66 / 0.222 s | 2.96 / 0.186 s | | | |
-| Clean status | 98 ms | 153 ms | 1.6 | | |
-| Status with one edited file | 98 ms | 154 ms | 1.6 | | |
-| Clean status, `apps/web` only | 11.8 ms | **8.7 ms** | 0.74 | | |
-| 100 first-parent history entries | 6.5 ms | 10.7 ms | 1.6 | | |
-| Read README.md | 5.9 ms | 11.8 ms | 2.0 | | |
-| Import the full history | — | **103 s** + 42 s repack | | 23 min 18 s | |
+CSG Scion and Git ran on the M5; the M4 Pro columns are CarterT27/scion's published numbers, from its README.
+
+| Scenario | Git, M5 | CSG Scion, M5 | Git, M4 Pro | CarterT27, M4 Pro |
+|---|---:|---:|---:|---:|
+| Full checkout (28,068 files) | 2.65 s | **2.28 s** | 2.90 s | 14.96 s |
+| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 0.21 s | 0.97 s |
+| First checkout after a restart, full / `apps/web` | 2.66 / 0.222 s | 2.96 / 0.186 s | — | — |
+| Clean status | **98 ms** | 153 ms | — | — |
+| Status with one edited file | **98 ms** | 154 ms | — | — |
+| Clean status, `apps/web` only | 11.8 ms | **8.7 ms** | — | — |
+| 100 first-parent history entries | **6.5 ms** | 10.7 ms | — | — |
+| Read README.md | **5.9 ms** | 11.8 ms | — | — |
+| Full history: Git's clone, Scion's import | 3.96 s | 103 s + 42 s repack | 3.56 s | 23 min 18 s |
+
+Against Git on the same machine, CSG Scion's full checkout takes 0.86× Git's time and its `apps/web` checkout 1.03×; CarterT27/scion's take 5.2× and 4.6×. CarterT27/scion publishes no numbers for the other rows. A Scion import builds and stores every commit on the server, so imports compare across the two implementations, not with Git's clone (`git clone --no-local --single-branch --no-checkout` of the bare repository, as in CarterT27's script).
 
 - Scion's sparse checkout also writes the 17 files at the repository's root (1,538 files); Git's sparse pattern here is `apps/web` only.
 - The command rows include starting `scn`, a few milliseconds; CarterT27's synthetic numbers exclude its process start.
 
 Storage after the import and repack:
 
-| | Git | Scion |
+| | Git | CSG Scion |
 |---|---|---|
 | Objects | 557 MB (the pack as cloned from GitHub) | **247 MB** of MinIO, 144,169 objects in 3 packs (100,307 as deltas) and 7 large files |
 | Metadata | — | 89.5 MB of PostgreSQL |

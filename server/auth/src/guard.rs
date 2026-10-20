@@ -103,6 +103,16 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// The client for calls out (JWKS, introspection, the authorization callback, OIDC).
+fn http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| {
+            format!("HTTP client: {e} (are the system's CA certificates installed? on Debian or Ubuntu: apt-get install ca-certificates)")
+        })
+}
+
 impl Guard {
     /// 不要求认证、一切允许（Lite 模式、测试）。
     pub fn disabled() -> Arc<Self> {
@@ -132,10 +142,17 @@ impl Guard {
     }
 
     pub fn build(config: GuardConfig, meta: Arc<dyn MetaStore>, lookup: Lookup) -> Result<Arc<Self>, String> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| format!("HTTP client: {e}"))?;
+        // Only external issuers, introspection, the authorization callback and OIDC call out, so
+        // only they need an HTTP client: building one needs the system's CA certificates, which a
+        // minimal Linux may not have, and a server that calls nobody should still start there
+        let a = &config.auth;
+        let http = if a.issuers.is_empty() && a.introspection.is_none() && a.authz_webhook.is_none() && a.oidc.is_none()
+        {
+            None
+        } else {
+            Some(http_client()?)
+        };
+        let http = || http.clone().expect("built when something calls out");
         let ttl = i64::try_from(config.auth.token.ttl().as_secs()).unwrap_or(900);
         let issuer = config
             .signing_key_pem
@@ -147,7 +164,7 @@ impl Guard {
             .auth
             .issuers
             .into_iter()
-            .map(|i| ExternalIssuer::new(i, http.clone(), &*lookup).map_err(|e| e.to_string()))
+            .map(|i| ExternalIssuer::new(i, http(), &*lookup).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Arc::new(Self {
             required: config.required,
@@ -157,12 +174,12 @@ impl Guard {
             introspection: config
                 .auth
                 .introspection
-                .map(|c| Introspection::new(c, http.clone(), lookup.clone())),
+                .map(|c| Introspection::new(c, http(), lookup.clone())),
             webhook: config
                 .auth
                 .authz_webhook
-                .map(|c| AuthzWebhook::new(c, http.clone(), lookup.clone())),
-            oidc: config.auth.oidc.map(|c| Oidc::new(c, http, lookup)),
+                .map(|c| AuthzWebhook::new(c, http(), lookup.clone())),
+            oidc: config.auth.oidc.map(|c| Oidc::new(c, http(), lookup)),
             policy: RwLock::new(PolicyState::Unloaded),
         }))
     }
@@ -573,6 +590,24 @@ mod tests {
         .expect("guard");
         g.reload_policy().await.expect("load policy");
         g
+    }
+
+    #[test]
+    fn build_without_calls_out_needs_no_http_client() {
+        // Nothing to call: no client is built, so the server starts even without CA certificates
+        let g = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::default(),
+                signing_key_pem: Some(crate::token::generate_signing_key()),
+            },
+            Arc::new(MemStore::new()),
+            lookup(),
+        )
+        .expect("guard");
+        assert!(g.externals.is_empty() && g.introspection.is_none() && g.webhook.is_none() && g.oidc.is_none());
+        assert!(g.required() && g.can_issue() && !g.device_login());
+        http_client().expect("an HTTP client where CA certificates exist");
     }
 
     fn now() -> i64 {

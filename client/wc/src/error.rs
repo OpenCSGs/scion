@@ -10,6 +10,10 @@ pub enum Error {
     NotAWorkingCopy(PathBuf),
     #[error("{0} already exists and is not empty")]
     TargetNotEmpty(PathBuf),
+    /// A path the working copy refuses to write: it names the working copy's own metadata
+    /// (`.scion`, `.git`), is not a plain relative path, or leads through a symbolic link.
+    #[error("refusing to write {path}: {reason}")]
+    UnsafePath { path: String, reason: &'static str },
     #[error("working copy is locked by another scn process ({0}); remove it if that process is gone")]
     Locked(PathBuf),
     #[error("you have uncommitted changes; commit them first")]

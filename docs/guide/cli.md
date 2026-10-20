@@ -60,3 +60,13 @@ scn import git ~/src/my-repo --repo mono
 # After upgrading a server that already has data, before starting it: repair lineage and backfill derived indexes (idempotent)
 cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
 ```
+
+## What a checkout will not write
+
+A repository's paths come from the server, so a hostile repository must not be able to change anything outside the working copy. `scn` refuses to write or remove, and stops with `refusing to write <path>`:
+
+- paths with a `.scion` or `.git` component, in any case (`.SCION`, `.Git`): the working copy's own metadata, and git's;
+- anything but plain relative paths (no `..`, empty components or backslashes);
+- paths that lead through a symbolic link, such as a link left by an earlier version where the new version has a directory, or a link `A` next to `a/...` on a case-insensitive file system (macOS, Windows).
+
+Symbolic links themselves are checked out as links, as git does; only writes through them are refused.

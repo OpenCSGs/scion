@@ -261,6 +261,79 @@ fn scan_dir<R>(
     Ok(())
 }
 
+/// Directory names a working copy never writes into: its own metadata and git's. Compared
+/// ignoring case, since macOS and Windows file systems do.
+const RESERVED: [&str; 2] = [DIR, ".git"];
+
+fn unsafe_path(rel: &str, reason: &'static str) -> Error {
+    Error::UnsafePath {
+        path: rel.to_owned(),
+        reason,
+    }
+}
+
+/// Checks a repository path before writing or removing it: plain relative components only, none
+/// of them reserved. Paths come from trees, so a hostile repository (or server) must not be able
+/// to reach outside the working copy or overwrite its metadata.
+fn check_rel(rel: &str) -> Result<()> {
+    for part in rel.split('/') {
+        if part.is_empty() || part == "." || part == ".." || part.contains('\\') || part.contains('\0') {
+            return Err(unsafe_path(rel, "not a plain relative path"));
+        }
+        if RESERVED.iter().any(|r| part.eq_ignore_ascii_case(r)) {
+            return Err(unsafe_path(rel, "it is reserved for the working copy's metadata"));
+        }
+    }
+    Ok(())
+}
+
+/// Checks that every directory on the way to `rel` (below `root`) is a real directory, not a
+/// symbolic link, so a write cannot follow one out of the working copy. Missing directories are
+/// fine: they are created as real directories.
+fn check_parents(root: &Path, rel: &str) -> Result<()> {
+    let mut dir = root.to_path_buf();
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    parts.pop();
+    for part in parts {
+        dir.push(part);
+        match std::fs::symlink_metadata(&dir) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(unsafe_path(rel, "a directory on its path is a symbolic link"));
+            }
+            Ok(m) if !m.is_dir() => return Ok(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io(&dir)(e)),
+        }
+    }
+    Ok(())
+}
+
+/// Creates the directories of `rel` one by one, refusing to go through a symbolic link.
+fn create_dirs(root: &Path, rel: &str) -> Result<()> {
+    let mut dir = root.to_path_buf();
+    for part in rel.split('/') {
+        dir.push(part);
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let m = std::fs::symlink_metadata(&dir).map_err(io(&dir))?;
+                if m.file_type().is_symlink() {
+                    return Err(unsafe_path(rel, "a directory on its path is a symbolic link"));
+                }
+                if !m.is_dir() {
+                    return Err(io(&dir)(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "not a directory",
+                    )));
+                }
+            }
+            Err(e) => return Err(io(&dir)(e)),
+        }
+    }
+    Ok(())
+}
+
 fn path_of(root: &Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |p, part| p.join(part))
 }
@@ -282,9 +355,10 @@ pub(crate) fn read_content(root: &Path, rel: &str, mode: Mode) -> Result<Bytes> 
 
 /// 写入文件并设置类型；返回写入后的修改时间。已有的同名文件、链接或目录会被替换。
 pub(crate) fn write_file(root: &Path, rel: &str, mode: Mode, data: &[u8]) -> Result<u64> {
+    check_rel(rel)?;
     let path = path_of(root, rel);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(io(parent))?;
+    if let Some((dirs, _)) = rel.rsplit_once('/') {
+        create_dirs(root, dirs)?;
     }
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if meta.is_dir() {
@@ -320,6 +394,7 @@ pub(crate) fn write_file(root: &Path, rel: &str, mode: Mode, data: &[u8]) -> Res
 /// 时设置（受 umask 影响，与 git 相同），修改时间从打开的文件读取。已存在时报错。
 pub(crate) fn create_file(root: &Path, rel: &str, mode: Mode, data: &[u8]) -> Result<u64> {
     use std::io::Write;
+    check_rel(rel)?;
     let path = path_of(root, rel);
     if mode == Mode::Symlink {
         return write_file(root, rel, mode, data);
@@ -339,21 +414,23 @@ pub(crate) fn create_file(root: &Path, rel: &str, mode: Mode, data: &[u8]) -> Re
 
 /// 建好一组文件的全部上级目录。
 pub(crate) fn create_parents<'a>(root: &Path, rels: impl IntoIterator<Item = &'a str>) -> Result<()> {
-    let mut dirs: Vec<&str> = rels
-        .into_iter()
-        .filter_map(|r| r.rsplit_once('/').map(|(d, _)| d))
-        .collect();
+    let mut dirs: Vec<&str> = Vec::new();
+    for r in rels {
+        check_rel(r)?;
+        dirs.extend(r.rsplit_once('/').map(|(d, _)| d));
+    }
     dirs.sort_unstable();
     dirs.dedup();
     for d in dirs {
-        let path = path_of(root, d);
-        std::fs::create_dir_all(&path).map_err(io(&path))?;
+        create_dirs(root, d)?;
     }
     Ok(())
 }
 
 /// 删除文件，并逐级删除因此变空的上级目录（不删 root）。
 pub(crate) fn remove_file(root: &Path, rel: &str) -> Result<()> {
+    check_rel(rel)?;
+    check_parents(root, rel)?;
     let path = path_of(root, rel);
     match std::fs::remove_file(&path) {
         Ok(()) => {}
@@ -373,6 +450,13 @@ pub(crate) fn remove_file(root: &Path, rel: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file made directly, as a user or git would (the working copy itself refuses `.git`).
+    fn put(root: &Path, rel: &str) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
+        std::fs::write(p, b"x").expect("write");
+    }
 
     fn none() -> BTreeMap<String, ()> {
         BTreeMap::new()
@@ -402,7 +486,7 @@ mod tests {
             ".git/HEAD",
             "nested/.git/config",
         ] {
-            write_file(r, f, Mode::File, b"x").expect("write");
+            put(r, f);
         }
         std::fs::write(r.join(".gitignore"), "target/\n*.tmp\n!keep.tmp\n*.log\n[bad\n").expect("gitignore");
         // .scionignore wins over .gitignore in the same directory; deeper directories win over parents
@@ -423,12 +507,67 @@ mod tests {
         );
     }
 
+    /// Paths from a hostile tree cannot overwrite the working copy's metadata or git's, reach
+    /// outside the root, or follow a symbolic link out of the working copy.
+    #[test]
+    fn writes_refuse_reserved_names_and_symlinked_directories() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside");
+        let r = d.path();
+        let unsafe_err = |res: Result<u64>| matches!(res, Err(Error::UnsafePath { .. }));
+        for rel in [
+            ".scion/state.json",
+            ".SCION/state.json",
+            "a/.Git/config",
+            ".git",
+            "a/../b",
+            "a//b",
+            "a\\b",
+        ] {
+            assert!(unsafe_err(write_file(r, rel, Mode::File, b"x")), "write {rel}");
+            assert!(unsafe_err(create_file(r, rel, Mode::File, b"x")), "create {rel}");
+            assert!(
+                matches!(remove_file(r, rel), Err(Error::UnsafePath { .. })),
+                "remove {rel}"
+            );
+        }
+        assert!(matches!(create_parents(r, [".scion/x"]), Err(Error::UnsafePath { .. })));
+        #[cfg(unix)]
+        {
+            // A symbolic link where a directory is expected: as after a switch, or a link
+            // `A` next to `a/...` on a case-insensitive file system
+            std::os::unix::fs::symlink(outside.path(), r.join("link")).expect("symlink");
+            std::fs::write(outside.path().join("victim"), b"keep").expect("victim");
+            assert!(unsafe_err(write_file(r, "link/victim", Mode::File, b"pwned")));
+            assert!(unsafe_err(write_file(r, "link/new/file", Mode::File, b"pwned")));
+            assert!(matches!(
+                create_parents(r, ["link/sub/f"]),
+                Err(Error::UnsafePath { .. })
+            ));
+            assert!(matches!(remove_file(r, "link/victim"), Err(Error::UnsafePath { .. })));
+            assert_eq!(std::fs::read(outside.path().join("victim")).expect("read"), b"keep");
+            assert!(!outside.path().join("new").exists());
+        }
+        // Ordinary paths still work, and directories that exist are reused
+        write_file(r, "src/a/b.txt", Mode::File, b"b").expect("write");
+        create_parents(r, ["src/a/c.txt", "src/d/e.txt"]).expect("parents");
+        create_file(r, "src/d/e.txt", Mode::File, b"e").expect("create");
+        remove_file(r, "src/a/b.txt").expect("remove");
+        remove_file(r, "missing/file").expect("missing is fine");
+        // A file where a directory is expected is an error, not a write elsewhere
+        std::fs::write(r.join("plain"), b"p").expect("plain");
+        assert!(matches!(
+            write_file(r, "plain/x", Mode::File, b"x"),
+            Err(Error::Io { .. })
+        ));
+    }
+
     #[test]
     fn tracked_files_are_never_hidden_by_ignore_rules() {
         let d = tempfile::tempdir().expect("tempdir");
         let r = d.path();
         for f in ["build/keep.txt", "build/junk.o", "a.log", "b.log", ".git/HEAD"] {
-            write_file(r, f, Mode::File, b"x").expect("write");
+            put(r, f);
         }
         std::fs::write(r.join(".gitignore"), "build/\n*.log\n").expect("gitignore");
         let t = tracked(&["build/keep.txt", "a.log", ".git/HEAD"]);

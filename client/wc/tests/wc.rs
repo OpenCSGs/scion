@@ -1244,3 +1244,27 @@ async fn sync_rebases_pending_changes_of_every_kind() {
     assert!(b.state().conflict.is_none());
     assert!(matches!(b.sync(&c).await, Ok(SyncOutcome::UpToDate)));
 }
+
+/// A commit that holds the working copy's own metadata path cannot overwrite it on checkout.
+#[tokio::test]
+async fn checkout_refuses_paths_reserved_for_the_working_copy() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let created = c
+        .changeset(None)
+        .message("hostile")
+        .author("Mallory", "mallory@example.com")
+        .put("README.md", "hello\n")
+        .put(".scion/state.json", "{}")
+        .create()
+        .await
+        .expect("create");
+    c.create_ref("main", &created.id).await.expect("ref");
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let err = WorkingCopy::clone(&c, &srv.url, "mono", "main", &tmp.path().join("wc"), Sparse::full())
+        .await
+        .err()
+        .expect("refused");
+    assert!(matches!(err, Error::UnsafePath { .. }), "{err}");
+    assert!(err.to_string().contains(".scion/state.json"), "{err}");
+}

@@ -2,227 +2,108 @@
 
 English | [简体中文](README.zh-CN.md)
 
-A server-first source control system: history, merges and rebases are computed on the server, and clients stay online and fetch data on demand. The protocol is language-neutral; the project ships a Rust server, `scion`, and a Rust client, `scn`.
+Server-first source control for monorepos, coding agents and CI.
+
+Scion is a Rust implementation of the design in Anthropic's [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control): history, merges and rebases are computed on the server, clients stay online and fetch immutable objects on demand, and a checkout holds only the paths a job needs. It ships a server, `scion`, and a client, `scn`, over a language-neutral protocol, and is built by OpenCSG for [starhub-server](https://github.com/OpenCSGs/csghub-server) and CSGLite. It is not Anthropic's implementation and is not affiliated with Anthropic.
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 
-<sub>Diagram sources: [`arch-01-standalone.en.svg`](docs/design/images/arch-01-standalone.en.svg) (English) · [`arch-01-standalone.svg`](docs/design/images/arch-01-standalone.svg) (Chinese). The diagram includes planned components (L2 cache, deriver, git-gateway, …); see [Status](#status) for what is implemented today.</sub>
+<sub>Diagram sources: [`arch-01-standalone.en.svg`](docs/design/images/arch-01-standalone.en.svg) (English) · [`arch-01-standalone.svg`](docs/design/images/arch-01-standalone.svg) (Chinese). The diagram includes planned components (deriver, git-gateway, …); see [milestones](docs/design/milestones.md) for what is implemented today.</sub>
 
-## Documentation
+## Benchmarks
 
-**Guides**
-- [Deployment](docs/guide/deploy.md) (Chinese): Docker image, docker compose with PostgreSQL and S3-compatible storage
-- [Test report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, and a side-by-side comparison with starhub's Gitaly + MinIO stack and with libgit2
-- [Coming from git](docs/guide/coming-from-git.md): git commands and their scn equivalents, revision syntax (`HEAD~1`, `A..B`)
-- [Repositories and branches](docs/guide/repos.md) (Chinese): create, list, fork, delete and restore repositories; manage branches
-- [Ref events](docs/guide/events.md) (Chinese): an ordered, gap-free feed of ref changes; webhook and NATS JetStream delivery; the pre-land check
-- [Archives](docs/guide/archive.md) (Chinese): download a revision or a directory as tar.gz, zip or tar with `scn archive`
-- [Directory listings](docs/guide/browse.md) (Chinese): the last commit of every entry in a directory, file counts and sizes
-- [Git-compatible commit SHAs](docs/guide/git-sha.md) (Chinese): a 40-hex git SHA-1 for every commit, accepted wherever a revision is
-- [Importing from git](docs/guide/git-import.md) (Chinese): import an existing git repository with its full history
-- [Sparse checkout](docs/guide/sparse-checkout.md) (Chinese): check out only the directories you need; the rest is never fetched
-- [Object storage](docs/guide/object-storage.md) (Chinese): SeaweedFS, MinIO and other S3-compatible services; provider detection and startup checks
-- [Clusters and landing](docs/guide/cluster.md) (Chinese): land semantics (rebase, exactly once), multi-node mode with `--advertise-url`, failover and overload protection
-- [Caching](docs/guide/cache.md) (Chinese): the regional cache `scion cache` (sharding, hedging, warm-up) and the local daemon `scn daemon`
-- [Metrics and tracing](docs/guide/observability.md) (Chinese): Prometheus metrics, OpenTelemetry tracing, useful queries
-- [Authentication and access control](docs/guide/auth.md) (Chinese): tokens, ACL policy, OIDC login, external issuers, OPA-compatible authorization, starhub-server integration
-- [Redaction and data checks](docs/guide/redaction.md) (Chinese): removing leaked content (redact, purge), `scion admin fsck`, `scion admin lease ls`
+The [benchmark runner](bench/openscion/src/main.rs) compares Scion with Git and with [CarterT27/scion](https://github.com/CarterT27/scion), another implementation of the same design, on the four synthetic workloads used by [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md). All three ran on one machine: an Apple M5 with 16 GiB RAM, macOS 26.5.2 and Git 2.54.0. CarterT27/scion was built from its `main` at the time and run with its own runner.
 
-**Design and specifications** (Chinese)
-- Design docs: [server](docs/design/rust-server-architecture.md) · [client](docs/design/rust-client-architecture.md) · [starhub / CSGLite integration](docs/design/starhub-integration.md) · [roadmap](docs/design/roadmap.md) (large planned tasks that are not needed yet, such as virtualized checkout)
-- Object format: [`SPEC.md`](SPEC.md), with golden test vectors in [`testdata/vectors/`](testdata/vectors/)
-- Protocol: [`proto/scion/v1/`](proto/scion/v1/)
+Each file contains 4 KiB of pseudorandom bytes, spread across 10 directories. The 1,000-file case uses seven runs and the 10,000-file case uses five. All times are median milliseconds; lower is better.
 
-## Status
+| Scenario | Git, 1k files | CarterT27, 1k | Scion, 1k | Git, 10k files | CarterT27, 10k | Scion, 10k |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Import directory | 375.1 | 32.8 | **29.6** | 3,342.0 | 413.5 | **362.1** |
+| Commit one changed file | 29.7 | 29.2 | **13.4** | 226.7 | 142.5 | **42.2** |
+| Full clone / checkout | 251.3 | 115.8 | **50.7** | 2,316.6 | 1,047.3 | **568.3** |
+| One-directory clone / checkout | 65.0 | 25.0 | **19.4** | 181.7 | 123.1 | **48.6** |
 
-**M5 (production hardening) is in progress.** Done so far:
-- **Authentication and access control:**
-  - tokens: self-issued ES256 access tokens, PATs, and refresh tokens;
-  - external identities, standards only: JWKS or HS256 issuers, RFC 7662 introspection and an OPA-compatible authorization webhook. starhub-server is supported through configuration alone;
-  - ACL rules by subject, repo, action, ref and path;
-  - `scn login` with the OIDC device flow, credentials stored in the keychain.
-- **Redaction:**
-  - redact leaked file contents: object ids and history stay the same, reads return `REDACTED`;
-  - the regional cache and the local daemon stop serving them within 10 seconds;
-  - land never merges redacted content into new commits;
-  - purge deletes the bytes after a grace period, once every repository that holds the object has redacted it.
-- **Operations:** `scion admin fsck` checks refs, commits, trees and files against the object index and object store; `scion admin lease ls` lists leases.
-- **Sparse checkout:** `scn clone --sparse a/,b/` and `scn sparse add|rm|set|disable`. Subtrees outside the scope are never fetched; commits, lands and rebases leave them untouched on the server.
+Scion is the fastest of the three in every cell: 2.2–13× faster than Git, and against CarterT27/scion 1.3–2.5× faster for checkouts, 2.2–3.4× for commits and 11–14% for imports.
 
-- **Observability and limits:**
-  - Prometheus metrics on `--metrics-listen`: per-RPC counts, codes and latency; land batches and latency; cache hit rates at L2 and L3; rejected requests;
-  - OpenTelemetry tracing over OTLP, continuing the caller's `traceparent` across land forwarding and cache fetches;
-  - per-caller rate and concurrency limits (`--tenant-rate`, `--tenant-concurrency`);
-  - deadlines: the smaller of the client's `grpc-timeout` and `--max-request-timeout`, passed on to the leader and to the servers.
+- **Import:** Git runs `init`, `add -A` and `commit`. Scion uploads the files in batches of 256 and creates a parentless changeset and a ref through the write API.
+- **Commit:** change one byte in one file of the full working copy, then time Git's `commit -a` or Scion's working-copy commit, including the status scan and the upload. Neither side pushes or lands.
+- **Full checkout:** Git's `clone --no-local`; Scion's working-copy clone.
+- **One-directory checkout:** Git's `clone --no-local --filter=blob:none --sparse` and `sparse-checkout set dir0000`; Scion's clone of `dir0000` only.
 
-- **Repositories and branches:** `RepoService` (create, list, update, soft-delete with a restore window, fork) and branch create / move / delete, with `scn repo` and `scn branch`.
-- **Deployment:** a Docker image with `scion` and `scn`, and a docker compose setup with PostgreSQL and SeaweedFS.
-- **Ref events:**
-  - every ref change is written in the same transaction as an ordered event;
-  - consumers poll `EventService.ListRefEvents` by sequence number;
-  - or the server pushes the events, with commit and path-level details, to a webhook (HMAC-signed) or NATS JetStream, at least once and in order.
-- **Pre-land check:** before a land or a branch write, the server can POST the commits it would introduce to an external service, which allows or rejects them (fail-closed by default).
+Both implementations run an in-process server with in-memory metadata and objects; Scion's objects go through the same zstd compression and packing as on disk or S3. CarterT27/scion's server uses TLS and token authentication, while Scion's runs without either, which costs CarterT27's checkouts a few percent. Fixture writes and checks of the checked-out files are outside the timers.
 
-Still to come in M5: YugabyteDB, Helm and chaos testing.
+```sh
+(cd bench/openscion && cargo build --release)
+bench/openscion/target/release/openscion-bench 100 7      # 1,000 files, 7 runs
+bench/openscion/target/release/openscion-bench 1000 5     # 10,000 files, 5 runs
+```
 
-**M4 (cache layer) is complete**:
-- **Regional cache `scion cache` (L2):**
-  - storage: foyer memory plus NVMe;
-  - rendezvous sharding across nodes, so the region fetches each object from the server once;
-  - single-flight coalescing, plus hedged reads and circuit breakers toward the servers;
-  - warm-up from WatchRefs that only walks changed trees.
-- **Local daemon `scn daemon` (L1):**
-  - a verified on-disk object cache;
-  - all other RPCs forwarded transparently;
-  - prefetch of refs the working copy follows;
-  - started on demand by `scn`.
-- **WatchRefs:** streams ref changes to subscribers (snapshot first, then each advance), resumable after disconnects.
-- **Server read path:**
-  - in-process object cache;
-  - coalesced, concurrency-limited backend reads;
-  - `--read-endpoint` advertises caches to clients.
+### Real repositories
 
-The cache serves 99.5% of reads without the server and 1.53M objects/s per node; see [Performance](#performance).
+On [pingdotgg/t3code](https://github.com/pingdotgg/t3code), the snapshot CarterT27/scion's README measures (5,573 commits, 28,068 files), with Scion on PostgreSQL and MinIO in Docker and Git on a local bare repository:
 
-Earlier milestones:
-- M3 added server-side rebase, exactly-once lands, batched landing (885 lands/s on one ref), clusters and overload protection.
-- M2 added history queries (p99 under 20 ms on 100k commits).
-- M1 added the write path, Lite mode, the `scn` working copy and git import.
+| | Git | Scion | Scion ÷ Git | CarterT27 ÷ Git (its README) |
+| --- | ---: | ---: | ---: | ---: |
+| Full checkout | 2.65 s | **2.28 s** | **0.86** | 5.2 |
+| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 1.03 | 4.6 |
+| Clean status | 98 ms | 153 ms | 1.6 | — |
+| Import the full history | — | 103 s + 42 s repack | — | 23 min 18 s |
 
-The remaining M5 work: the YugabyteDB tier, Helm and release builds.
+After the import, Scion stores the history in 247 MB of MinIO plus 90 MB of PostgreSQL, against the 557 MB pack cloned from GitHub. Every checkout is checked file by file against Git.
 
-## Performance
+- [Report: CarterT27/scion's benchmarks](docs/reports/2026-10-20-openscion-workloads.md), with the method, every number and how to rerun it.
+- [Report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, compared with starhub's Gitaly + MinIO stack and with libgit2.
+- [Component benchmarks](docs/performance.md): the cache, landing, history queries and checkouts at 100,000 files.
 
-Benchmarks run on one machine (Apple M5, 10 cores) with objects in memory; client, cache and server share the machine. Each row links the benchmark so you can rerun it (`cargo test --release -p <crate> --test bench -- --ignored --nocapture`).
+## How it works
 
-| Area | Workload | Result | Target |
-|---|---|---|---|
-| Cache hit rate ([`server/cache/tests/bench.rs`](server/cache/tests/bench.rs)) | 200 clients check out the same 20,000 objects (1–4 KiB) from a cold cache | 99.5% of reads served without L3; each object fetched from L3 exactly once | ≥ 99% |
-| Cache throughput (same) | 64 clients, warm cache, batches of 64 objects over gRPC | 1.53M objects/s per node | ≥ 200k/s |
-| Cache throughput (same) | 64 clients, warm cache, one object per request | 164k requests/s per node | — |
-| Checkout ([`client/daemon/tests/bench.rs`](client/daemon/tests/bench.rs)) | `scn clone` of 100,000 files in 1,000 directories | Through a warm daemon 5.3 s; creating the same files without any network takes 5.4 s on this disk, so the daemon adds no measurable overhead | < 5 s, disk permitting |
-| Landing ([`server/land/tests/bench.rs`](server/land/tests/bench.rs)) | 2,000 lands on one ref from 200 concurrent clients | PostgreSQL 885/s (p99 379 ms); SQLite 1,921/s (p99 173 ms) | ≥ 200/s, p99 < 500 ms |
-| History queries ([`server/query/tests/bench.rs`](server/query/tests/bench.rs)) | 100,000 commits: log, diff, ancestry, merge-base, blame | p99 < 20 ms on SQLite and PostgreSQL (cold blame 13.6 ms, `log --path` 15.6 ms) | p99 < 100 ms |
-| Directory listings (same benchmark) | Last commit of every entry in a 100-entry root, and repository stats, at 100,000 commits | PostgreSQL: cold p50 33 ms (p99 93 ms); after a land with the parent cached p99 2.4 ms; cached p99 < 5 ms. Repository stats cold 131 ms, next commit 3.1 ms | p99 < 100 ms |
-| Real repository, Standard ([`bench/starhub`](bench/starhub/README.md)) | starhub-server (6,338 commits, two branches, a tag) on PostgreSQL + MinIO in Docker | Import 94 s, `scion admin repack` 24 s: 86 MB of MinIO disk (546 MB when every object was stored on its own; Gitaly's repository 82 MB) plus 54 MB of metadata in PostgreSQL. Cold reads 1–4 ms, history page 1.6 ms. [Compared with Gitaly and libgit2](docs/reports/2026-10-19-starhub-server.md) | — |
-| OpenScion workloads ([`bench/openscion`](bench/openscion/README.md)) | 1,000 and 10,000 files: import, commit one file, full and one-directory checkout, against Git and CarterT27/scion on one machine | 10k files: import 362 ms, commit 42 ms, full checkout 568 ms, one directory 49 ms; faster than both in all 8 cells. [Report](docs/reports/2026-10-20-openscion-workloads.md) | — |
-| Real repository, Standard (same) | pingdotgg/t3code (5,573 commits, 28,068 files) on PostgreSQL + MinIO | Import 103 s + repack 42 s; 247 MB of MinIO (GitHub pack 557 MB) and 90 MB of PostgreSQL. Full checkout 2.28 s (Git 2.65 s), `apps/web` 0.18 s (Git 0.17 s), status 153 ms (Git 98 ms) | — |
-| Real repository (`~/git/starhub-server`, Lite, this machine) | Import 6,312 commits (2,836 merges, 4,663 files); clone; queries | Import 57 s; object bytes 227 MB with zstd (1,007 MB uncompressed; git pack 392 MB); clone 0.37 s; status 23 ms; log, blame, show, diff 8–50 ms. Files, git SHAs, blame, diff and archive match git | — |
+- **Writes on the server.** A commit is created on the server from the files it changes; `land` moves a branch to it and rebases it on the server when the branch has moved, exactly once, without a global queue. Concurrent writers to one branch all succeed.
+- **Fetch on demand.** Clients ask for the trees and files they want by id, so sparse checkout needs no special support: directories outside the scope are never fetched.
+- **History without a clone.** Log, diff, blame, ancestry, merge bases, the last commit of each entry and archives are server queries.
+- **Three storage tiers.** Lite (SQLite and a local directory), Standard (PostgreSQL and S3-compatible storage) and in-memory for tests. Objects are content-addressed, zstd-compressed and packed; `scion admin repack` stores older versions as deltas against newer ones.
+- **Caches.** A regional cache, `scion cache`, and a local daemon, `scn daemon`, serve the same protocol as the server, so clients do not need to know the topology.
+- **Git compatibility.** `scn import git` brings in a repository with its history; every commit keeps a git SHA, accepted wherever a revision is.
+- **Access control and redaction.** Tokens, OIDC login, external issuers, ACLs by repository, ref and path, and redaction of leaked content without rewriting history.
 
 ## Quick start
 
 ```sh
-# Option 1: docker compose with PostgreSQL + S3-compatible storage (see docs/guide/deploy.md)
-docker compose -f deploy/compose/docker-compose.yml up -d --build
-
-# Option 2: a server in Lite mode (SQLite + a local directory, persisted), from source
+# A server in Lite mode (SQLite + a local directory), from source
 cargo run -p scion -- server --lite --data-dir ./.scion-data
+# or with PostgreSQL + S3-compatible storage: docker compose -f deploy/compose/docker-compose.yml up -d --build
 
-# Other backends: --meta mem|sqlite://PATH|postgres://…  --blobs mem|DIR|s3://bucket/prefix
-# S3 settings: SCION_S3_ENDPOINT, SCION_S3_ACCESS_KEY_ID, SCION_S3_SECRET_ACCESS_KEY, SCION_S3_REGION,
-# SCION_S3_PROVIDER=auto|minio|seaweedfs|aws|generic (SeaweedFS and MinIO are tested in CI; see docs/guide/object-storage.md)
-
-# In another terminal: install scn and check the connection
+# In another terminal
 cargo install --path client/cli
-scn doctor
-scn config set user.name "Ada Lovelace"       # default commit author (falls back to git's user.name / user.email)
-scn config set user.email ada@example.com
-scn repo create mono                # repositories and branches: scn repo / scn branch (see docs/guide/repos.md)
-
-# Everyday workflow
-scn clone mono && cd mono          # check out (ref main by default; empty repositories work too)
-echo 'hello' > README.md
-echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
-scn status                          # A .gitignore, A README.md
-scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
-scn restore src/main.rs             # discard local changes to tracked files (`.` for all); added files are kept
-scn commit --amend                  # fold more local changes into the pending commit (keeps message and author)
-scn uncommit                        # drop the pending commit, keep its changes as local changes
-scn land                            # land on main; if main moved, the server rebases (three-way merge)
-scn sync                            # pull others' changes; rebases a pending commit at file level
-scn tag v1.0                        # tag the current commit; `scn tag` lists, `scn log v1.0` uses it
-scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
-scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`
-# On conflicts (scn sync or scn merge) files get <<<<<<< / >>>>>>> markers and `scn status` shows C:
-scn resolve src/main.rs             # after editing out the markers; or --ours / --theirs to take one side
-scn commit                          # finishes it, reusing the original message; `scn merge --abort` undoes a merge
-scn cat main:README.md              # read files without a working copy (add --repo outside one)
-scn ls main:                        # list a directory; every command supports --json
-scn log -n 10 -- src                # history, newest first, optionally limited to a path (git-style: HEAD~1, A..B)
-scn diff                            # uncommitted local changes (unified diff)
-scn diff main                       # what the tip of main changed; `scn diff A B` compares two revisions
-scn blame src/lib.rs                # the commit that last changed each line
-scn clone mono part --sparse src/   # sparse checkout: only src/ and files at the root; `scn sparse add docs/` later
-scn archive -o mono.tar.gz          # download a snapshot as tar.gz / zip / tar (see docs/guide/archive.md)
-
-# scn talks to the server through a local daemon (scn daemon), started on demand; SCION_NO_DAEMON=1 opts out
-scn daemon status
-
-# A regional cache in front of one or more servers; advertise it with scion server --read-endpoint
-# (see docs/guide/cache.md)
-cargo run -p scion -- cache --upstream http://127.0.0.1:7080 --listen 127.0.0.1:7090 --warm mono:main
-
-# Import an existing git repository with its history, authors and timestamps
-# (see docs/guide/git-import.md)
-scn import git ~/src/my-repo --repo mono
-
-# After upgrading a server that already has data, before starting it: repair lineage and backfill derived indexes (idempotent)
-cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
+scn repo create mono
+scn clone mono && cd mono
+echo hello > README.md
+scn commit -m "add readme"
+scn land                          # move main to the commit; the server rebases if main moved
+scn log
 ```
 
-## Repository layout
+[A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) maps git commands to scn.
 
-```
-proto/scion/v1/      protocol definitions (.proto), language-neutral; buf lint / breaking checks
-SPEC.md              object model and canonical encoding
-testdata/vectors/    golden test vectors every implementation must pass
+## Documentation
 
-common/              shared by server and client (may depend only on common)
-  protocol/          scion-proto       Rust code generated from the protos
-  object/            scion-object      ObjectId, canonical encoding, Tree / Changeset (pure, no IO)
-  flight/            scion-flight      single-flight request coalescing (server caches and the daemon)
+- **Using Scion:** [deployment](docs/guide/deploy.md) · [command tour](docs/guide/cli.md) · [coming from git](docs/guide/coming-from-git.md) · [importing from git](docs/guide/git-import.md) · [sparse checkout](docs/guide/sparse-checkout.md) · [repositories and branches](docs/guide/repos.md) · [archives](docs/guide/archive.md) · [directory listings](docs/guide/browse.md) · [git SHAs](docs/guide/git-sha.md)
+- **Running a server:** [object storage](docs/guide/object-storage.md) · [clusters and landing](docs/guide/cluster.md) · [caching](docs/guide/cache.md) · [authentication and access control](docs/guide/auth.md) · [redaction and fsck](docs/guide/redaction.md) · [ref events](docs/guide/events.md) · [metrics and tracing](docs/guide/observability.md)
+- **Design:** [server](docs/design/rust-server-architecture.md) · [client](docs/design/rust-client-architecture.md) · [starhub / CSGLite integration](docs/design/starhub-integration.md) · object format [`SPEC.md`](SPEC.md) · protocol [`proto/scion/v1/`](proto/scion/v1/)
 
-server/              server side (may depend on common and lower server crates)
-  obs/               scion-obs         Prometheus metrics, OpenTelemetry tracing, gRPC deadlines
-  store/             scion-store       MetaStore / BlobStore traits, in-memory backend, conformance suite
-  store-sql/         scion-store-sql   SQLite / PostgreSQL metadata store
-  store-blob/        scion-store-blob  local directory / S3-compatible object store
-  auth/              scion-auth        tokens, external issuers (JWKS / HS256), introspection, OIDC, ACL
-  tree/              scion-tree        incremental tree building
-  merge/             scion-merge       server-side rebase: replay a delta onto a newer tree with three-way merge
-  land/              scion-land        changeset creation, stack rebase, LandCoordinator, leases
-  query/             scion-query       history queries (log / diff / blame / merge-base) and reindexing
-  cache/             scion-cache       regional object cache (scion cache): foyer, rendezvous, hedging, warm-up
-  api/               scion-api         gRPC services and server bootstrap
-  scion/             scion             server binary (scion server / scion cache / scion admin)
+Most guides and design documents are in Chinese for now.
 
-client/              client side (may depend on common and client, never on server)
-  sdk/               scion-client      Rust SDK
-  wc/                scion-wc          working copy (clone / status / commit / land / sync)
-  daemon/            scion-daemon      local L1 cache (scn daemon): object cache, transparent forwarding, prefetch
-  gitimport/         scion-gitimport   git history import
-  cli/               scion-cli         the scn binary
+## Status
 
-xtask/               maintenance tasks (cargo xtask layers: dependency direction check)
-deploy/dev/          local development dependencies (SeaweedFS, PostgreSQL)
-docs/guide/          user guides
-docs/design/         design docs and diagrams
-```
-
-Directory names describe location and role; crate names carry a `scion-` prefix to avoid clashing with crates.io packages such as `object`. Dependency direction is enforced in CI by `cargo xtask layers`.
+M1–M4 are complete: the write path and working copy, history queries, server-side rebase and landing, clusters, and the regional cache and local daemon. M5, production hardening, is in progress; authentication, redaction, observability, ref events, packs and repack are done, and the YugabyteDB tier, Helm and release builds remain. See [milestones](docs/design/milestones.md) for the details and the [roadmap](docs/design/roadmap.md) for larger tasks planned for later.
 
 ## Development
 
 ```sh
-cargo test --workspace                                    # all tests
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo xtask layers                                        # dependency direction check
-cargo llvm-cov --workspace                                # coverage (cargo install cargo-llvm-cov)
-SCION_BLESS=1 cargo test -p scion-object --test vectors   # regenerate golden vectors after adding some
-docker compose -f deploy/dev/docker-compose.yml up -d     # SeaweedFS (S3) + PostgreSQL
 ```
 
-**Testing requirements** ([server design doc §12.1](docs/design/rust-server-architecture.md)): every function with logic has unit tests covering the normal path, edge cases and every error branch. Core crates need at least 90% line coverage, and new or changed code in a pull request needs at least 90%; CI enforces both.
+[Development](docs/development.md) describes the repository layout, the dependency rules between crates and the testing requirements (at least 90% coverage of new code).
 
 ## License
 

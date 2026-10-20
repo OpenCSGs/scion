@@ -2,223 +2,106 @@
 
 [English](README.md) | 简体中文
 
-服务端优先的源码管理系统：历史、合并、rebase 都在服务端完成，客户端始终在线、按需取数。协议与语言无关，官方提供 Rust 服务端 `scion` 和 Rust 客户端 `scn`。
+面向 monorepo、编程 agent 和 CI 的服务端优先的源码管理系统。
+
+Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control) 一文中提出的设计：历史、合并、rebase 都在服务端计算，客户端始终在线、按需获取不可变对象，检出时只拿任务需要的路径。项目提供服务端 `scion` 和客户端 `scn`，协议与语言无关，由 OpenCSG 为 [starhub-server](https://github.com/OpenCSGs/csghub-server) 和 CSGLite 开发。本项目不是 Anthropic 的实现，与 Anthropic 没有关联。
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 
-<sub>架构图源文件：[`arch-01-standalone.en.svg`](docs/design/images/arch-01-standalone.en.svg)（英文）· [`arch-01-standalone.svg`](docs/design/images/arch-01-standalone.svg)（中文）。图中包含规划中的组件（L2 缓存、deriver、git-gateway 等），当前进度见下文。</sub>
+<sub>架构图源文件：[`arch-01-standalone.en.svg`](docs/design/images/arch-01-standalone.en.svg)（英文）· [`arch-01-standalone.svg`](docs/design/images/arch-01-standalone.svg)（中文）。图中包含规划中的组件（deriver、git-gateway 等），已实现的部分见[里程碑](docs/design/milestones.md)。</sub>
 
-## 文档
+## 性能对比
 
-**使用指南**
-- [部署](docs/guide/deploy.md)：Docker 镜像，以及 PostgreSQL + S3 兼容存储的 docker compose
-- [测试报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的平行对比
-- [从 git 迁移](docs/guide/coming-from-git.md)（英文）：git 命令与 scn 的对照、版本号写法（`HEAD~1`、`A..B`）
-- [仓库与分支管理](docs/guide/repos.md)：创建、列出、fork、删除与恢复仓库，管理分支
-- [ref 变化事件](docs/guide/events.md)：按序号、不遗漏的 ref 变化事件流，推送到 webhook 与 NATS JetStream
-- [打包下载](docs/guide/archive.md)：用 `scn archive` 把某个版本或目录打包成 tar.gz、zip 或 tar
-- [文件列表页](docs/guide/browse.md)：目录中每个条目的最后提交、文件数与大小
-- [git 兼容的提交 sha](docs/guide/git-sha.md)：每个提交都有 40 位 git sha，可以直接当作版本号使用
-- [从 git 导入](docs/guide/git-import.md)：把已有的 git 仓库连同全部历史导入 Scion
-- [稀疏检出](docs/guide/sparse-checkout.md)：只检出需要的目录，其余内容不会被拉取
-- [对象存储](docs/guide/object-storage.md)：SeaweedFS、MinIO 与其他 S3 兼容服务；服务识别与启动检查
-- [多节点部署与合入](docs/guide/cluster.md)：合入语义（rebase、恰好一次）、`--advertise-url` 集群模式、故障切换与过载保护
-- [指标与追踪](docs/guide/observability.md)：Prometheus 指标、OpenTelemetry 追踪与常用查询
-- [缓存](docs/guide/cache.md)：区域缓存 `scion cache`（分片、对冲、预热）与本机 daemon `scn daemon`
-- [认证与鉴权](docs/guide/auth.md)：令牌、访问控制策略、OIDC 登录、外部签发方、OPA 兼容的鉴权回调、接入 starhub-server
-- [Redaction 与数据校验](docs/guide/redaction.md)：清除泄露的内容（redact、purge）、`scion admin fsck`、`scion admin lease ls`
+[测试程序](bench/openscion/src/main.rs)在 [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) 的四个合成负载上，对比 Scion、Git，以及同一设计的另一个实现 [CarterT27/scion](https://github.com/CarterT27/scion)。三者在同一台机器上运行：Apple M5、16 GiB 内存、macOS 26.5.2、Git 2.54.0。CarterT27/scion 用当时 `main` 的代码构建，用它自己的测试程序运行。
 
-**设计与规范**
-- 设计文档：[服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md) · [路线图](docs/design/roadmap.md)（英文；已规划、暂不做的大任务，例如虚拟化检出）
-- 对象格式规范：[`SPEC.md`](SPEC.md)，golden 测试向量在 [`testdata/vectors/`](testdata/vectors/)
-- 协议：[`proto/scion/v1/`](proto/scion/v1/)
+每个文件是 4 KiB 伪随机内容，分布在 10 个目录里。1,000 个文件跑 7 次，10,000 个文件跑 5 次。单位是毫秒，取中位数，越小越好。
 
-当前进度：**M5 生产化**进行中，已完成：
-- **认证与鉴权**：
-  - 令牌：自签 ES256 访问令牌、PAT、刷新令牌；
-  - 外部身份（只用标准协议）：JWKS 或 HS256 签发方、RFC 7662 内省、OPA 兼容的鉴权回调。接入 starhub-server 只需配置；
-  - ACL：按主体、仓库、动作、ref、路径授予权限；
-  - `scn login`：OIDC device flow，凭据存钥匙串。
-- **Redaction**：
-  - redact 泄露的文件内容：对象 id 与历史不变，读取返回 `REDACTED`；
-  - 区域缓存和本机 daemon 10 秒内停止返回；
-  - 合入时不会把 redact 过的内容合并进新提交；
-  - purge 在宽限期后物理删除字节，前提是所有含该对象的仓库都已 redact。
-- **运维**：`scion admin fsck` 对照对象索引与对象存储校验 ref、提交、目录树和文件；`scion admin lease ls` 列出租约。
-- **稀疏检出**：`scn clone --sparse a/,b/` 与 `scn sparse add|rm|set|disable`。范围外的子树不会被拉取，提交、合入和 rebase 都不影响服务端上范围外的内容。
+| 场景 | Git，1k 文件 | CarterT27，1k | Scion，1k | Git，10k 文件 | CarterT27，10k | Scion，10k |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 导入目录 | 375.1 | 32.8 | **29.6** | 3,342.0 | 413.5 | **362.1** |
+| 提交一个改动的文件 | 29.7 | 29.2 | **13.4** | 226.7 | 142.5 | **42.2** |
+| 完整克隆 / 检出 | 251.3 | 115.8 | **50.7** | 2,316.6 | 1,047.3 | **568.3** |
+| 只克隆 / 检出一个目录 | 65.0 | 25.0 | **19.4** | 181.7 | 123.1 | **48.6** |
 
-- **可观测性与限流**：
-  - `--metrics-listen` 提供 Prometheus 指标：各 RPC 的请求数、状态码与延迟，合入批次与延迟，L2 和 L3 的缓存命中率，被拒绝的请求；
-  - OpenTelemetry 追踪（OTLP），合入转发和缓存回源时接续调用方的 `traceparent`；
-  - 按调用者的速率与在途请求上限（`--tenant-rate`、`--tenant-concurrency`）；
-  - deadline：取客户端 `grpc-timeout` 与 `--max-request-timeout` 中较小的一个，并传给 leader 和服务端。
+Scion 在每一项都是三者中最快的：比 Git 快 2.2–13 倍；和 CarterT27/scion 相比，检出快 1.3–2.5 倍，提交快 2.2–3.4 倍，导入快 11–14%。
 
-- **仓库与分支管理**：`RepoService`（创建、列出、修改、软删除并可在宽限期内恢复、fork），以及分支的创建、移动与删除；命令行为 `scn repo`、`scn branch`。
-- **部署**：包含 `scion` 和 `scn` 的 Docker 镜像，以及 PostgreSQL + SeaweedFS 的 docker compose。
-- **ref 变化事件**：
-  - 每次 ref 变化都与修改同一事务写入一条按序号排列的事件；
-  - 消费方可以用 `EventService.ListRefEvents` 按序号拉取；
-  - 也可以由服务端把带提交与路径级改动的事件推送到 webhook（HMAC 签名）或 NATS JetStream，按顺序、至少送达一次。
-- **合入前检查**：合入或写分支之前，服务端可以把要引入的提交交给外部服务，由它允许或拒绝（检查服务不可用时默认拒绝）。
+- **导入：** Git 执行 `init`、`add -A` 和 `commit`。Scion 每批 256 个上传文件，再通过写入 API 创建一个没有父提交的 changeset 和一个 ref。
+- **提交：** 在完整工作副本里改一个文件的一个字节，然后计时 Git 的 `commit -a`，或 Scion 的工作副本提交（包括扫描状态和上传）。两边都不 push 也不 land。
+- **完整检出：** Git 的 `clone --no-local`；Scion 的工作副本克隆。
+- **只检出一个目录：** Git 的 `clone --no-local --filter=blob:none --sparse` 加 `sparse-checkout set dir0000`；Scion 只克隆 `dir0000`。
 
-M5 后续还有 YugabyteDB、Helm 与混沌测试。
+两个实现都在进程内启动服务端，元数据和对象都在内存里；Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。CarterT27/scion 的服务端开启了 TLS 和令牌认证，Scion 两者都没开，这会让 CarterT27 的检出多花百分之几的时间。生成测试文件和校验检出结果不计入时间。
 
-**M4 缓存层**已完成：
-- **区域缓存 `scion cache`（L2）**：
-  - 存储：foyer 内存加 NVMe；
-  - 多节点按 rendezvous 哈希分片，整个区域对同一对象只回源一次；
-  - 并发未命中合并（single-flight），回源时对冲与熔断；
-  - 按 WatchRefs 预热，只沿变化的目录树下钻。
-- **本机 daemon `scn daemon`（L1）**：
-  - 校验过的本机对象缓存；
-  - 其余 RPC 透明转发；
-  - 预取工作副本跟随的 ref；
-  - `scn` 按需自动拉起。
-- **WatchRefs**：订阅 ref 变化（先快照，之后每次前进），断开后可续上。
-- **服务端读路径**：
-  - 进程内对象缓存；
-  - 合并并发读并限制后端并发；
-  - `--read-endpoint` 向客户端推荐缓存。
-
-缓存 99.5% 的读取不回源，单节点每秒 153 万个对象，详见下文「性能」。
-
-之前的里程碑：
-- M3 实现了服务端 rebase、恰好一次合入、批量合入（单 ref 每秒 885 次）、集群与过载保护；
-- M2 实现了历史查询（10 万提交 p99 低于 20 ms）；
-- M1 实现了写入路径、Lite 模式、`scn` 工作副本与 git 导入。
-
-M5 剩余工作：YugabyteDB 档、Helm 与发布构建。
-
-## 性能
-
-基准在一台机器上运行（Apple M5，10 核），对象放在内存里，客户端、缓存和服务端在同一台机器。每一行都链接了对应的基准测试，可以自行复现（`cargo test --release -p <crate> --test bench -- --ignored --nocapture`）。
-
-| 方面 | 负载 | 结果 | 目标 |
-|---|---|---|---|
-| 缓存命中率（[`server/cache/tests/bench.rs`](server/cache/tests/bench.rs)） | 冷缓存，200 个客户端检出同一组 20000 个对象（1–4 KiB） | 99.5% 的读取不回源 L3；每个对象只从 L3 取一次 | ≥ 99% |
-| 缓存吞吐（同上） | 热缓存，64 个客户端，gRPC 每批 64 个对象 | 单节点每秒 153 万个对象 | ≥ 每秒 20 万 |
-| 缓存吞吐（同上） | 热缓存，64 个客户端，每次请求 1 个对象 | 单节点每秒 16.4 万次请求 | — |
-| 检出（[`client/daemon/tests/bench.rs`](client/daemon/tests/bench.rs)） | `scn clone` 1000 个目录、10 万个文件 | 经热 daemon 5.3 秒；本机磁盘上不经网络直接创建这些文件需要 5.4 秒，daemon 没有可测出的额外开销 | < 5 秒（受磁盘限制） |
-| 合入（[`server/land/tests/bench.rs`](server/land/tests/bench.rs)） | 200 个并发客户端向同一个 ref 合入 2000 次 | PostgreSQL 每秒 885 次（p99 379 ms）；SQLite 每秒 1921 次（p99 173 ms） | 每秒 ≥ 200 次，p99 < 500 ms |
-| 历史查询（[`server/query/tests/bench.rs`](server/query/tests/bench.rs)） | 10 万提交：log、diff、祖先判断、merge-base、blame | SQLite 与 PostgreSQL 下 p99 均低于 20 ms（冷 blame 13.6 ms，`log --path` 15.6 ms） | p99 < 100 ms |
-| 文件列表页（同一基准） | 10 万提交：根目录 100 个条目各自的最后提交、仓库统计 | PostgreSQL：冷查询 p50 33 ms（p99 93 ms），合入后父提交已缓存时 p99 2.4 ms，命中缓存 p99 < 5 ms；仓库统计冷查询 131 ms，下一个提交 3.1 ms | p99 < 100 ms |
-| 真实仓库，Standard 档（[`bench/starhub`](bench/starhub/README.md)） | starhub-server（6,338 个提交、两个分支、一个 tag），PostgreSQL + MinIO，运行在 Docker 中 | 导入 94 秒，`scion admin repack` 24 秒：占 MinIO 磁盘 86 MB（每个对象单独存放时为 546 MB；Gitaly 仓库 82 MB），另有 PostgreSQL 元数据 54 MB。冷读 1–4 ms，历史分页 1.6 ms。[与 Gitaly、libgit2 的对比](docs/reports/2026-10-19-starhub-server.md) | — |
-| OpenScion 负载（[`bench/openscion`](bench/openscion/README.md)） | 1,000 和 10,000 个文件：导入、提交一个文件、完整检出、检出一个目录，与 Git 和 CarterT27/scion 在同一台机器上对比 | 1 万文件：导入 362 ms、提交 42 ms、完整检出 568 ms、检出一个目录 49 ms；8 项都比两者快。[报告](docs/reports/2026-10-20-openscion-workloads.md) | — |
-| 真实仓库，Standard 档（同上） | pingdotgg/t3code（5,573 个提交、28,068 个文件），PostgreSQL + MinIO | 导入 103 秒 + repack 42 秒；MinIO 247 MB（GitHub 的 pack 557 MB），PostgreSQL 90 MB。完整检出 2.28 秒（Git 2.65 秒），`apps/web` 0.18 秒（Git 0.17 秒），status 153 ms（Git 98 ms） | — |
-| 真实仓库（`~/git/starhub-server`，Lite 档，本机） | 导入 6,312 个提交（2,836 个合并、4,663 个文件）、clone、查询 | 导入 57 秒；zstd 压缩后对象 227 MB（未压缩 1,007 MB，git pack 392 MB）；clone 0.37 秒；status 23 ms；log、blame、show、diff 8–50 ms。文件、git SHA、blame、diff、archive 都与 git 一致 | — |
-
-## 目录结构
-
-```
-proto/scion/v1/      协议定义（.proto），语言无关，buf lint / breaking 检查
-SPEC.md              对象模型与规范编码
-testdata/vectors/    golden 测试向量，任何语言的实现都应通过
-
-common/              服务端和客户端共用（只能依赖 common）
-  protocol/          scion-proto   由 proto 生成的 Rust 代码
-  object/            scion-object  ObjectId、规范编码、Tree / Changeset（纯计算，无 IO）
-  flight/            scion-flight  合并并发请求（single-flight），服务端缓存与 daemon 共用
-
-server/              服务端（可依赖 common 与更低层的 server crate）
-  obs/               scion-obs         Prometheus 指标、OpenTelemetry 追踪、gRPC deadline
-  store/             scion-store       MetaStore / BlobStore trait、内存实现、后端一致性测试套件
-  store-sql/         scion-store-sql   SQLite / PostgreSQL 元数据存储
-  store-blob/        scion-store-blob  本地目录 / S3 兼容对象存储
-  auth/              scion-auth        令牌、外部签发方（JWKS / HS256）、内省、OIDC、ACL
-  tree/              scion-tree        增量建树
-  merge/             scion-merge       服务端 rebase：把 delta 重放到更新的目录树上，三方合并
-  land/              scion-land        创建提交、提交栈 rebase、LandCoordinator、租约
-  query/             scion-query       历史查询（log / diff / blame / merge-base）与重建索引
-  cache/             scion-cache       区域对象缓存（scion cache）：foyer、rendezvous、对冲、预热
-  api/               scion-api         gRPC 服务实现与启动入口
-  scion/             scion             服务端二进制（scion server / scion cache / scion admin）
-
-client/              客户端（只能依赖 common 与 client，禁止依赖 server）
-  sdk/               scion-client  Rust SDK
-  wc/                scion-wc      工作副本（clone / status / commit / land / sync）
-  daemon/            scion-daemon  本机 L1 缓存（scn daemon）：对象缓存、透明转发、预取
-  gitimport/         scion-gitimport  git 历史导入
-  cli/               scion-cli     命令行二进制 scn
-
-xtask/               仓库维护任务（cargo xtask layers：依赖方向检查）
-deploy/dev/          本地开发依赖（SeaweedFS、PostgreSQL）
-docs/guide/          使用指南
-docs/design/         设计文档与架构图
+```sh
+(cd bench/openscion && cargo build --release)
+bench/openscion/target/release/openscion-bench 100 7      # 1,000 个文件，跑 7 次
+bench/openscion/target/release/openscion-bench 1000 5     # 10,000 个文件，跑 5 次
 ```
 
-目录名表示位置和职责；crate 名统一带 `scion-` 前缀，避免与 crates.io 上的同名库（如 `object`）冲突。依赖方向由 `cargo xtask layers` 在 CI 中强制检查。
+### 真实仓库
+
+在 [pingdotgg/t3code](https://github.com/pingdotgg/t3code) 上，用 CarterT27/scion README 里测的同一个快照（5,573 个提交、28,068 个文件）。Scion 运行在 Docker 中的 PostgreSQL 和 MinIO 上，Git 用本地裸仓库：
+
+| | Git | Scion | Scion ÷ Git | CarterT27 ÷ Git（其 README） |
+| --- | ---: | ---: | ---: | ---: |
+| 完整检出 | 2.65 秒 | **2.28 秒** | **0.86** | 5.2 |
+| 检出 `apps/web`（1,521 个文件） | 0.172 秒 | 0.178 秒 | 1.03 | 4.6 |
+| 干净工作区的 status | 98 ms | 153 ms | 1.6 | — |
+| 导入完整历史 | — | 103 秒 + repack 42 秒 | — | 23 分 18 秒 |
+
+导入后，Scion 用 247 MB 的 MinIO 加 90 MB 的 PostgreSQL 存下这份历史；从 GitHub 克隆下来的 pack 是 557 MB。每次检出都逐个文件和 Git 核对。
+
+- [报告：CarterT27/scion 的测试](docs/reports/2026-10-20-openscion-workloads.md)（英文）：方法、全部数据和复现方式。
+- [报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的对比。
+- [组件基准测试](docs/performance.md)（英文）：缓存、合入、历史查询、10 万文件的检出。
+
+## 工作方式
+
+- **写入在服务端。** 提交由服务端根据改动的文件创建；`land` 把分支移到这个提交上，分支已经前进时由服务端 rebase，恰好一次，不需要全局队列。同时向一个分支写入的人都会成功。
+- **按需获取。** 客户端按 id 请求需要的 tree 和文件，所以稀疏检出不需要任何特殊支持：范围外的目录根本不会被拉取。
+- **不用克隆就能查历史。** log、diff、blame、祖先判断、merge base、每个条目的最后提交、打包下载都是服务端查询。
+- **三档存储。** Lite（SQLite + 本地目录）、Standard（PostgreSQL + S3 兼容存储），以及测试用的内存档。对象按内容寻址、zstd 压缩并打包；`scion admin repack` 把旧版本存成相对新版本的 delta。
+- **缓存。** 区域缓存 `scion cache` 和本机 daemon `scn daemon` 提供和服务端相同的协议，客户端不需要知道缓存拓扑。
+- **兼容 Git。** `scn import git` 连同历史导入已有仓库；每个提交都保留 git SHA，任何需要版本号的地方都可以用。
+- **认证与 redaction。** 令牌、OIDC 登录、外部签发方、按仓库、ref 和路径的访问控制，以及不改写历史地清除泄露内容。
 
 ## 快速开始
 
 ```sh
-# 方式一：docker compose，PostgreSQL + S3 兼容存储（见 docs/guide/deploy.md；国内可加 REGISTRY=docker.m.daocloud.io）
-docker compose -f deploy/compose/docker-compose.yml up -d --build
-
-# 方式二：从源码启动 Lite 档（SQLite + 本地目录，数据落盘）
+# 以 Lite 模式（SQLite + 本地目录）从源码启动服务端
 cargo run -p scion -- server --lite --data-dir ./.scion-data
+# 或者用 PostgreSQL + S3 兼容存储：docker compose -f deploy/compose/docker-compose.yml up -d --build
 
-# 其它后端：--meta mem|sqlite://PATH|postgres://…  --blobs mem|DIR|s3://bucket/prefix
-# S3 连接参数：SCION_S3_ENDPOINT、SCION_S3_ACCESS_KEY_ID、SCION_S3_SECRET_ACCESS_KEY、SCION_S3_REGION、
-# SCION_S3_PROVIDER=auto|minio|seaweedfs|aws|generic（CI 中测试 SeaweedFS 与 MinIO，详见 docs/guide/object-storage.md）
-
-# 另一个终端：安装 scn 并检查连接
+# 在另一个终端
 cargo install --path client/cli
-scn doctor
-scn config set user.name "Ada Lovelace"       # 默认的提交作者（未设置时用 git 的 user.name / user.email）
-scn config set user.email ada@example.com
-scn repo create mono                # 仓库与分支：scn repo / scn branch（见 docs/guide/repos.md）
-
-# 日常流程
-scn clone mono && cd mono          # 检出（默认 ref main，空仓库也可以）
-echo 'hello' > README.md
-echo 'target/' > .gitignore         # 支持 .gitignore 与 .scionignore（gitignore 语法）
-scn status                          # A .gitignore, A README.md
-scn commit -m "add readme"          # 或 --author "Ada <ada@example.com>"
-scn restore src/main.rs             # 放弃已跟踪文件的本地改动（`.` 表示全部）；新增的文件保留
-scn commit --amend                  # 把更多本地改动并入未合入的提交（保留说明与作者）
-scn uncommit                        # 撤销未合入的提交，改动保留为本地改动
-scn land                            # 合入 main；main 已前进时由服务端 rebase（三方合并）
-scn sync                            # 拉取别人合入的改动；有未合入的提交时自动做文件级 rebase
-scn tag v1.0                        # 给当前提交打标签；`scn tag` 列出，`scn log v1.0` 直接使用
-scn switch -c feature               # 在当前快照创建分支并切换过去；`scn switch main` 切回
-scn merge feature                   # 把分支合并为一个未合入的合并提交（按行三方合并），之后 `scn land`
-# 冲突时（scn sync 或 scn merge）文件里写入 <<<<<<< / >>>>>>> 标记，`scn status` 显示 C：
-scn resolve src/main.rs             # 去掉标记后标记为已解决；或用 --ours / --theirs 取某一方
-scn commit                          # 完成，沿用原来的提交说明；`scn merge --abort` 放弃合并
-scn cat main:README.md              # 不需要工作副本也能读文件（工作副本外加 --repo）
-scn ls main:                        # 列目录；所有命令都支持 --json
-scn log -n 10 -- src                # 历史，从新到旧，可按路径过滤（git 写法：HEAD~1、A..B）
-scn diff                            # 本地未提交的改动（unified diff）
-scn diff main                       # main 最新提交引入的改动；`scn diff A B` 比较两个版本
-scn blame src/lib.rs                # 每一行最后被哪个提交改动
-scn clone mono part --sparse src/   # 稀疏检出：只检出 src/ 和根目录下的文件；之后可以 `scn sparse add docs/`
-scn archive -o mono.tar.gz          # 打包下载 tar.gz / zip / tar（见 docs/guide/archive.md）
-
-# scn 经本机 daemon（scn daemon）连接服务端，按需自动拉起；SCION_NO_DAEMON=1 关闭
-scn daemon status
-
-# 在一个或多个服务端前部署区域缓存，并用 scion server --read-endpoint 推荐给客户端（详见 docs/guide/cache.md）
-cargo run -p scion -- cache --upstream http://127.0.0.1:7080 --listen 127.0.0.1:7090 --warm mono:main
-
-# 导入已有的 git 仓库（保留全部历史、作者与时间），详见 docs/guide/git-import.md
-scn import git ~/src/my-repo --repo mono
-
-# 升级已有数据的服务端后、启动之前：修复谱系并补建派生索引（可重复执行）
-cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
+scn repo create mono
+scn clone mono && cd mono
+echo hello > README.md
+scn commit -m "add readme"
+scn land                          # 把 main 移到这个提交；main 已前进时由服务端 rebase
+scn log
 ```
+
+[scion 与 scn 使用导览](docs/guide/cli.md)（英文）介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.md)（英文）给出 git 命令与 scn 的对照。
+
+## 文档
+
+- **使用：** [部署](docs/guide/deploy.md) · [命令导览](docs/guide/cli.md) · [从 git 迁移](docs/guide/coming-from-git.md) · [从 git 导入](docs/guide/git-import.md) · [稀疏检出](docs/guide/sparse-checkout.md) · [仓库与分支](docs/guide/repos.md) · [打包下载](docs/guide/archive.md) · [文件列表页](docs/guide/browse.md) · [git SHA](docs/guide/git-sha.md)
+- **运维：** [对象存储](docs/guide/object-storage.md) · [多节点与合入](docs/guide/cluster.md) · [缓存](docs/guide/cache.md) · [认证与鉴权](docs/guide/auth.md) · [redaction 与 fsck](docs/guide/redaction.md) · [ref 事件](docs/guide/events.md) · [指标与追踪](docs/guide/observability.md)
+- **设计：** [服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md) · 对象格式 [`SPEC.md`](SPEC.md) · 协议 [`proto/scion/v1/`](proto/scion/v1/)
+
+## 进度
+
+M1–M4 已完成：写入路径与工作副本、历史查询、服务端 rebase 与合入、集群，以及区域缓存和本机 daemon。M5 生产化进行中：认证、redaction、可观测性、ref 事件、打包与 repack 已完成，还剩 YugabyteDB 档、Helm 和发布构建。详情见[里程碑](docs/design/milestones.md)（英文），后续的大任务见[路线图](docs/design/roadmap.md)（英文）。
 
 ## 开发
 
 ```sh
-cargo test --workspace                          # 全部测试
+cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cargo xtask layers                              # 依赖方向检查
-cargo llvm-cov --workspace                      # 覆盖率（需 cargo install cargo-llvm-cov）
-SCION_BLESS=1 cargo test -p scion-object --test vectors   # 新增 golden 向量后重新生成
-docker compose -f deploy/dev/docker-compose.yml up -d     # SeaweedFS（S3）+ PostgreSQL
 ```
 
-**测试要求**（[服务端设计文档 §12.1](docs/design/rust-server-architecture.md)）：每个含逻辑的函数都要有单元测试，覆盖正常路径、边界条件和每一个错误分支。核心 crate 行覆盖率不低于 90%，PR 新增代码不低于 90%，由 CI 强制执行。
+[开发说明](docs/development.md)（英文）介绍目录结构、crate 之间的依赖规则和测试要求（新代码覆盖率至少 90%）。
 
 ## 许可证
 

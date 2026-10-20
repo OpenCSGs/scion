@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Sign macOS binaries with the OpenCSG Developer ID (hardened runtime, secure timestamp) and check
-# the result. macOS lets a signed command-line tool ask for local network access; an ad-hoc signed
-# one is refused connections to other machines on the LAN.
+# the result. macOS lets a signed command-line tool ask for local network access when it carries
+# an Info.plist with NSLocalNetworkUsageDescription (embedded by build.rs); without one it is
+# refused connections to other machines on the LAN without being asked.
 #
 #   APPLE_SIGNING_IDENTITY="Developer ID Application: …" scripts/sign-macos.sh BINARY…
 #
@@ -20,5 +21,8 @@ for bin in "$@"; do
   details="$(codesign -dv --verbose=4 "${bin}" 2>&1)"
   grep -q "Authority=Developer ID Application" <<<"${details}" || { echo "${bin}: not signed with a Developer ID" >&2; exit 1; }
   grep -q "TeamIdentifier=${team_id}" <<<"${details}" || { echo "${bin}: not signed by team ${team_id}" >&2; exit 1; }
+  # Without an embedded Info.plist (NSLocalNetworkUsageDescription) macOS refuses LAN connections
+  # without asking; build.rs embeds it
+  grep -q "^Info.plist entries=" <<<"${details}" || { echo "${bin}: no embedded Info.plist" >&2; exit 1; }
   echo "signed ${bin}"
 done

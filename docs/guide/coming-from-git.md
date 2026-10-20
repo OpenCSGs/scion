@@ -2,7 +2,7 @@
 
 English | [简体中文](coming-from-git.zh-CN.md)
 
-`scn` keeps git's spelling for arguments (`HEAD~1`, `A..B`, `-- PATH`, `-am`, `branch -d`). It uses its own command names only where Scion's model really differs from git's. This page maps one to the other.
+`scn` keeps git's spelling for arguments (`HEAD~1`, `A..B`, `-- PATH`, `-am`, `branch -d`). It uses its own command names only where Scion's model really differs from git's. This page maps one to the other; [git commands in scn](git-commands.md) is the short version.
 
 ## What is different in the model
 

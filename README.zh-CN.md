@@ -82,7 +82,9 @@ scn land                          # 把 main 移到这个提交；main 已前进
 scn log
 ```
 
-[scion 与 scn 使用导览](docs/guide/cli.zh-CN.md)（英文）介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.zh-CN.md)（英文）给出 git 命令与 scn 的对照。
+**熟悉 git？** 大多数 git 命令在 scn 里可以照原样输入，从 `scn clone http://host/REPO` 开始，完整列表见 [scn 中的 git 命令](docs/guide/git-commands.zh-CN.md)。
+
+[scion 与 scn 使用导览](docs/guide/cli.zh-CN.md)介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.zh-CN.md)说明两者模型上的区别。
 
 ## 部署
 
@@ -119,7 +121,7 @@ docker run -d --name scion -p 7080:7080 \
 
 ## 文档
 
-- **使用：** [部署](docs/guide/deploy.zh-CN.md) · [命令导览](docs/guide/cli.zh-CN.md) · [从 git 迁移](docs/guide/coming-from-git.zh-CN.md) · [从 git 导入](docs/guide/git-import.zh-CN.md) · [稀疏检出](docs/guide/sparse-checkout.zh-CN.md) · [仓库与分支](docs/guide/repos.zh-CN.md) · [打包下载](docs/guide/archive.zh-CN.md) · [文件列表页](docs/guide/browse.zh-CN.md) · [git SHA](docs/guide/git-sha.zh-CN.md)
+- **使用：** [部署](docs/guide/deploy.zh-CN.md) · [命令导览](docs/guide/cli.zh-CN.md) · [scn 中的 git 命令](docs/guide/git-commands.zh-CN.md) · [从 git 迁移](docs/guide/coming-from-git.zh-CN.md) · [从 git 导入](docs/guide/git-import.zh-CN.md) · [稀疏检出](docs/guide/sparse-checkout.zh-CN.md) · [仓库与分支](docs/guide/repos.zh-CN.md) · [打包下载](docs/guide/archive.zh-CN.md) · [文件列表页](docs/guide/browse.zh-CN.md) · [git SHA](docs/guide/git-sha.zh-CN.md)
 - **运维：** [对象存储](docs/guide/object-storage.zh-CN.md) · [多节点与合入](docs/guide/cluster.zh-CN.md) · [缓存](docs/guide/cache.zh-CN.md) · [认证与鉴权](docs/guide/auth.zh-CN.md) · [redaction 与 fsck](docs/guide/redaction.zh-CN.md) · [ref 事件](docs/guide/events.zh-CN.md) · [指标与追踪](docs/guide/observability.zh-CN.md)
 - **设计：** [服务端](docs/design/rust-server-architecture.zh-CN.md) · [客户端](docs/design/rust-client-architecture.zh-CN.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.zh-CN.md) · 对象格式 [`SPEC.zh-CN.md`](SPEC.zh-CN.md) · 协议 [`proto/scion/v1/`](proto/scion/v1/)
 

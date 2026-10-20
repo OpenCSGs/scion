@@ -1,0 +1,63 @@
+# scn 中的 git 命令
+
+[English](git-commands.md) | 简体中文
+
+速查表：哪些 git 命令在 `scn` 里可以照原样输入，哪些作为过渡写法也能用，哪些写法不同。两者模型上的区别见[从 git 迁移](coming-from-git.zh-CN.md)。
+
+## 与 git 写法相同
+
+| git | scn | 说明 |
+|---|---|---|
+| `git clone URL [DIR]` | `scn clone URL [DIR]` | `URL` 为 `http(s)://host[:port]/REPO`；用 `--ref B` 代替 `-b B`。进入克隆目录后，所有命令都不用再写地址 |
+| `git status` | `scn status` | `A` / `M` / `D`，冲突是 `C` |
+| `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用） |
+| `git commit --amend` | `scn commit --amend` | |
+| `git restore PATH` | `scn restore PATH` | |
+| `git switch B`、`git switch -c B` | `scn switch B`、`scn switch -c B` | |
+| `git merge B`、`git merge --abort` | `scn merge B`、`scn merge --abort` | 之后用 `scn land` 发布 |
+| `git branch`、`git branch NAME [REV]`、`git branch -d NAME` | `scn branch`、`scn branch NAME [REV]`、`scn branch -d NAME` | 分支在服务端 |
+| `git tag`、`git tag NAME [REV]`、`git tag -d NAME` | `scn tag`、`scn tag NAME [REV]`、`scn tag -d NAME` | 轻量标签 |
+| `git log [REV] [-n N] [--oneline] [-- PATH]` | 相同 | |
+| `git show [REV] [-- PATH]` | 相同 | |
+| `git diff`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`-- PATH` |
+| `git blame PATH` | `scn blame PATH` | 指定版本用 `scn blame REV:PATH` |
+| `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`、`--prefix`、`-o FILE` |
+| 版本号：`HEAD`、`@`、`HEAD~1`、`main^2`、`A..B`、40 位 SHA | 相同 | 每个提交都有 git SHA |
+| `.gitignore` | `.gitignore` | 也支持 `.scionignore` |
+
+## 过渡写法
+
+下面这些也能用，执行时会提示对应的 scn 命令。它们不出现在 `scn --help` 里，以后可能去掉，脚本里请用 scn 的命令名。
+
+| 你输入的 | scn 执行的 |
+|---|---|
+| `scn push` | `scn land` |
+| `scn pull`、`scn pull --rebase` | `scn sync` |
+| `scn checkout BRANCH`、`scn checkout -b NAME` | `scn switch BRANCH`、`scn switch -c NAME` |
+| `scn checkout -- PATH`、`scn checkout PATH` | `scn restore PATH` |
+| `scn reset --soft HEAD~1` | `scn uncommit` |
+| `scn reset --hard` | `scn restore .` |
+| `scn rebase --continue`、`scn merge --continue` | `scn commit` |
+| `scn add …` | 什么也不做：没有暂存区，`scn commit` 会带上所有改动 |
+| `scn rm [-r] PATH…`、`scn mv FROM TO` | 删除或移动文件；下一次 `scn commit` 会带上 |
+
+## 写法不同
+
+| git | scn | 原因 |
+|---|---|---|
+| `git init` | `scn repo create NAME` 或 `scn repo create URL` | 仓库在服务端 |
+| `git push` | `scn land` | 分支已经前进时由服务端 rebase，并且只合入一次 |
+| `git pull --rebase` | `scn sync` | 没有单独的 `fetch`：本地没有历史 |
+| `git reset --soft HEAD~1` | `scn uncommit` | |
+| 解决冲突后的 `git add` | `scn resolve PATH` | 用 `--ours` / `--theirs` 直接取一边 |
+| `git show REV:PATH` | `scn cat REV:PATH` | 不需要工作副本 |
+| `git ls-tree REV DIR` | `scn ls REV:DIR` | |
+| `git sparse-checkout set DIRS` | `scn clone … --sparse DIRS`，`scn sparse set/add/rm/disable` | |
+| `git config user.name` / `user.email` | `scn config set user.name` / `user.email` | |
+| `git fast-import`、迁移仓库 | `scn import git PATH --repo REPO` | 保留原始 SHA |
+
+读取历史的命令在工作副本外也能用，加 `--repo URL` 即可，例如 `scn log --repo http://host/org/app`。
+
+## 尚未支持
+
+`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote` 和 `fetch`。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。

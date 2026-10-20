@@ -2,7 +2,7 @@
 
 [English](coming-from-git.md) | 简体中文
 
-`scn` 的参数沿用 git 的写法（`HEAD~1`、`A..B`、`-- PATH`、`-am`、`branch -d`），只有 Scion 的模型确实和 git 不同的地方才用自己的命令名。本文列出两者的对应关系。
+`scn` 的参数沿用 git 的写法（`HEAD~1`、`A..B`、`-- PATH`、`-am`、`branch -d`），只有 Scion 的模型确实和 git 不同的地方才用自己的命令名。本文列出两者的对应关系；简明速查见 [scn 中的 git 命令](git-commands.zh-CN.md)。
 
 ## 模型上的不同
 

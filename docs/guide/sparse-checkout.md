@@ -1,51 +1,53 @@
-# 稀疏检出
+# Sparse checkout
 
-大仓库里通常只需要其中几个目录。稀疏检出只把这些目录写到磁盘：
+English | [简体中文](sparse-checkout.zh-CN.md)
 
-```sh
-scn clone mono --sparse services/api/,libs/common/   # 逗号分隔，结尾的 / 可省略
-```
-
-范围内的内容是：
-
-- 根目录下的文件（总是检出）；
-- 列出的目录下的全部内容。
-
-列出目录的上级目录里的文件**不**检出：`--sparse a/b` 不包括 `a/x.txt`。
-
-## 原理
-
-Scion 的读取协议按对象 id 取对象，目录树由客户端逐层读取。稀疏检出不需要服务端的任何支持：遍历目录树时不进入范围外的子目录，所以它们的目录树和文件内容都不会被请求，也不会进入本机 daemon 的缓存。clone 的耗时和流量只与范围内的内容有关。
-
-提交时客户端只发送改动的路径，新的目录树由服务端基于父提交生成，范围外的内容原样保留。
-
-## 调整范围
+In a large repository, a job usually needs only a few directories. A sparse checkout writes only those to disk:
 
 ```sh
-scn sparse ls                 # 列出范围
-scn sparse add tools/         # 加入目录并检出
-scn sparse rm libs/common     # 移出目录并删除其中的文件
-scn sparse set docs/ web/     # 直接设定范围（全部检出的工作副本由此变为稀疏检出）
-scn sparse disable            # 恢复为全部检出
+scn clone mono --sparse services/api/,libs/common/   # comma-separated; the trailing / is optional
 ```
 
-- **未提交的改动**：调整范围前必须先 commit。已提交未合入的改动没有影响，检出的版本就是这个提交。
-- **原来范围外的本地文件**：按新范围判断。
-  - 新范围仍不包含：报错，列出这些文件。
-  - 新范围包含，且和服务端上同一路径的内容相同：直接接管。
-  - 内容不同：报错，不会覆盖本地文件。
-  - 服务端没有这个路径：保留为新增文件，之后可以照常 commit。
-- **嵌套目录**：被另一项包含的目录会自动去掉，例如 `a` 和 `a/b` 只保留 `a`。`rm` 必须给出范围中的某一项，不能只移出其中的子目录。
-- **全部检出时**：`add` 和 `rm` 会报错，先用 `set` 选择目录。
+The scope holds:
 
-所有命令都支持 `--json`（`scion.cli.sparse/v1`，`dirs` 为 null 表示全部检出）。
+- the files at the repository's root (always checked out);
+- everything under the listed directories.
 
-## 日常命令
+Files in the parents of a listed directory are **not** checked out: `--sparse a/b` does not include `a/x.txt`.
 
-- **sync / land**：只写入范围内的改动。别人在范围外的改动不会出现在本地，也不影响 sync 和 rebase。
-- **冲突检测**：客户端 rebase 只比较范围内的文件，你的改动也只可能在范围内。
-- **范围外的新文件**：status、commit、land、sync 都会报错，并列出这些文件。
-  - 原因：这些路径在服务端可能已有内容，只是没有检出，直接提交会悄悄覆盖。
-  - 处理：把文件移到范围内，或用 `scn sparse add` 加入它所在的目录。
+## How it works
 
-范围记录在 `.scion/state.json` 的 `sparse` 字段中。
+Scion's read protocol fetches objects by id, and the client reads trees level by level. A sparse checkout needs no support from the server: the walk does not enter subdirectories outside the scope, so their trees and files are never requested and never enter the local daemon's cache. A clone's time and traffic depend only on what is in scope.
+
+A commit sends only the changed paths, and the server builds the new trees from the parent's, so everything outside the scope stays as it is.
+
+## Changing the scope
+
+```sh
+scn sparse ls                 # list the scope
+scn sparse add tools/         # add a directory and check it out
+scn sparse rm libs/common     # remove a directory and delete its files
+scn sparse set docs/ web/     # set the scope (a full working copy becomes sparse)
+scn sparse disable            # back to a full checkout
+```
+
+- **Uncommitted changes:** commit before changing the scope. Commits not landed yet are fine: the checked-out revision is that commit.
+- **Local files outside the old scope:** judged against the new scope.
+  - Still outside it: an error that lists them.
+  - Inside it, with the same content as the server's at that path: taken over as they are.
+  - Inside it, with different content: an error; local files are never overwritten.
+  - Not on the server: kept as new files, to commit as usual.
+- **Nested directories:** a directory inside another entry is dropped: `a` and `a/b` keep only `a`. `rm` takes an entry of the scope, not a subdirectory of one.
+- **On a full checkout:** `add` and `rm` are errors; choose directories with `set` first.
+
+Every command takes `--json` (`scion.cli.sparse/v1`; `dirs` is null for a full checkout).
+
+## Everyday commands
+
+- **sync and land:** write only changes in scope. Other people's changes outside it never show up locally and do not affect sync or rebase.
+- **Conflict detection:** the client's rebase compares only files in scope, which is the only place your changes can be.
+- **New files outside the scope:** status, commit, land and sync stop with an error that lists them.
+  - Why: the server may already have content at those paths, just not checked out, and committing would silently overwrite it.
+  - What to do: move the files into the scope, or add their directory with `scn sparse add`.
+
+The scope is kept in the `sparse` field of `.scion/state.json`.

@@ -1,48 +1,50 @@
-# 文件列表页：最后提交与目录统计
+# Directory listings: last commits and statistics
 
-Web 页面展示目录时，通常要显示两类信息：
-- 每个文件或子目录最后一次被哪个提交改动（「最后提交」列）；
-- 仓库或目录的文件数和大小。
+English | [简体中文](browse.zh-CN.md)
 
-服务端提供这两种查询，并缓存计算结果，重复查看同一个版本时不用重新计算。
+A web page that shows a directory usually needs two things:
+- the commit that last changed each file or subdirectory (the "last commit" column);
+- the number of files and the size of the repository or directory.
 
-## 每个条目的最后提交
+The server answers both queries and caches what it computes, so viewing the same revision again costs nothing more.
+
+## The last commit of each entry
 
 ```
 QueryService.ListLastCommits(repo, revision, path, offset, limit)
   → { changeset_id, entries: [{name, changeset_id}], commits: [LogEntry], total }
 ```
 
-- **范围**：`path` 为目录路径，空表示根目录。条目按名字排序，用 `offset` 和 `limit` 分页，`limit` 默认和最大都是 1000，`total` 是条目总数。
-- **`commits`**：`entries` 引用到的提交，去重后按代数从新到旧排列，包含作者、时间和提交说明，不需要再逐个查询。需要 40 位 git sha 时，用这些提交 id 调用 `GetGitShas`（见 [git 兼容的提交 sha](git-sha.md)）。
-- **语义**：与 Blame 相同，沿第一父提交链追溯：
-  - 条目出现在某个提交的改动中（相对第一父提交），就算被这个提交改动；
-  - 子目录被改动，指它下面的任意文件被改动；
-  - 经由合并带进来的改动，归到合并提交上。
-- **只能读部分路径的用户**：只列出可见的条目。看不到全部内容的条目（例如只能读 `src/ui` 时的 `src`）只返回名字，不返回最后提交。
-- **SDK**：`Client::last_commits(revision, path, offset, limit)`。
+- **Scope:** `path` is a directory, empty for the root. Entries are sorted by name and paged with `offset` and `limit`; `limit` defaults to 1000, which is also its maximum, and `total` is the number of entries.
+- **`commits`:** the commits `entries` refer to, without duplicates, newest generation first, with author, time and message, so they need no further queries. For 40-digit git SHAs, pass these ids to `GetGitShas` (see [git-compatible commit SHAs](git-sha.md)).
+- **Semantics:** as for Blame, along the first-parent chain:
+  - an entry is changed by a commit when it is among the commit's changes against its first parent;
+  - a subdirectory is changed when any file below it is;
+  - changes brought in by a merge count for the merge commit.
+- **Users who can read only some paths:** only visible entries are listed. An entry whose contents they cannot all see (`src` for someone who can read only `src/ui`) comes back with its name and no last commit.
+- **SDK:** `Client::last_commits(revision, path, offset, limit)`.
 
-### 计算与缓存
+### Computing and caching
 
-1. 结果按「提交 + 目录」缓存。只有一次请求覆盖目录的全部条目时才写入缓存。
-2. 父提交已有缓存时，新提交只需要按自己的改动增量更新：改动到的条目归到新提交，其余沿用父提交的结果。合入后查看分支最新版本的常见情况，就走这条路径。
-3. 没有缓存的条目，用 PathHistory 索引找第一父提交链上最近的改动。
-4. 索引不可用时（建立索引之前写入的旧数据），沿第一父提交链逐个检查，最多 2000 个提交。超过上限仍未找到的条目，`changeset_id` 为空，这种结果不写入缓存。
+1. Results are cached per commit and directory, and only when one request covered all the directory's entries.
+2. When the parent commit's result is cached, a new commit's is an incremental update from its own changes: the entries it changes go to it, the others keep the parent's. Viewing a branch's head after a land takes this path.
+3. Entries without a cached result use the PathHistory index to find the latest change on the first-parent chain.
+4. Without the index (old data written before it existed), commits along the first-parent chain are checked one by one, at most 2,000. Entries still unresolved at the limit have an empty `changeset_id`, and such results are not cached.
 
-## 目录统计
+## Directory statistics
 
 ```
 QueryService.GetTreeStats(repo, revision, path)
   → { changeset_id, tree_id, files, directories, bytes }
 ```
 
-- **`files`**：文件数，包括可执行文件和符号链接。
-- **`directories`**：子目录数，不含自身。
-- **`bytes`**：文件字节数之和。在 S1 阶段，LFS 文件按指针文件的大小计算。
-- **权限**：统计覆盖整棵子树，所以需要能读其中的全部内容：
-  - `path` 为空时，需要整个仓库的读权限；
-  - 指定 `path` 时，需要该路径的读权限。
-- **缓存**：结果只由目录树内容决定，按目录树 id 缓存。没改动的子目录直接命中缓存，fork 出来的仓库也会一并复制这些数据。
-- **SDK**：`Client::tree_stats(revision, path)`。
+- **`files`:** the number of files, executables and symbolic links included.
+- **`directories`:** the number of subdirectories, not counting itself.
+- **`bytes`:** the total size of the files. In stage S1, LFS files count at the size of their pointer files.
+- **Permissions:** statistics cover a whole subtree, so they need read access to all of it:
+  - with an empty `path`, read access to the whole repository;
+  - with a `path`, read access to that path.
+- **Caching:** the result depends only on the tree's contents and is cached by tree id. Unchanged subdirectories hit the cache, and forks copy these results too.
+- **SDK:** `Client::tree_stats(revision, path)`.
 
-服务端在 `GetServerInfo` 中声明特性 `query.last_commits` 与 `query.tree_stats`。
+The server declares the features `query.last_commits` and `query.tree_stats` in `GetServerInfo`.

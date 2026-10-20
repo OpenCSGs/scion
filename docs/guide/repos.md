@@ -1,60 +1,62 @@
-# 仓库与分支管理
+# Repositories and branches
 
-仓库和分支可以在线创建与管理，不需要重启服务端。接口为 `RepoService`，以及 `RefService` 的 `CreateRef` / `UpdateRef` / `DeleteRef`，见 [`proto/scion/v1/repo.proto`](../../proto/scion/v1/repo.proto)。命令行为 `scn repo` 与 `scn branch`，所有命令都支持 `--json`。
+English | [简体中文](repos.zh-CN.md)
 
-## 仓库
+Repositories and branches are created and managed online, without restarting the server. The APIs are `RepoService` and `RefService`'s `CreateRef`, `UpdateRef` and `DeleteRef`; see [`proto/scion/v1/repo.proto`](../../proto/scion/v1/repo.proto). The commands are `scn repo` and `scn branch`, and all of them take `--json`.
+
+## Repositories
 
 ```sh
-scn repo create opencsg/qwen --description "Qwen 微调" [--default-branch main]
-scn repo ls [opencsg/] [--limit 100]       # 只列出有读权限的仓库，按名字排序
+scn repo create opencsg/qwen --description "Qwen fine-tuning" [--default-branch main]
+scn repo ls [opencsg/] [--limit 100]       # only repositories you can read, by name
 scn repo info opencsg/qwen
 scn repo set opencsg/qwen --default-branch dev --description "…"
-scn repo fork opencsg/qwen alice/qwen      # 复制全部历史与分支
-scn repo rm opencsg/qwen                   # 删除，宽限期内可以恢复
-scn repo ls --deleted                      # 已删除、尚未清除的仓库
+scn repo fork opencsg/qwen alice/qwen      # copies all history and branches
+scn repo rm opencsg/qwen                   # delete; restorable during a grace period
+scn repo ls --deleted                      # deleted repositories not purged yet
 scn repo restore opencsg/qwen
 ```
 
-仓库名是一段或多段 `[A-Za-z0-9._-]+`，用 `/` 分隔（与 CSGHub 的 `namespace/name` 一致），最长 256 字节。`scion server --repo NAME` 仍然可以在启动时预建仓库。
+A repository name is one or more segments of `[A-Za-z0-9._-]+` separated by `/` (as CSGHub's `namespace/name`), at most 256 bytes. `scion server --repo NAME` still creates a repository at start.
 
-### 权限
+### Permissions
 
-| 操作 | 需要的权限 |
+| Operation | Permission needed |
 |---|---|
-| 创建、修改、删除、恢复 | 该仓库名上的 `admin`（ACL 的仓库通配同样适用，例如 `repos = ["alice/*"]` 允许 alice 在自己的命名空间下建仓库） |
-| 查看属性、列出 | `read`；列出时只返回有读权限的仓库 |
-| 查看已删除的仓库 | `admin` |
-| fork | 来源仓库的 `read`，加上目标仓库名上的 `admin` |
+| Create, change, delete, restore | `admin` on the repository's name (repository wildcards in the ACL apply: `repos = ["alice/*"]` lets alice create repositories in their own namespace) |
+| Show properties, list | `read`; a listing returns only repositories you can read |
+| Show deleted repositories | `admin` |
+| Fork | `read` on the source and `admin` on the target's name |
 
-### 删除与清除
+### Deleting and purging
 
-- **软删除**：删除后按名字找不到这个仓库，读写都返回 `REPO_NOT_FOUND`，数据保留。
-- **宽限期**：由 `scion server --repo-delete-grace` 设置（默认 24 小时，最少 2 小时），期间可以用 `scn repo restore` 恢复。
-- **名字暂不可用**：宽限期内用同一个名字创建仓库，返回 `ALREADY_EXISTS` / `REPO_DELETED`。
-- **清除**：宽限期过后，服务端的 janitor 分批删除这个仓库的全部元数据（ref、提交记录、对象索引、派生数据、redaction 等），之后名字才能重新使用。
-  - 清除一旦开始（第一批删除时），就不能再恢复，`scn repo restore` 返回 `FAILED_PRECONDITION`；
-  - 恢复与清除不会交错：每一批都在同一个事务里锁住仓库行、确认仍是已删除才删。
-- **对象字节**：在仓库之间共享，清除仓库时不删除。
-- **宽限期下限的原因**：服务端的提交记录缓存、区域缓存与 daemon 的可见集都按仓库名缓存，最长 1 小时。名字在这之后才重新可用，所以重新创建的同名仓库看不到旧仓库的数据。
+- **Soft delete:** a deleted repository can no longer be found by name; reads and writes return `REPO_NOT_FOUND`, and the data stays.
+- **Grace period:** set by `scion server --repo-delete-grace` (24 hours by default, at least 2), during which `scn repo restore` brings it back.
+- **The name is taken meanwhile:** creating a repository with the same name during the grace period returns `ALREADY_EXISTS` / `REPO_DELETED`.
+- **Purge:** after the grace period, the server's janitor deletes all the repository's metadata in batches (refs, commit records, object index, derived data, redactions and so on); only then can the name be used again.
+  - Once a purge starts (with its first batch), the repository can no longer be restored: `scn repo restore` returns `FAILED_PRECONDITION`.
+  - Restores and purges never interleave: each batch locks the repository's row in one transaction and checks it is still deleted before deleting.
+- **Object bytes:** shared between repositories and not deleted by a purge.
+- **Why the grace period has a minimum:** the server's commit record cache, the regional cache and the daemon's visible sets cache by repository name for up to an hour. The name becomes free only after that, so a new repository with the same name never sees the old one's data.
 
-### fork
+### Forks
 
-- **复制的内容**：在一个事务里复制来源仓库的属性、对象索引、提交记录、派生数据、路径历史、全部分支，以及有效的 redaction（fork 里 redact 过的文件同样读不到）。
-- **不复制的内容**：合入记录和请求结果不复制，fork 中的合入从头开始计。
-- **耗时**：与来源仓库的提交数和文件数成正比，都在数据库内完成，对象字节不复制。超大仓库的异步 fork 尚未实现。
+- **What is copied:** in one transaction, the source's properties, object index, commit records, derived data, path history, every branch and the active redactions (files redacted in the source cannot be read in the fork either).
+- **What is not:** land records and request results; lands in the fork count from zero.
+- **Time:** proportional to the source's numbers of commits and files, all inside the database; object bytes are not copied. Asynchronous forks of very large repositories are not implemented yet.
 
-## 分支
+## Branches
 
 ```sh
-scn branch ls                 # * 标出默认分支
-scn branch create dev [REV]   # REV 默认为当前跟踪的 ref
+scn branch ls                 # * marks the default branch
+scn branch create dev [REV]   # REV defaults to the ref being tracked
 scn branch rm dev
 ```
 
-在工作副本之外用 `--repo`。
+Outside a working copy, pass `--repo`.
 
-- **权限**：创建、移动、删除分支都需要该 ref 的 `land` 权限，与合入相同。ACL 中按 ref 限制的规则同样生效。
-- **`UpdateRef`**：直接把分支指向某个提交，可以不是快进，相当于强制推送。平时前进分支用 `scn land`（服务端 rebase、批处理、恰好一次）。
-- **默认分支**：不能删除；先用 `scn repo set --default-branch` 换一个默认分支。
-- **版本号**：删除后重新创建的分支从版本 1 开始，这个分支此前的版本历史（`ref_log` 审计记录）随删除一起清除。
-- **WatchRefs**：不推送分支删除。
+- **Permissions:** creating, moving and deleting a branch need `land` on the ref, as landing does. ACL rules limited to refs apply.
+- **`UpdateRef`:** points a branch at a commit directly, fast-forward or not, like a force push. To move a branch forward day to day, use `scn land` (server-side rebase, batching, exactly once).
+- **Default branch:** cannot be deleted; switch the default with `scn repo set --default-branch` first.
+- **Versions:** a branch recreated after deletion starts again at version 1; its earlier version history (the `ref_log` audit records) is purged with the deletion.
+- **WatchRefs:** does not push branch deletions.

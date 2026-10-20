@@ -27,6 +27,7 @@ mod provider;
 
 pub use provider::{Detected, S3Provider, detect};
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -39,6 +40,8 @@ use object_store::path::Path;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, RetryConfig};
 use scion_object::ObjectId;
 use scion_store::{BlobStore, Error, MetaStore, PackLocation, PackedObject, Result};
+
+use delta::Base;
 
 /// S3 兼容存储的连接参数。
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -98,10 +101,17 @@ struct Packs {
     /// Small packs held whole, so that reading their other objects needs no request either.
     bytes: Cache<[u8; 32], Bytes>,
     /// Objects recently used as delta bases: reading history walks the same chains.
-    bases: Cache<ObjectId, Bytes>,
+    bases: Cache<BaseKey, Bytes>,
     /// Blocks of large packs: a commit's objects, and the versions of a delta chain, are mostly
     /// close together, so one block read serves many objects.
     blocks: Cache<([u8; 32], u64), Bytes>,
+}
+
+/// A delta base in the cache: by id, or by where it is in a pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BaseKey {
+    Id(ObjectId),
+    At([u8; 32], u64),
 }
 
 /// An object for [`ObjectBlobStore::repack`], and the object to store it as a delta against
@@ -262,6 +272,7 @@ impl ObjectBlobStore {
             bases: Cache::builder()
                 .max_capacity(BASE_CACHE)
                 .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
+                .support_invalidation_closures()
                 .build(),
             blocks: Cache::builder()
                 .max_capacity(BLOCK_CACHE)
@@ -478,19 +489,29 @@ impl ObjectBlobStore {
     }
 
     /// The object from its pack (held in memory, or a range read).
-    async fn read_packed(&self, id: &ObjectId, loc: &PackLocation, depth: u8) -> Result<Packed> {
+    /// The stored bytes at `loc`. None when the pack is gone.
+    async fn stored_at(&self, loc: &PackLocation) -> Result<Option<Bytes>> {
         let (start, end) = (loc.offset, loc.offset + loc.len);
         let held = self.packs.as_ref().and_then(|p| p.bytes.get(&loc.pack));
-        let stored = match held {
-            Some(b) if end <= b.len() as u64 => b.slice(start as usize..end as usize),
-            _ => match self.pack_range(&loc.pack, start, end).await? {
-                Some(b) => b,
-                None => return Ok(Packed::Gone),
-            },
+        match held {
+            Some(b) if end <= b.len() as u64 => Ok(Some(b.slice(start as usize..end as usize))),
+            _ => self.pack_range(&loc.pack, start, end).await,
+        }
+    }
+
+    async fn read_packed(&self, id: &ObjectId, loc: &PackLocation, depth: u8) -> Result<Packed> {
+        let Some(stored) = self.stored_at(loc).await? else {
+            return Ok(Packed::Gone);
         };
         let oid = *id;
         if let Some(base) = delta::base_of(&stored) {
-            return self.undelta(id, &base, stored, depth).await;
+            let found = self.undelta(id, loc, base, stored.clone(), depth).await?;
+            if matches!(found, Packed::Found(_)) {
+                return Ok(found);
+            }
+            // Whole content that happens to start like a delta
+            let whole = off_runtime(stored.len(), move || decode(&oid, stored)).await;
+            return Ok(whole.map_or(found, Packed::Found));
         }
         Ok(match off_runtime(stored.len(), move || decode(&oid, stored)).await {
             Some(data) => Packed::Found(data),
@@ -498,27 +519,11 @@ impl ObjectBlobStore {
         })
     }
 
-    /// The object from a delta: reads its base (which may be a delta too) and applies it.
-    async fn undelta(&self, id: &ObjectId, base: &ObjectId, stored: Bytes, depth: u8) -> Result<Packed> {
-        let Some(p) = &self.packs else {
+    /// The object from a delta at `loc`: reads its base (which may be a delta too) and applies it.
+    async fn undelta(&self, id: &ObjectId, loc: &PackLocation, base: Base, stored: Bytes, depth: u8) -> Result<Packed> {
+        let Some(base_bytes) = self.base_bytes(loc, base, depth).await? else {
+            tracing::error!(%id, ?base, "delta base is missing");
             return Ok(Packed::Damaged);
-        };
-        if depth >= MAX_READ_DEPTH {
-            tracing::error!(%id, "delta chain too long");
-            return Ok(Packed::Damaged);
-        }
-        let base_bytes = match p.bases.get(base) {
-            Some(b) => b,
-            None => match self.get_at(base, depth + 1).await? {
-                Some(b) => {
-                    p.bases.insert(*base, b.clone());
-                    b
-                }
-                None => {
-                    tracing::error!(%id, %base, "delta base is missing");
-                    return Ok(Packed::Damaged);
-                }
-            },
         };
         let oid = *id;
         let size = stored.len() + base_bytes.len();
@@ -529,6 +534,65 @@ impl ObjectBlobStore {
         })
         .await;
         Ok(data.map_or(Packed::Damaged, Packed::Found))
+    }
+
+    /// The bytes of the base of a delta at `loc`, through the base cache.
+    async fn base_bytes(&self, loc: &PackLocation, base: Base, depth: u8) -> Result<Option<Bytes>> {
+        let Some(p) = &self.packs else { return Ok(None) };
+        if depth >= MAX_READ_DEPTH {
+            tracing::error!(?base, "delta chain too long");
+            return Ok(None);
+        }
+        let key = match base {
+            Base::Id(b) => BaseKey::Id(b),
+            Base::At { offset, .. } => BaseKey::At(loc.pack, offset),
+        };
+        if let Some(b) = p.bases.get(&key) {
+            return Ok(Some(b));
+        }
+        let got = match base {
+            Base::Id(b) => self.get_at(&b, depth + 1).await?,
+            Base::At { offset, len } => self.read_at(&loc.pack, offset, len, depth + 1).await?,
+        };
+        if let Some(b) = &got {
+            p.bases.insert(key, b.clone());
+        }
+        Ok(got)
+    }
+
+    /// The object stored at `offset..offset + len` of a pack, which a delta in that pack names as
+    /// its base. Its id is not known here: the object built on it is checked instead.
+    fn read_at<'a>(
+        &'a self,
+        pack: &'a [u8; 32],
+        offset: u64,
+        len: u64,
+        depth: u8,
+    ) -> futures::future::BoxFuture<'a, Result<Option<Bytes>>> {
+        Box::pin(async move {
+            let loc = PackLocation {
+                pack: *pack,
+                offset,
+                len,
+            };
+            let Some(stored) = self.stored_at(&loc).await? else {
+                return Ok(None);
+            };
+            if let Some(base) = delta::base_of(&stored) {
+                let Some(base_bytes) = self.base_bytes(&loc, base, depth).await? else {
+                    return Ok(None);
+                };
+                let size = stored.len() + base_bytes.len();
+                let data = off_runtime(size, move || delta::decode(&stored, &base_bytes).map(Bytes::from)).await;
+                return Ok(data);
+            }
+            // Repack names a base by where it is only when its stored form is unambiguous
+            if !stored.starts_with(&ZSTD_MAGIC) {
+                return Ok(Some(stored));
+            }
+            let data = off_runtime(stored.len(), move || zstd::stream::decode_all(stored.as_ref()).ok()).await;
+            Ok(data.map(Bytes::from))
+        })
     }
 
     /// [`BlobStore::get`] at a depth of delta resolution.
@@ -685,6 +749,9 @@ impl ObjectBlobStore {
         let mut stats = RepackStats::default();
         // Chain length of each object packed so far (0: stored whole)
         let mut depth: std::collections::HashMap<ObjectId, u8> = std::collections::HashMap::new();
+        // Objects stored as they are whose bytes start like a zstd frame or a delta: deltas name
+        // them by id, since a base read by where it is cannot be told apart by its id
+        let mut ambiguous = std::collections::HashSet::new();
         let raw: Cache<ObjectId, Bytes> = Cache::builder()
             .max_capacity(256 << 20)
             .weigher(|_, b: &Bytes| u32::try_from(b.len()).unwrap_or(u32::MAX))
@@ -714,8 +781,13 @@ impl ObjectBlobStore {
                 };
                 if let Some(base_bytes) = base_bytes {
                     let (data2, whole) = (data.clone(), stored.len());
+                    // By where it is when the base is in this pack and reads back unambiguously
+                    let name = builder
+                        .place(&b)
+                        .filter(|_| !ambiguous.contains(&b))
+                        .unwrap_or(Base::Id(b));
                     let encoded = off_runtime(data.len() + base_bytes.len(), move || {
-                        delta::encode(&b, &base_bytes, &data2, whole)
+                        delta::encode(name, &base_bytes, &data2, whole)
                     })
                     .await;
                     if let Some(e) = encoded {
@@ -724,6 +796,9 @@ impl ObjectBlobStore {
                         stats.deltas += 1;
                     }
                 }
+            }
+            if d == 0 && stored == data && (stored.starts_with(&ZSTD_MAGIC) || delta::base_of(&stored).is_some()) {
+                ambiguous.insert(item.id);
             }
             depth.insert(item.id, d);
             raw.insert(item.id, data);
@@ -869,7 +944,7 @@ impl ObjectBlobStore {
                 builder.add(*d, &self.stored_form(&data).await);
             }
             self.write_pack(packs, builder).await?;
-            packs.bases.invalidate(id);
+            packs.bases.invalidate(&BaseKey::Id(*id));
         }
         let old = self.pack_path(&loc.pack);
         let bytes = match self.store.get(&old).await {
@@ -883,12 +958,24 @@ impl ObjectBlobStore {
         let entries = pack::parse(&bytes).ok_or_else(|| Error::Backend(format!("pack holding {id} is damaged")))?;
         let others: Vec<ObjectId> = entries.iter().map(|e| e.id).filter(|o| o != id).collect();
         let current = packs.index.pack_locations(&others).await?;
+        let at: HashMap<(u64, u64), ObjectId> = entries.iter().map(|e| ((e.offset, e.len), e.id)).collect();
         let mut builder = pack::PackBuilder::new();
         for e in entries
             .iter()
             .filter(|e| current.get(&e.id).is_some_and(|l| l.pack == loc.pack))
         {
-            builder.add(e.id, &bytes[e.offset as usize..(e.offset + e.len) as usize]);
+            let stored = &bytes[e.offset as usize..(e.offset + e.len) as usize];
+            // Deltas naming their base by where it is follow it to its new place, or name it by id
+            if let Some(Base::At { offset, len }) = delta::base_of(stored) {
+                let base = at
+                    .get(&(offset, len))
+                    .ok_or_else(|| Error::Backend(format!("pack holding {id} is damaged")))?;
+                let name = builder.place(base).unwrap_or(Base::Id(*base));
+                let moved = delta::rebase(stored, name).ok_or_else(|| Error::Backend("bad delta".into()))?;
+                builder.add(e.id, &moved);
+                continue;
+            }
+            builder.add(e.id, stored);
         }
         if !builder.is_empty() {
             self.write_pack(packs, builder).await?;
@@ -897,6 +984,14 @@ impl ObjectBlobStore {
         packs.index.delete_pack_locations(&[*id]).await?;
         packs.bytes.invalidate(&loc.pack);
         packs.learned.invalidate(&loc.pack);
+        let gone = loc.pack;
+        // Bases cached by where they were in the old pack, the purged object among them
+        if let Err(e) = packs
+            .bases
+            .invalidate_entries_if(move |k, _| matches!(k, BaseKey::At(p, _) if *p == gone))
+        {
+            tracing::warn!(error = %e, "could not drop the purged pack's cached bases");
+        }
         for b in 0..=(bytes.len() as u64 / PACK_BLOCK) {
             packs.blocks.invalidate(&(loc.pack, b));
         }
@@ -1433,6 +1528,74 @@ mod tests {
             .collect()
     }
 
+    /// The stored form of every object in the packs under `dir`.
+    fn stored_objects(dir: &std::path::Path) -> Vec<(ObjectId, Vec<u8>)> {
+        let mut out = Vec::new();
+        for f in files(dir, "packs") {
+            let bytes = std::fs::read(&f).expect("read pack");
+            for e in pack::parse(&bytes).expect("pack") {
+                out.push((e.id, bytes[e.offset as usize..(e.offset + e.len) as usize].to_vec()));
+            }
+        }
+        out
+    }
+
+    /// Repack names bases in the same pack by where they are, which saves 31 bytes a delta, and
+    /// by id when their stored bytes could be mistaken for a zstd frame or a delta.
+    #[tokio::test]
+    async fn repack_names_bases_by_where_they_are() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        let vs = versions();
+        // Incompressible content that starts like a zstd frame or a delta, in two versions each
+        let mut tricky = Vec::new();
+        let mut by_id = b"SCDL".to_vec();
+        by_id.extend_from_slice(&vs[0].0.to_bytes());
+        for prefix in [&ZSTD_MAGIC[..], b"SCDP\x05\x05", &by_id] {
+            let mut newer = prefix.to_vec();
+            newer.extend_from_slice(&noise(3_000));
+            let mut older = newer.clone();
+            older[2_000] ^= 1;
+            for d in [newer, older] {
+                let d = Bytes::from(d);
+                tricky.push((ObjectId::of_blob(&d), d));
+            }
+        }
+        let all: Vec<(ObjectId, Bytes)> = vs.iter().chain(&tricky).cloned().collect();
+        s.put_many(&all).await.expect("pack");
+        let mut items = chain(&vs);
+        items.extend(tricky.chunks(2).flat_map(chain));
+        let stats = s.repack(&items).await.expect("repack");
+        assert_eq!(stats.deltas, vs.len() - 1 + 3, "{stats:?}");
+        s.prune(std::time::Duration::ZERO).await.expect("prune");
+        let stored: HashMap<ObjectId, Vec<u8>> = stored_objects(dir.path()).into_iter().collect();
+        for (i, (id, _)) in vs.iter().enumerate().skip(1) {
+            let Some(Base::At { offset, len }) = delta::base_of(&stored[id]) else {
+                panic!("version {i} is not a delta by place");
+            };
+            let base = &stored[&vs[i - 1].0];
+            assert_eq!(len, base.len() as u64);
+            assert!(offset > 0);
+        }
+        for pair in tricky.chunks(2) {
+            assert_eq!(delta::base_of(&stored[&pair[1].0]), Some(Base::Id(pair[0].0)));
+        }
+        let fresh = ObjectBlobStore::local(dir.path())
+            .expect("open")
+            .with_packs(index.clone());
+        // Oldest first, so every chain is read from the bottom with nothing cached
+        for (id, d) in all.iter().rev() {
+            assert_eq!(fresh.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+        // Whole content that starts like a delta is read back as it is
+        let mut odd = b"SCDP\x01\x01".to_vec();
+        odd.extend_from_slice(&noise(50));
+        let odd = Bytes::from(odd);
+        let odd_id = ObjectId::of_blob(&odd);
+        s.put_many(&[(odd_id, odd.clone()), vs[0].clone()]).await.expect("put");
+        assert_eq!(fresh.get(&odd_id).await, Ok(Some(odd)));
+    }
+
     #[tokio::test]
     async fn repack_cuts_chains_at_the_maximum_depth() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1583,7 +1746,7 @@ mod tests {
         let mut b = pack::PackBuilder::new();
         b.add(
             obj_id,
-            &delta::encode(&ghost_id, &ghost, &obj, obj.len()).expect("delta"),
+            &delta::encode(Base::Id(ghost_id), &ghost, &obj, obj.len()).expect("delta"),
         );
         b.add(vs[1].0, &vs[1].1);
         s.write_pack(s.packs.as_ref().expect("packs"), b).await.expect("write");

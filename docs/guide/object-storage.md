@@ -38,7 +38,7 @@ Objects written together are stored together: a commit's new trees and its chang
 scion admin repack --meta postgres://… --blobs s3://scion-objects   # --dry-run to only count
 ```
 
-- **Deltas**: an older version is stored as zstd with the newer version as a reference (what `zstd --patch-from` does). The newest versions, which are read most, stay whole. Chains are at most 50 long, as in git; reads follow them and cache the bases they use.
+- **Deltas**: an older version is stored as zstd with the newer version as a reference (what `zstd --patch-from` does). The newest versions, which are read most, stay whole. Chains are at most 50 long, as in git; reads follow them and cache the bases they use. A delta names a base in the same pack by its offset and length (a few bytes, like git's `OFS_DELTA`) and any other base by its id; packs with deltas named this way need a server at least as new as the repack that wrote them.
 - **Effect** on starhub-server (6,338 commits, PostgreSQL + MinIO): 67,847 objects in 1 pack of 27 MB, 51,262 of them deltas, in 24 s. MinIO goes from 283 MB to 86 MB (the rest is three committed binaries over 8 MB, which stay loose); Gitaly's repository for the same history is 82 MB.
 - **Removing what it superseded**: packs none of whose objects live there any more, once older than `--prune-after` (default 1 hour, so that packs being written are not touched), and loose objects that are also packed.
 - **Reads** fetch large packs in 1 MiB blocks and keep 128 MiB of them, so a commit's objects and the versions of a delta chain mostly come from memory.

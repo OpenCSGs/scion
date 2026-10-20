@@ -16,6 +16,8 @@ use bytes::Bytes;
 use scion_object::{ID_LEN, ObjectId};
 use scion_store::PackedObject;
 
+use crate::delta::Base;
+
 const MAGIC: &[u8; 4] = b"SCPK";
 const VERSION: u8 = 1;
 const HEADER: usize = MAGIC.len() + 1;
@@ -26,6 +28,9 @@ const INDEX_ENTRY: usize = ID_LEN + 16;
 pub(crate) struct PackBuilder {
     buf: Vec<u8>,
     objects: Vec<PackedObject>,
+    /// Objects by id, and by offset (a delta in the same pack names its base by where it is).
+    by_id: std::collections::HashMap<ObjectId, usize>,
+    by_offset: std::collections::HashMap<u64, usize>,
 }
 
 impl PackBuilder {
@@ -36,6 +41,8 @@ impl PackBuilder {
         Self {
             buf,
             objects: Vec::new(),
+            by_id: std::collections::HashMap::new(),
+            by_offset: std::collections::HashMap::new(),
         }
     }
 
@@ -48,13 +55,36 @@ impl PackBuilder {
         self.objects.is_empty()
     }
 
-    /// Adds an object's stored bytes (whole, or a delta that names its base).
+    /// Where `id` is in this pack, if it was added: how a delta in the same pack names it.
+    pub(crate) fn place(&self, id: &ObjectId) -> Option<Base> {
+        let o = &self.objects[*self.by_id.get(id)?];
+        Some(Base::At {
+            offset: o.offset,
+            len: o.len,
+        })
+    }
+
+    /// Adds an object's stored bytes (whole, or a delta that names its base). A delta naming its
+    /// base by where it is must come after that base.
     pub(crate) fn add(&mut self, id: ObjectId, stored: &[u8]) {
+        let base = match crate::delta::base_of(stored) {
+            Some(Base::Id(b)) => Some(b),
+            // Nothing there: whole content that only starts like a delta
+            Some(Base::At { offset, len }) => self
+                .by_offset
+                .get(&offset)
+                .map(|&i| &self.objects[i])
+                .filter(|o| o.len == len)
+                .map(|o| o.id),
+            None => None,
+        };
+        self.by_id.entry(id).or_insert(self.objects.len());
+        self.by_offset.insert(self.buf.len() as u64, self.objects.len());
         self.objects.push(PackedObject {
             id,
             offset: self.buf.len() as u64,
             len: stored.len() as u64,
-            base: crate::delta::base_of(stored),
+            base,
         });
         self.buf.extend_from_slice(stored);
     }

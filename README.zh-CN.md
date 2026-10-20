@@ -8,29 +8,28 @@ Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 
-<sub>架构图源文件：[`arch-01-standalone.en.svg`](docs/design/images/arch-01-standalone.en.svg)（英文）· [`arch-01-standalone.svg`](docs/design/images/arch-01-standalone.svg)（中文）。图中包含规划中的组件（deriver、git-gateway 等），已实现的部分见[里程碑](docs/design/milestones.md)。</sub>
 
 ## 性能对比
 
-[测试程序](bench/openscion/src/main.rs)在 [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) 的四个合成负载上，对比 Scion、Git，以及同一设计的另一个实现 [CarterT27/scion](https://github.com/CarterT27/scion)。三者在同一台机器上运行：Apple M5、16 GiB 内存、macOS 26.5.2、Git 2.54.0。CarterT27/scion 用当时 `main` 的代码构建，用它自己的测试程序运行。
+[测试程序](bench/openscion/src/main.rs)在 [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) 的四个合成负载上，对比 CSG Scion、Git，以及同一设计的另一个实现 [CarterT27/scion](https://github.com/CarterT27/scion)。三者在同一台机器上运行：Apple M5、16 GiB 内存、macOS 26.5.2、Git 2.54.0。CarterT27/scion 用当时 `main` 的代码构建，用它自己的测试程序运行。
 
 每个文件是 4 KiB 伪随机内容，分布在 10 个目录里。1,000 个文件跑 7 次，10,000 个文件跑 5 次。单位是毫秒，取中位数，越小越好。
 
-| 场景 | Git，1k 文件 | CarterT27，1k | Scion，1k | Git，10k 文件 | CarterT27，10k | Scion，10k |
+| 场景 | Git，1k 文件 | CarterT27，1k | CSG Scion，1k | Git，10k 文件 | CarterT27，10k | CSG Scion，10k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | 导入目录 | 375.1 | 32.8 | **29.6** | 3,342.0 | 413.5 | **362.1** |
 | 提交一个改动的文件 | 29.7 | 29.2 | **13.4** | 226.7 | 142.5 | **42.2** |
 | 完整克隆 / 检出 | 251.3 | 115.8 | **50.7** | 2,316.6 | 1,047.3 | **568.3** |
 | 只克隆 / 检出一个目录 | 65.0 | 25.0 | **19.4** | 181.7 | 123.1 | **48.6** |
 
-Scion 在每一项都是三者中最快的：比 Git 快 2.2–13 倍；和 CarterT27/scion 相比，检出快 1.3–2.5 倍，提交快 2.2–3.4 倍，导入快 11–14%。
+CSG Scion 在每一项都是三者中最快的：比 Git 快 2.2–13 倍；和 CarterT27/scion 相比，检出快 1.3–2.5 倍，提交快 2.2–3.4 倍，导入快 11–14%。
 
-- **导入：** Git 执行 `init`、`add -A` 和 `commit`。Scion 每批 256 个上传文件，再通过写入 API 创建一个没有父提交的 changeset 和一个 ref。
-- **提交：** 在完整工作副本里改一个文件的一个字节，然后计时 Git 的 `commit -a`，或 Scion 的工作副本提交（包括扫描状态和上传）。两边都不 push 也不 land。
-- **完整检出：** Git 的 `clone --no-local`；Scion 的工作副本克隆。
-- **只检出一个目录：** Git 的 `clone --no-local --filter=blob:none --sparse` 加 `sparse-checkout set dir0000`；Scion 只克隆 `dir0000`。
+- **导入：** Git 执行 `init`、`add -A` 和 `commit`。CSG Scion 每批 256 个上传文件，再通过写入 API 创建一个没有父提交的 changeset 和一个 ref。
+- **提交：** 在完整工作副本里改一个文件的一个字节，然后计时 Git 的 `commit -a`，或 CSG Scion 的工作副本提交（包括扫描状态和上传）。两边都不 push 也不 land。
+- **完整检出：** Git 的 `clone --no-local`；CSG Scion 的工作副本克隆。
+- **只检出一个目录：** Git 的 `clone --no-local --filter=blob:none --sparse` 加 `sparse-checkout set dir0000`；CSG Scion 只克隆 `dir0000`。
 
-两个实现都在进程内启动服务端，元数据和对象都在内存里；Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。CarterT27/scion 的服务端开启了 TLS 和令牌认证，Scion 两者都没开，这会让 CarterT27 的检出多花百分之几的时间。生成测试文件和校验检出结果不计入时间。
+两个实现都在进程内启动服务端，元数据和对象都在内存里；CSG Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。CarterT27/scion 的服务端开启了 TLS 和令牌认证，CSG Scion 两者都没开，这会让 CarterT27 的检出多花百分之几的时间。生成测试文件和校验检出结果不计入时间。
 
 ```sh
 (cd bench/openscion && cargo build --release)
@@ -40,16 +39,16 @@ bench/openscion/target/release/openscion-bench 1000 5     # 10,000 个文件，�
 
 ### 真实仓库
 
-在 [pingdotgg/t3code](https://github.com/pingdotgg/t3code) 上，用 CarterT27/scion README 里测的同一个快照（5,573 个提交、28,068 个文件）。Scion 运行在 Docker 中的 PostgreSQL 和 MinIO 上，Git 用本地裸仓库：
+在 [pingdotgg/t3code](https://github.com/pingdotgg/t3code) 上，用 CarterT27/scion README 里测的同一个快照（5,573 个提交、28,068 个文件）。CSG Scion 运行在 Docker 中的 PostgreSQL 和 MinIO 上，Git 用本地裸仓库：
 
-| | Git | Scion | Scion ÷ Git | CarterT27 ÷ Git（其 README） |
+| | Git | CSG Scion | CSG Scion ÷ Git | CarterT27 ÷ Git（其 README） |
 | --- | ---: | ---: | ---: | ---: |
 | 完整检出 | 2.65 秒 | **2.28 秒** | **0.86** | 5.2 |
 | 检出 `apps/web`（1,521 个文件） | 0.172 秒 | 0.178 秒 | 1.03 | 4.6 |
 | 干净工作区的 status | 98 ms | 153 ms | 1.6 | — |
 | 导入完整历史 | — | 103 秒 + repack 42 秒 | — | 23 分 18 秒 |
 
-导入后，Scion 用 247 MB 的 MinIO 加 90 MB 的 PostgreSQL 存下这份历史；从 GitHub 克隆下来的 pack 是 557 MB。每次检出都逐个文件和 Git 核对。
+导入后，CSG Scion 用 247 MB 的 MinIO 加 90 MB 的 PostgreSQL 存下这份历史；从 GitHub 克隆下来的 pack 是 557 MB。每次检出都逐个文件和 Git 核对。
 
 - [报告：CarterT27/scion 的测试](docs/reports/2026-10-20-openscion-workloads.md)（英文）：方法、全部数据和复现方式。
 - [报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的对比。

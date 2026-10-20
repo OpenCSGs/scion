@@ -1,0 +1,19 @@
+[package]
+name = "openscion-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not part of the main workspace: build with `cargo build --release` in this directory.
+[workspace]
+
+[dependencies]
+scion-api = { path = "../../server/api" }
+scion-client = { path = "../../client/sdk" }
+scion-store = { path = "../../server/store" }
+scion-store-blob = { path = "../../server/store-blob" }
+scion-wc = { path = "../../client/wc" }
+anyhow = "1"
+bytes = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

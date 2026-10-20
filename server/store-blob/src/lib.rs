@@ -296,6 +296,18 @@ impl ObjectBlobStore {
         })
     }
 
+    /// In memory, with the same compression and packing as the other backends: for tests and
+    /// benchmarks.
+    pub fn memory() -> Self {
+        Self {
+            store: Arc::new(object_store::memory::InMemory::new()),
+            prefix: String::new(),
+            compress: true,
+            s3: None,
+            packs: None,
+        }
+    }
+
     /// S3 兼容存储。只构造客户端，不发起网络请求；用 [`ObjectBlobStore::self_test`] 检查连通性。
     pub fn s3(cfg: &S3Config) -> Result<Self> {
         let mut retry = RetryConfig::default();
@@ -1598,6 +1610,27 @@ mod tests {
         let odd_id = ObjectId::of_blob(&odd);
         s.put_many(&[(odd_id, odd.clone()), vs[0].clone()]).await.expect("put");
         assert_eq!(fresh.get(&odd_id).await, Ok(Some(odd)));
+    }
+
+    /// The in-memory backend compresses and packs like the others.
+    #[tokio::test]
+    async fn memory_store_packs_and_compresses() {
+        let index = Arc::new(scion_store::MemStore::new());
+        let s = ObjectBlobStore::memory().with_packs(index.clone());
+        let objects: Vec<(ObjectId, Bytes)> = (0..20)
+            .map(|i| {
+                let d = text(200 + i);
+                (ObjectId::of_blob(&d), d)
+            })
+            .collect();
+        s.put_many(&objects).await.expect("pack");
+        let ids: Vec<ObjectId> = objects.iter().map(|o| o.0).collect();
+        let locs = index.pack_locations(&ids).await.expect("locations");
+        assert_eq!(locs.len(), ids.len(), "packed");
+        assert!(locs.values().all(|l| l.len * 4 < 200 * 25), "compressed");
+        for (id, d) in &objects {
+            assert_eq!(s.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
     }
 
     /// An empty file in a pack too large to hold whole is read without a request for an empty

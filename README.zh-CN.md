@@ -103,6 +103,8 @@ M5 剩余工作：YugabyteDB 档、Helm 与发布构建。
 | 历史查询（[`server/query/tests/bench.rs`](server/query/tests/bench.rs)） | 10 万提交：log、diff、祖先判断、merge-base、blame | SQLite 与 PostgreSQL 下 p99 均低于 20 ms（冷 blame 13.6 ms，`log --path` 15.6 ms） | p99 < 100 ms |
 | 文件列表页（同一基准） | 10 万提交：根目录 100 个条目各自的最后提交、仓库统计 | PostgreSQL：冷查询 p50 33 ms（p99 93 ms），合入后父提交已缓存时 p99 2.4 ms，命中缓存 p99 < 5 ms；仓库统计冷查询 131 ms，下一个提交 3.1 ms | p99 < 100 ms |
 | 真实仓库，Standard 档（[`bench/starhub`](bench/starhub/README.md)） | starhub-server（6,338 个提交、两个分支、一个 tag），PostgreSQL + MinIO，运行在 Docker 中 | 导入 94 秒，`scion admin repack` 24 秒：占 MinIO 磁盘 86 MB（每个对象单独存放时为 546 MB；Gitaly 仓库 82 MB），另有 PostgreSQL 元数据 54 MB。冷读 1–4 ms，历史分页 1.6 ms。[与 Gitaly、libgit2 的对比](docs/reports/2026-10-19-starhub-server.md) | — |
+| OpenScion 负载（[`bench/openscion`](bench/openscion/README.md)） | 1,000 和 10,000 个文件：导入、提交一个文件、完整检出、检出一个目录，与 Git 和 CarterT27/scion 在同一台机器上对比 | 1 万文件：导入 362 ms、提交 42 ms、完整检出 568 ms、检出一个目录 49 ms；8 项都比两者快。[报告](docs/reports/2026-10-20-openscion-workloads.md) | — |
+| 真实仓库，Standard 档（同上） | pingdotgg/t3code（5,573 个提交、28,068 个文件），PostgreSQL + MinIO | 导入 103 秒 + repack 42 秒；MinIO 247 MB（GitHub 的 pack 557 MB），PostgreSQL 90 MB。完整检出 2.28 秒（Git 2.65 秒），`apps/web` 0.18 秒（Git 0.17 秒），status 153 ms（Git 98 ms） | — |
 | 真实仓库（`~/git/starhub-server`，Lite 档，本机） | 导入 6,312 个提交（2,836 个合并、4,663 个文件）、clone、查询 | 导入 57 秒；zstd 压缩后对象 227 MB（未压缩 1,007 MB，git pack 392 MB）；clone 0.37 秒；status 23 ms；log、blame、show、diff 8–50 ms。文件、git SHA、blame、diff、archive 都与 git 一致 | — |
 
 ## 目录结构

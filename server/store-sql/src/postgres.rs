@@ -32,6 +32,29 @@ pub struct PgMetaStore {
 }
 
 impl PgMetaStore {
+    /// Rewrites `table` in place (VACUUM FULL), unless its lock is not granted within 200 ms:
+    /// waiting for it would hold up every read behind it. Whether it was rewritten.
+    async fn vacuum_full(&self, conn: &mut sqlx::PgConnection, table: &str) -> Result<bool> {
+        sqlx::query("SET lock_timeout = '200ms'")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| backend("set lock timeout", e))?;
+        let full = sqlx::query(&format!("VACUUM (FULL, ANALYZE) {table}"))
+            .execute(&mut *conn)
+            .await;
+        sqlx::query("RESET lock_timeout")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| backend("reset lock timeout", e))?;
+        match full {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                tracing::warn!(error = %e, table, "not rewritten; its free space is reused instead");
+                Ok(false)
+            }
+        }
+    }
+
     /// [`MetaStore::compact_after_repack`], rewriting the pack locations up to `in_place_max` bytes.
     async fn compact(&self, in_place_max: i64) -> Result<()> {
         let mut conn = self.pool.acquire().await.map_err(|e| backend("acquire", e))?;
@@ -43,40 +66,28 @@ impl PgMetaStore {
             .fetch_one(&mut *conn)
             .await
             .map_err(|e| backend("pack locations size", e))?;
-        let mut rewritten = false;
-        if size <= in_place_max {
-            sqlx::query("SET lock_timeout = '200ms'")
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| backend("set lock timeout", e))?;
-            let full = sqlx::query("VACUUM (FULL, ANALYZE) pack_locations")
-                .execute(&mut *conn)
-                .await;
-            sqlx::query("RESET lock_timeout")
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| backend("reset lock timeout", e))?;
-            match full {
-                Ok(_) => rewritten = true,
-                Err(e) => {
-                    tracing::warn!(error = %e, "pack locations not rewritten; their free space is reused instead")
-                }
-            }
+        let rewritten = if size <= in_place_max {
+            self.vacuum_full(&mut conn, "pack_locations").await?
         } else {
             tracing::warn!(
                 bytes = size,
                 "pack locations too large to rewrite in place; their free space is reused instead"
             );
-        }
-        let vacuum = if rewritten {
-            "VACUUM (ANALYZE) packs"
-        } else {
-            "VACUUM (ANALYZE) pack_locations, packs"
+            false
         };
-        sqlx::query(vacuum)
-            .execute(&mut *conn)
-            .await
-            .map_err(|e| backend("vacuum pack locations", e))?;
+        if !rewritten {
+            sqlx::query("VACUUM (ANALYZE) pack_locations")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("vacuum pack locations", e))?;
+        }
+        // One row per pack, and a repack removes nearly all of them: always small to rewrite
+        if !self.vacuum_full(&mut conn, "packs").await? {
+            sqlx::query("VACUUM (ANALYZE) packs")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("vacuum packs", e))?;
+        }
         // Indexes over random ids fill their pages about half; rebuilding them packs them full
         // without blocking reads or writes. An interrupted rebuild leaves an invalid copy behind.
         let leftovers: Vec<String> = sqlx::query_scalar(
@@ -1536,7 +1547,26 @@ mod tests {
                 .expect("size")
         };
         s.put_pack_locations(&[1; 32], &objs(10)).await.expect("import");
+        // An import writes many small packs, which the repack replaces
+        let small: Vec<[u8; 32]> = (0..2_000u16)
+            .map(|i| {
+                let mut name = [9; 32];
+                name[..2].copy_from_slice(&i.to_le_bytes());
+                name
+            })
+            .collect();
+        for name in &small {
+            s.put_pack_locations(name, &objs(30)[..1]).await.expect("small pack");
+        }
         s.put_pack_locations(&[2; 32], &objs(20)).await.expect("repack");
+        s.delete_packs(&small).await.expect("prune");
+        let packs_size = async || -> i64 {
+            sqlx::query_scalar("SELECT pg_total_relation_size('packs')")
+                .fetch_one(&s.pool)
+                .await
+                .expect("size")
+        };
+        let packs_before = packs_size().await;
         let before = size().await;
         // Too large to rewrite: vacuumed and reindexed only
         s.compact(0).await.expect("compact large");
@@ -1551,6 +1581,11 @@ mod tests {
         s.compact_after_repack().await.expect("compact");
         let after = size().await;
         assert!(after * 10 < before * 7, "{after} of {before} bytes");
+        let packs_after = packs_size().await;
+        assert!(
+            packs_after * 2 < packs_before,
+            "packs: {packs_after} of {packs_before} bytes"
+        );
         let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relname = 'dup_ccnew'")
             .fetch_one(&s.pool)
             .await

@@ -22,6 +22,8 @@
 //!
 //! A third argument picks the server's storage: `objects` (default: the object store in memory,
 //! with zstd compression and packs, as on disk or S3) or `plain` (objects in memory as they are).
+//! A fourth, `auth`, makes the server require authentication: the client exchanges a PAT for
+//! short-lived access tokens, as `scn` does, and every request carries one.
 
 use std::path::Path;
 use std::process::Command;
@@ -30,8 +32,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
+use scion_api::scion_auth::{Guard, GuardConfig};
 use scion_api::{App, ServerConfig, serve};
-use scion_client::Client;
+use scion_client::{Auth, Client};
 use scion_store::{BlobStore, MemStore, MetaStore};
 use scion_store_blob::ObjectBlobStore;
 use scion_wc::{Sparse, WorkingCopy};
@@ -90,10 +93,23 @@ fn verify(root: &Path, files: &[(String, Vec<u8>)], sparse: bool) -> Result<()> 
 
 struct Server {
     url: String,
+    /// A PAT when the server requires authentication
+    token: Option<String>,
     _shutdown: tokio::sync::oneshot::Sender<()>,
 }
 
-async fn server(objects: bool) -> Result<Server> {
+impl Server {
+    async fn client(&self) -> Result<Client> {
+        let b = Client::builder().endpoint(&self.url).repo("bench");
+        let b = match &self.token {
+            Some(t) => b.auth(Auth::Exchange(t.clone())),
+            None => b,
+        };
+        Ok(b.build().await?)
+    }
+}
+
+async fn server(objects: bool, auth: bool) -> Result<Server> {
     let store = Arc::new(MemStore::new());
     store.create_repo("bench").await?;
     let meta: Arc<dyn MetaStore> = store.clone();
@@ -102,18 +118,32 @@ async fn server(objects: bool) -> Result<Server> {
     } else {
         store
     };
+    let guard = GuardConfig {
+        required: auth,
+        signing_key_pem: auth.then(scion_api::scion_auth::token::generate_signing_key),
+        ..GuardConfig::default()
+    };
+    let token = if auth {
+        let g = Guard::build(guard.clone(), meta.clone(), Arc::new(|_: &str| None)).map_err(anyhow::Error::msg)?;
+        Some(g.create_token("bench", "bench", vec![], "", None).await?.0)
+    } else {
+        None
+    };
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let app = App {
-        config: Arc::new(ServerConfig::default()),
+        config: Arc::new(ServerConfig {
+            auth: guard,
+            ..ServerConfig::default()
+        }),
         meta,
         blobs,
     };
     tokio::spawn(serve(listener, app, async {
         let _ = rx.await;
     }));
-    Ok(Server { url, _shutdown: tx })
+    Ok(Server { url, token, _shutdown: tx })
 }
 
 /// Directory ingestion through the write API (not the Git-history importer).
@@ -155,6 +185,11 @@ async fn main() -> Result<()> {
         Some("plain") => false,
         Some(other) => anyhow::bail!("storage is objects or plain, not {other}"),
     };
+    let auth = match args.get(3).map(String::as_str) {
+        None => false,
+        Some("auth") => true,
+        Some(other) => anyhow::bail!("the fourth argument is auth, not {other}"),
+    };
     ensure!(files_per_dir > 0 && runs > 0, "sizes and runs must be positive");
     let files = fixture(files_per_dir);
     // git import, scion import, git full, scion full, git sparse, scion sparse, git commit, scion commit
@@ -164,8 +199,8 @@ async fn main() -> Result<()> {
         let root = scratch.path();
         let source = root.join("source");
         write_fixture(&source, &files)?;
-        let srv = server(objects).await?;
-        let client = Client::builder().endpoint(&srv.url).repo("bench").build().await?;
+        let srv = server(objects, auth).await?;
+        let client = srv.client().await?;
 
         let t = Instant::now();
         git(&source, &["init", "-q", "-b", "main"])?;
@@ -217,7 +252,8 @@ async fn main() -> Result<()> {
         );
     }
     let storage = if objects { "object store in memory" } else { "plain memory" };
-    println!("{} files, 4096 bytes/file, {runs} runs, {storage}; medians:", files.len());
+    let auth = if auth { ", authentication required" } else { "" };
+    println!("{} files, 4096 bytes/file, {runs} runs, {storage}{auth}; medians:", files.len());
     println!("| Scenario | Git (ms) | Scion (ms) |\n| --- | ---: | ---: |");
     for (name, i) in [("import", 0), ("commit-one-file", 6), ("full-clone", 2), ("sparse-clone", 4)] {
         println!("| {name} | {:.1} | {:.1} |", median(&mut samples[i]), median(&mut samples[i + 1]));

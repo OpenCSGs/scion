@@ -17,24 +17,24 @@ Each file contains 4 KiB of pseudorandom bytes, spread across 10 directories. Th
 
 | Scenario | Git, 1k files | CarterT27, 1k | CSG Scion, 1k | Git, 10k files | CarterT27, 10k | CSG Scion, 10k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Import directory | 375.1 | 32.8 | **29.6** | 3,342.0 | 413.5 | **362.1** |
-| Commit one changed file | 29.7 | 29.2 | **13.4** | 226.7 | 142.5 | **42.2** |
-| Full clone / checkout | 251.3 | 115.8 | **50.7** | 2,316.6 | 1,047.3 | **568.3** |
-| One-directory clone / checkout | 65.0 | 25.0 | **19.4** | 181.7 | 123.1 | **48.6** |
+| Import directory | 365.0 | 32.8 | **30.6** | 3,364.4 | 413.5 | **354.9** |
+| Commit one changed file | 28.4 | 29.2 | **13.9** | 250.8 | 142.5 | **35.5** |
+| Full clone / checkout | 243.0 | 115.8 | **52.2** | 2,361.9 | 1,047.3 | **589.4** |
+| One-directory clone / checkout | 60.3 | 25.0 | **23.1** | 172.9 | 123.1 | **49.5** |
 
-CSG Scion is the fastest of the three in every cell: 2.2–13× faster than Git, and against CarterT27/scion 1.3–2.5× faster for checkouts, 2.2–3.4× for commits and 11–14% for imports.
+CSG Scion is the fastest of the three in every cell: 2–12× faster than Git, and against CarterT27/scion 1.1–2.5× faster for checkouts, 2.1–4× for commits and 7–17% for imports.
 
 - **Import:** Git runs `init`, `add -A` and `commit`. CSG Scion uploads the files in batches of 256 and creates a parentless changeset and a ref through the write API.
 - **Commit:** change one byte in one file of the full working copy, then time Git's `commit -a` or CSG Scion's working-copy commit, including the status scan and the upload. Neither side pushes or lands.
 - **Full checkout:** Git's `clone --no-local`; CSG Scion's working-copy clone.
 - **One-directory checkout:** Git's `clone --no-local --filter=blob:none --sparse` and `sparse-checkout set dir0000`; CSG Scion's clone of `dir0000` only.
 
-Both implementations run an in-process server with in-memory metadata and objects; CSG Scion's objects go through the same zstd compression and packing as on disk or S3. CarterT27/scion's server uses TLS and token authentication, while CSG Scion's runs without either, which costs CarterT27's checkouts a few percent. Fixture writes and checks of the checked-out files are outside the timers.
+Both implementations run an in-process server with in-memory metadata and objects; CSG Scion's objects go through the same zstd compression and packing as on disk or S3. Both servers require token authentication: the client exchanges a long-lived token for short-lived access tokens and every request carries one. CarterT27/scion's also uses TLS, which CSG Scion's in-process server does not (deployments terminate TLS in front of it); without authentication CSG Scion's times change by less than 4 ms. Fixture writes and checks of the checked-out files are outside the timers.
 
 ```sh
 (cd bench/openscion && cargo build --release)
-bench/openscion/target/release/openscion-bench 100 7      # 1,000 files, 7 runs
-bench/openscion/target/release/openscion-bench 1000 5     # 10,000 files, 5 runs
+bench/openscion/target/release/openscion-bench 100 7 objects auth      # 1,000 files, 7 runs
+bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 files, 5 runs
 ```
 
 ### Real repositories

@@ -17,24 +17,24 @@ Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.
 
 | 场景 | Git，1k 文件 | CarterT27，1k | CSG Scion，1k | Git，10k 文件 | CarterT27，10k | CSG Scion，10k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 导入目录 | 375.1 | 32.8 | **29.6** | 3,342.0 | 413.5 | **362.1** |
-| 提交一个改动的文件 | 29.7 | 29.2 | **13.4** | 226.7 | 142.5 | **42.2** |
-| 完整克隆 / 检出 | 251.3 | 115.8 | **50.7** | 2,316.6 | 1,047.3 | **568.3** |
-| 只克隆 / 检出一个目录 | 65.0 | 25.0 | **19.4** | 181.7 | 123.1 | **48.6** |
+| 导入目录 | 365.0 | 32.8 | **30.6** | 3,364.4 | 413.5 | **354.9** |
+| 提交一个改动的文件 | 28.4 | 29.2 | **13.9** | 250.8 | 142.5 | **35.5** |
+| 完整克隆 / 检出 | 243.0 | 115.8 | **52.2** | 2,361.9 | 1,047.3 | **589.4** |
+| 只克隆 / 检出一个目录 | 60.3 | 25.0 | **23.1** | 172.9 | 123.1 | **49.5** |
 
-CSG Scion 在每一项都是三者中最快的：比 Git 快 2.2–13 倍；和 CarterT27/scion 相比，检出快 1.3–2.5 倍，提交快 2.2–3.4 倍，导入快 11–14%。
+CSG Scion 在每一项都是三者中最快的：比 Git 快 2–12 倍；和 CarterT27/scion 相比，检出快 1.1–2.5 倍，提交快 2.1–4 倍，导入快 7–17%。
 
 - **导入：** Git 执行 `init`、`add -A` 和 `commit`。CSG Scion 每批 256 个上传文件，再通过写入 API 创建一个没有父提交的 changeset 和一个 ref。
 - **提交：** 在完整工作副本里改一个文件的一个字节，然后计时 Git 的 `commit -a`，或 CSG Scion 的工作副本提交（包括扫描状态和上传）。两边都不 push 也不 land。
 - **完整检出：** Git 的 `clone --no-local`；CSG Scion 的工作副本克隆。
 - **只检出一个目录：** Git 的 `clone --no-local --filter=blob:none --sparse` 加 `sparse-checkout set dir0000`；CSG Scion 只克隆 `dir0000`。
 
-两个实现都在进程内启动服务端，元数据和对象都在内存里；CSG Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。CarterT27/scion 的服务端开启了 TLS 和令牌认证，CSG Scion 两者都没开，这会让 CarterT27 的检出多花百分之几的时间。生成测试文件和校验检出结果不计入时间。
+两个实现都在进程内启动服务端，元数据和对象都在内存里；CSG Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。两边的服务端都要求令牌认证：客户端用长期令牌换取短期访问令牌，每个请求都带上它。CarterT27/scion 还开了 TLS，CSG Scion 的进程内服务端没有开（部署时由前面的代理终止 TLS）；关掉认证时 CSG Scion 的时间变化不到 4 ms。生成测试文件和校验检出结果不计入时间。
 
 ```sh
 (cd bench/openscion && cargo build --release)
-bench/openscion/target/release/openscion-bench 100 7      # 1,000 个文件，跑 7 次
-bench/openscion/target/release/openscion-bench 1000 5     # 10,000 个文件，跑 5 次
+bench/openscion/target/release/openscion-bench 100 7 objects auth      # 1,000 个文件，跑 7 次
+bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 个文件，跑 5 次
 ```
 
 ### 真实仓库

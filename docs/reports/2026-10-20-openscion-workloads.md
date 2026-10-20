@@ -9,8 +9,8 @@ The scripts are in [`bench/openscion/`](../../bench/openscion/README.md).
 ## Summary
 
 - **Synthetic workloads: fastest of the three in all 8 cells.** With the same machine, fixture and timers:
-  - against Git: 2.2–13× faster;
-  - against CarterT27: 1.8–2.3× faster for full checkouts, 1.3–2.5× for one-directory checkouts, 2.2–3.4× for commits and 11–14% for imports.
+  - against Git: 2–12× faster;
+  - against CarterT27, both with token authentication: 1.8–2.2× faster for full checkouts, 1.1–2.5× for one-directory checkouts, 2.1–4× for commits and 7–17% for imports.
 - **t3code, 28,068 files**:
   - **checkout: on par with Git.** The full checkout takes 2.28 s against Git's 2.65 s; the sparse checkout of `apps/web` takes 0.178 s against 0.172 s. CarterT27 reports 5.2× and 4.6× Git's time for the same checkouts.
   - **import: 103 s plus a 42 s repack.** CarterT27 reports 23 min 18 s.
@@ -25,7 +25,7 @@ The scripts are in [`bench/openscion/`](../../bench/openscion/README.md).
 - **Synthetic workloads:** both implementations run in process over loopback gRPC, with in-memory metadata and objects. Each run uses a fresh fixture, server and working copies, and the fixture writes and checks are outside the timers.
   - CarterT27: its own runner (`cargo run --release -p scion-conformance --example benchmark`), built from `main` at the time of writing.
   - This Scion: `bench/openscion`, the same workloads and timers. Objects go through the object store in memory, with zstd compression and packs, as on disk or S3.
-  - Differences: CarterT27's server uses TLS and token authentication; ours runs without TLS (deployments put it behind a proxy) and without authentication. CarterT27's import creates its changeset in an import mode, ours through the ordinary write API.
+  - Differences: both servers require token authentication, and CarterT27's also uses TLS, which ours does not (deployments put it behind a proxy that terminates TLS). CarterT27's import creates its changeset in an import mode, ours through the ordinary write API.
 - **t3code:** pingdotgg/t3code at `bf8ffe81a63c`, the snapshot CarterT27 measured: 5,573 commits, 28,068 files, submodules left out on both sides.
   - Scion: the server, PostgreSQL 16 and MinIO of [`bench/starhub`](../../bench/starhub/README.md), in Docker, with the `scn` command line, the server restarted before the checkouts.
   - Git: a local bare repository, as in CarterT27's script.
@@ -37,10 +37,12 @@ The scripts are in [`bench/openscion/`](../../bench/openscion/README.md).
 
 | Scenario | Git, 1k | CarterT27, 1k | CSG Scion, 1k | Git, 10k | CarterT27, 10k | CSG Scion, 10k |
 |---|---:|---:|---:|---:|---:|---:|
-| Import a directory | 375 | 32.8 | **29.6** | 3,342 | 414 | **362** |
-| Commit one changed file | 29.7 | 29.2 | **13.4** | 227 | 143 | **42.2** |
-| Full checkout | 251 | 116 | **50.7** | 2,317 | 1,047 | **568** |
-| One-directory checkout | 65.0 | 25.0 | **19.4** | 182 | 123 | **48.6** |
+| Import a directory | 365 | 32.8 | **30.6** | 3,364 | 414 | **355** |
+| Commit one changed file | 28.4 | 29.2 | **13.9** | 251 | 143 | **35.5** |
+| Full checkout | 243 | 116 | **52.2** | 2,362 | 1,047 | **589** |
+| One-directory checkout | 60.3 | 25.0 | **23.1** | 173 | 123 | **49.5** |
+
+Both servers require authentication here (`openscion-bench … objects auth`). Without it, this Scion's medians were 29.6, 13.4, 50.7 and 19.4 ms at 1k files, and 362, 42.2, 568 and 48.6 ms at 10k.
 
 The Git column is from this runner's runs. CarterT27's runner measured Git within 6% of it on every row but the 10k commit (192 ms against 227 ms; Git's commit varies from run to run, as CarterT27's README also notes). With objects kept in memory as they are (no compression, no packs), this Scion's imports take 24 ms and 283 ms; the other rows change by less than 5%.
 
@@ -79,5 +81,5 @@ GitHub's pack is not packed as tightly as `git gc --aggressive` would, so the Gi
 ## Limits
 
 - One machine, and for t3code one import; CarterT27's t3code numbers come from another machine and its own setup (CockroachDB, a token, TLS), so only the ratios to Git compare.
-- The synthetic Scion runs differ from CarterT27's in TLS and authentication, which cost both checkouts a few percent.
+- The synthetic runs differ from CarterT27's only in TLS, which costs its checkouts a few percent.
 - CarterT27's concurrent CI workloads (`scripts/benchmark-scaling.py`) are not reproduced here.

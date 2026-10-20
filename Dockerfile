@@ -1,7 +1,7 @@
 # Scion 镜像：包含服务端 `scion` 和客户端 `scn`。
 #
 #   docker build -t scion .
-#   docker run -p 7080:7080 -v scion-data:/data scion            # Lite 档（SQLite + 本地目录）
+#   docker run -p 7080:7080 -v scion-data:/data scion            # Lite 档（SQLite + 本地目录），要求认证
 #
 # 拉不到 Docker Hub 时把基础镜像换成镜像站，例如
 #   --build-arg RUST_IMAGE=docker.m.daocloud.io/library/rust:1.99-slim-bookworm \
@@ -31,10 +31,11 @@ RUN apt-get update \
     && chown scion /data
 COPY --from=build /out/scion /out/scn /usr/local/bin/
 USER scion
-# 镜像里的 scn 直连服务端，不拉起本机 daemon
-ENV SCION_NO_DAEMON=1
+# 镜像里的 scn 直连服务端，不拉起本机 daemon；管理命令（scion admin … --lite）默认用 /data
+ENV SCION_NO_DAEMON=1 SCION_DATA_DIR=/data
 # 7080 gRPC（scion server）、7090 gRPC（scion cache）、9464 Prometheus 指标（--metrics-listen）
 EXPOSE 7080 7090 9464
 VOLUME ["/data"]
 ENTRYPOINT ["scion"]
-CMD ["--log-format", "json", "server", "--listen", "0.0.0.0:7080", "--lite", "--data-dir", "/data"]
+# Requests need a token by default; see docs/guide/deploy.md for the first admin token
+CMD ["--log-format", "json", "server", "--listen", "0.0.0.0:7080", "--lite", "--data-dir", "/data", "--auth-required"]

@@ -171,6 +171,10 @@ struct ServerArgs {
     /// gRPC listen address.
     #[arg(long, default_value = "127.0.0.1:7080", env = "SCION_LISTEN")]
     listen: SocketAddr,
+    /// Serve without authentication on an address other people can reach. Without it, the server
+    /// only starts without `--auth-required` on a loopback address.
+    #[arg(long, env = "SCION_ALLOW_ANONYMOUS")]
+    allow_anonymous: bool,
     /// Repository to create at startup if missing (repeatable).
     #[arg(long = "repo", value_name = "NAME")]
     repos: Vec<String>,
@@ -563,6 +567,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
         }
     }
     let auth = args.auth.guard_config()?;
+    check_exposure(args.listen, auth.required, args.allow_anonymous)?;
     let (meta_spec, blob_spec) = args.storage.specs()?;
     let (meta, blobs) = storage::open(&meta_spec, &blob_spec, env).await?;
     // 提前校验认证配置（密钥、外部签发方的密钥来源）和库里的访问控制策略，有误时拒绝启动
@@ -668,6 +673,22 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
         }
         tracing::info!("shutdown signal received, draining");
     }
+}
+
+/// Refuses to serve without authentication where others can reach it, unless asked to: anyone who
+/// can connect could read and write every repository.
+fn check_exposure(listen: SocketAddr, auth_required: bool, allow_anonymous: bool) -> anyhow::Result<()> {
+    if auth_required || listen.ip().is_loopback() {
+        return Ok(());
+    }
+    if allow_anonymous {
+        tracing::warn!(%listen, "serving without authentication: anyone who can connect can read and write every repository");
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to listen on {listen} without authentication: anyone who can connect could read and write every \
+         repository. Pass --auth-required (see docs/guide/auth.md), or --allow-anonymous to serve without it on purpose"
+    )
 }
 
 async fn run_server(args: ServerArgs) -> anyhow::Result<()> {
@@ -989,6 +1010,37 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn exposed_servers_need_authentication_or_an_explicit_opt_out() {
+        let any: SocketAddr = "0.0.0.0:7080".parse().expect("addr");
+        let local: SocketAddr = "127.0.0.1:7080".parse().expect("addr");
+        let local6: SocketAddr = "[::1]:7080".parse().expect("addr");
+        let err = check_exposure(any, false, false).expect_err("open to the network");
+        assert!(err.to_string().contains("--auth-required"), "{err}");
+        check_exposure(any, true, false).expect("authenticated");
+        check_exposure(any, false, true).expect("anonymous on purpose");
+        check_exposure(local, false, false).expect("loopback");
+        check_exposure(local6, false, false).expect("loopback v6");
+        // build_app applies it, and the flag parses from the command line and the environment
+        let a = args(&[
+            "--listen",
+            "0.0.0.0:0",
+            "--allow-anonymous",
+            "--meta",
+            "mem",
+            "--blobs",
+            "mem",
+        ]);
+        assert!(a.allow_anonymous);
+    }
+
+    #[tokio::test]
+    async fn build_app_refuses_an_exposed_anonymous_server() {
+        let a = args(&["--listen", "0.0.0.0:0", "--meta", "mem", "--blobs", "mem"]);
+        let err = build_app(&a, no_env).await.err().expect("refused");
+        assert!(err.to_string().contains("without authentication"), "{err}");
     }
 
     #[tokio::test]

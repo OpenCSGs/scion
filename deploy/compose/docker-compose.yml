@@ -60,6 +60,10 @@ services:
     command: ["--log-format", "json", "server"]
     environment:
       SCION_LISTEN: 0.0.0.0:7080
+      # Development only, like the secrets here: no authentication. In production remove it and set
+      # SCION_AUTH_REQUIRED=true (docs/guide/auth.md); the server refuses to serve the network
+      # without one or the other
+      SCION_ALLOW_ANONYMOUS: "true"
       SCION_META: postgres://scion:${SCION_DB_PASSWORD:-scion-dev-secret}@postgres:5432/scion
       SCION_BLOBS: s3://scion-objects
       SCION_S3_ENDPOINT: http://s3:8333

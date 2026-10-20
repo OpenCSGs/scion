@@ -12,12 +12,27 @@ docker build -t scion \
   --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim .
 ```
 
-默认命令是 Lite 档：SQLite 加本地目录，数据放在卷 `/data`。
+默认命令是 Lite 档：SQLite 加本地目录，数据放在卷 `/data`，并且**要求认证**（`--auth-required`）。第一次启动后，在容器里写入管理员策略、签发第一个令牌：
 
 ```sh
-docker run -d -p 7080:7080 -v scion-data:/data scion
+docker run -d --name scion -p 7080:7080 -v scion-data:/data scion
+
+# 策略：admins 组管理一切，任何已认证身份可以读写、合入所有仓库（30 秒内生效）
+docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
+  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
+  && scion admin policy set --lite /data/acl.toml'
+# 第一个令牌（只显示这一次）
+docker exec scion scion admin token create --lite --subject admin --group admins
+
+scn --endpoint http://localhost:7080 login --token scn_pat_…
+scn --endpoint http://localhost:7080 repo create mono
+```
+
+服务端监听在回环地址以外、又没有开认证时拒绝启动，因为能连上的人都能读写所有仓库。确实要匿名运行（例如只在内网测试）时加 `--allow-anonymous`（`SCION_ALLOW_ANONYMOUS=true`）：
+
+```sh
 docker run -d -p 7080:7080 -v scion-data:/data scion --log-format json server --listen 0.0.0.0:7080 \
-  --lite --data-dir /data --repo mono      # 启动时预建仓库
+  --lite --data-dir /data --allow-anonymous --repo mono      # 匿名，启动时预建仓库
 ```
 
 | 端口 | 用途 |
@@ -30,7 +45,7 @@ docker run -d -p 7080:7080 -v scion-data:/data scion --log-format json server --
 
 ## docker compose
 
-[`deploy/compose/docker-compose.yml`](../../deploy/compose/docker-compose.yml) 包含以下服务：
+[`deploy/compose/docker-compose.yml`](../../deploy/compose/docker-compose.yml) 用于开发和试用：密钥是固定的开发密钥，并且以 `SCION_ALLOW_ANONYMOUS=true` 匿名运行。它包含以下服务：
 - PostgreSQL：Standard 档的元数据库；
 - SeaweedFS：S3 兼容对象存储，启动时创建 bucket `scion-objects`；
 - `scion server`；

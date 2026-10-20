@@ -1,6 +1,6 @@
 # 认证与鉴权
 
-Scion 默认不要求认证（适合本机和 Lite 模式）。生产环境用 `--auth-required` 开启。认证与鉴权只用标准协议（JWT / JWKS、RFC 7662 令牌内省、RFC 8628 device flow、OPA 风格的鉴权回调），不包含针对某个系统的代码。接入 starhub-server、Keycloak、Casdoor 或 OPA 都只需要配置。
+Scion 默认不要求认证（适合本机和 Lite 模式）。生产环境用 `--auth-required` 开启。服务端监听在回环地址（127.0.0.1、::1）以外时必须开启认证，否则拒绝启动；确实要匿名提供服务时显式加 `--allow-anonymous`（`SCION_ALLOW_ANONYMOUS=true`）。Docker 镜像默认开启认证，见 [deploy.md](deploy.md)。认证与鉴权只用标准协议（JWT / JWKS、RFC 7662 令牌内省、RFC 8628 device flow、OPA 风格的鉴权回调），不包含针对某个系统的代码。接入 starhub-server、Keycloak、Casdoor 或 OPA 都只需要配置。
 
 ## 开启认证
 

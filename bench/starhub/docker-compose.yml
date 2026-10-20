@@ -33,6 +33,7 @@ services:
     command: ["server"]
     environment:
       SCION_LISTEN: 0.0.0.0:7080
+      SCION_ALLOW_ANONYMOUS: "true"   # a local benchmark, as Gitaly's side runs without authentication too
       SCION_META: postgres://scion:scion@postgres:5432/scion
       SCION_BLOBS: s3://scion-objects
       SCION_S3_ENDPOINT: http://minio:9000

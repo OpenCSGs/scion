@@ -625,11 +625,15 @@ impl ObjectBlobStore {
             object_store::Error::NotFound { .. } => Ok(None),
             e => Err(backend("get packed object", e)),
         };
+        // An empty object (an empty file stored as it is): object stores reject empty ranges
+        if end <= start {
+            return Ok(Some(Bytes::new()));
+        }
         let Some(p) = &self.packs else {
             return self.store.get_range(&path, start..end).await.map(Some).or_else(direct);
         };
-        let (first, last) = (start / PACK_BLOCK, end.saturating_sub(1) / PACK_BLOCK);
-        if end <= start || last - first >= MAX_BLOCKS_PER_READ {
+        let (first, last) = (start / PACK_BLOCK, (end - 1) / PACK_BLOCK);
+        if last - first >= MAX_BLOCKS_PER_READ {
             return self.store.get_range(&path, start..end).await.map(Some).or_else(direct);
         }
         let mut out = bytes::BytesMut::with_capacity((end - start) as usize);
@@ -1594,6 +1598,25 @@ mod tests {
         let odd_id = ObjectId::of_blob(&odd);
         s.put_many(&[(odd_id, odd.clone()), vs[0].clone()]).await.expect("put");
         assert_eq!(fresh.get(&odd_id).await, Ok(Some(odd)));
+    }
+
+    /// An empty file in a pack too large to hold whole is read without a request for an empty
+    /// range, which object stores reject.
+    #[tokio::test]
+    async fn empty_objects_in_large_packs_read_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        let empty = Bytes::new();
+        let mut objects = vec![(ObjectId::of_blob(&empty), empty.clone())];
+        objects.extend((0..40).map(|i| {
+            let d = noise(4_000 + i);
+            (ObjectId::of_blob(&d), d)
+        }));
+        s.put_many(&objects).await.expect("pack");
+        let fresh = ObjectBlobStore::local(dir.path()).expect("open").with_packs(index);
+        for (id, d) in &objects {
+            assert_eq!(fresh.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
     }
 
     #[tokio::test]

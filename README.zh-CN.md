@@ -39,16 +39,17 @@ bench/openscion/target/release/openscion-bench 1000 5     # 10,000 个文件，�
 
 ### 真实仓库
 
-在 [pingdotgg/t3code](https://github.com/pingdotgg/t3code) 上，用 CarterT27/scion README 里测的同一个快照（5,573 个提交、28,068 个文件）。CSG Scion 运行在 Docker 中的 PostgreSQL 和 MinIO 上，Git 用本地裸仓库：
+[pingdotgg/t3code](https://github.com/pingdotgg/t3code)，用 CarterT27/scion README 里测的同一个快照：5,573 个提交、28,068 个文件。CSG Scion 在上面那台 M5 上运行，后端是 Docker 中的 PostgreSQL 和 MinIO，Git 用本地裸仓库。M4 Pro 两列是 CarterT27/scion README 里公布的数字（CockroachDB + MinIO），没有在这里重跑。
 
-| | Git | CSG Scion | CSG Scion ÷ Git | CarterT27 ÷ Git（其 README） |
+| 场景 | Git，M5 | CSG Scion，M5 | Git，M4 Pro | CarterT27，M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
-| 完整检出 | 2.65 秒 | **2.28 秒** | **0.86** | 5.2 |
-| 检出 `apps/web`（1,521 个文件） | 0.172 秒 | 0.178 秒 | 1.03 | 4.6 |
-| 干净工作区的 status | 98 ms | 153 ms | 1.6 | — |
-| 导入完整历史 | — | 103 秒 + repack 42 秒 | — | 23 分 18 秒 |
+| 完整检出（28,068 个文件） | 2.65 秒 | **2.28 秒** | 2.90 秒 | 14.96 秒 |
+| 检出 `apps/web`（1,521 个文件） | 0.172 秒 | 0.178 秒 | 0.21 秒 | 0.97 秒 |
+| 干净工作区的 status | **98 ms** | 153 ms | — | — |
+| 完整历史：Git 克隆、Scion 导入 | 3.96 秒 | 103 秒 + repack 42 秒 | 3.56 秒 | 23 分 18 秒 |
+| 历史占用的存储 | pack 557 MB | MinIO 247 MB + PostgreSQL 90 MB | — | — |
 
-导入后，CSG Scion 用 247 MB 的 MinIO 加 90 MB 的 PostgreSQL 存下这份历史；从 GitHub 克隆下来的 pack 是 557 MB。每次检出都逐个文件和 Git 核对。
+和同一台机器上的 Git 相比，CSG Scion 完整检出用时是 Git 的 0.86 倍，检出 `apps/web` 是 1.03 倍；CarterT27/scion 分别是 5.2 倍和 4.6 倍。CSG Scion 的干净工作区 status 是 Git 的 1.6 倍。Scion 的导入要在服务端构建并存下每一个提交，所以拿来和另一个实现的导入比，而不是和 Git 的克隆比；CarterT27/scion 没有公布 status 和存储的数字。每次检出都逐个文件和 Git 核对；Git 的 pack 是从 GitHub 直接克隆下来的，没有重新打包。
 
 - [报告：CarterT27/scion 的测试](docs/reports/2026-10-20-openscion-workloads.md)（英文）：方法、全部数据和复现方式。
 - [报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的对比。

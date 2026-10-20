@@ -39,16 +39,17 @@ bench/openscion/target/release/openscion-bench 1000 5     # 10,000 files, 5 runs
 
 ### Real repositories
 
-On [pingdotgg/t3code](https://github.com/pingdotgg/t3code), the snapshot CarterT27/scion's README measures (5,573 commits, 28,068 files), with CSG Scion on PostgreSQL and MinIO in Docker and Git on a local bare repository:
+[pingdotgg/t3code](https://github.com/pingdotgg/t3code) at the snapshot CarterT27/scion's README measures: 5,573 commits and 28,068 files. CSG Scion ran on PostgreSQL and MinIO in Docker on the M5 above, with Git on a local bare repository. The M4 Pro columns are CarterT27/scion's published numbers, from its README (CockroachDB and MinIO), as it was not rerun here.
 
-| | Git | CSG Scion | CSG Scion ÷ Git | CarterT27 ÷ Git (its README) |
+| Scenario | Git, M5 | CSG Scion, M5 | Git, M4 Pro | CarterT27, M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
-| Full checkout | 2.65 s | **2.28 s** | **0.86** | 5.2 |
-| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 1.03 | 4.6 |
-| Clean status | 98 ms | 153 ms | 1.6 | — |
-| Import the full history | — | 103 s + 42 s repack | — | 23 min 18 s |
+| Full checkout (28,068 files) | 2.65 s | **2.28 s** | 2.90 s | 14.96 s |
+| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 0.21 s | 0.97 s |
+| Clean status | **98 ms** | 153 ms | — | — |
+| Full history: Git's clone, Scion's import | 3.96 s | 103 s + 42 s repack | 3.56 s | 23 min 18 s |
+| Storage of the history | 557 MB pack | 247 MB in MinIO + 90 MB in PostgreSQL | — | — |
 
-After the import, CSG Scion stores the history in 247 MB of MinIO plus 90 MB of PostgreSQL, against the 557 MB pack cloned from GitHub. Every checkout is checked file by file against Git.
+Against Git on the same machine, CSG Scion's full checkout takes 0.86× Git's time and its `apps/web` checkout 1.03×; CarterT27/scion's take 5.2× and 4.6×. Its clean status is 1.6× Git's. A Scion import builds and stores every commit on the server, so it is compared with the other implementation's import rather than with Git's clone; CarterT27/scion publishes no status or storage numbers. Every checkout is checked file by file against Git, and Git's pack is the one cloned from GitHub, not repacked.
 
 - [Report: CarterT27/scion's benchmarks](docs/reports/2026-10-20-openscion-workloads.md), with the method, every number and how to rerun it.
 - [Report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, compared with starhub's Gitaly + MinIO stack and with libgit2.

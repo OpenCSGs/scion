@@ -53,3 +53,11 @@ docker compose -f deploy/dev/docker-compose.yml up -d     # SeaweedFS (S3) + Pos
 ```
 
 **Testing requirements** ([server design doc §12.1](design/rust-server-architecture.md)): every function with logic has unit tests covering the normal path, edge cases and every error branch. Core crates need at least 90% line coverage, and new or changed code in a pull request needs at least 90%; CI enforces both.
+
+## Releasing
+
+1. Set the version in `Cargo.toml` (`[workspace.package] version`) and run `cargo build` so `Cargo.lock` follows.
+2. Write the release notes in `docs/releases/vX.Y.Z.md` (without it, GitHub generates notes from the commits).
+3. Commit, then tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
+
+The [release workflow](../.github/workflows/release.yml) checks that the tag matches the version, builds `scion` and `scn` for Linux (x86_64, aarch64) and macOS (arm64, x86_64), and publishes `scion-server-vX.Y.Z-<target>.tar.gz`, `scn-vX.Y.Z-<target>.tar.gz` and `SHA256SUMS` as a GitHub release. `gh workflow run release -f tag=vX.Y.Z` reruns it for an existing tag, replacing the files. The container image is built and pushed separately (see [deployment](guide/deploy.md)).

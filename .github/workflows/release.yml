@@ -1,0 +1,108 @@
+name: release
+
+# Pushing a tag vX.Y.Z builds the server (`scion`) and the client (`scn`) for Linux and macOS and
+# publishes them as a GitHub release. The tag must match the workspace version in Cargo.toml.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Release notes come from docs/releases/<tag>.md when it exists, else GitHub generates them.
+# Rerun for an existing tag: gh workflow run release -f tag=v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing tag to release, such as v0.1.0
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - name: The tag matches the workspace version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$TAG" || { echo "tag $TAG does not match version $version"; exit 1; }
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04, so the Linux binaries need glibc 2.35 or newer
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled on Apple silicon
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p scion -p scion-cli
+      - name: Check the binaries run
+        if: matrix.target != 'x86_64-apple-darwin' || runner.arch == 'X64'
+        run: |
+          target/${{ matrix.target }}/release/scion --version
+          target/${{ matrix.target }}/release/scn --version
+      - name: Package
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release
+          for pkg in scion-server:scion scn:scn; do
+            name="${pkg%%:*}-$TAG-${{ matrix.target }}"
+            mkdir -p "dist/$name"
+            cp "$bin/${pkg##*:}" LICENSE README.md "dist/$name/"
+            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=(--generate-notes)
+          if [ -f "docs/releases/$TAG.md" ]; then notes=(--notes-file "docs/releases/$TAG.md"); fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --verify-tag "${notes[@]}"
+          fi

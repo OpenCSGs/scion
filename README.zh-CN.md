@@ -129,6 +129,17 @@ docker run -d --name scion -p 7080:7080 \
   opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
 ```
 
+**令牌。** 开启认证后，每个用户和 CI 任务都用令牌登录：执行一次 `scn login 服务端地址 --token scn_pat_…`，之后的命令都会自动带上它（CI 里也可以设置环境变量 `SCION_TOKEN`）。令牌由管理员在服务端用 `scion admin token create` 签发，每个令牌只显示一次。不同部署方式下的命令：
+
+| 部署方式 | 命令 |
+|---|---|
+| `install.sh --server`，Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject 用户名` |
+| `install.sh --server`，macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject 用户名` |
+| Docker 单节点 | `docker exec scion scion admin token create --lite --subject 用户名` |
+| Docker Compose 或 Standard 档 | `docker compose exec scion scion admin token create --subject 用户名` |
+
+加 `--group admins` 签发的是另一个管理员的令牌，加 `--ttl 90d` 让令牌按期过期。`scion admin token list` 和 `scion admin token revoke ID`（选项同上）用来查看和吊销令牌；每个人能做什么由访问策略决定。配置了 OIDC 时，用户也可以直接 `scn login 服务端地址`，在浏览器里登录。详见[认证与鉴权](docs/guide/auth.zh-CN.md)。
+
 多个节点放在负载均衡后面，共用一个数据库和一个 bucket（见[多节点](docs/guide/cluster.zh-CN.md)）；区域缓存用同一个镜像运行 `scion cache`（见[缓存](docs/guide/cache.zh-CN.md)）。想在一台机器上试用全部组件，可以用 [`deploy/compose`](deploy/compose/docker-compose.yml)：它会启动 PostgreSQL、SeaweedFS 和不带认证的服务端。服务端监听在回环地址以外时，没有 `--auth-required` 就拒绝启动，除非显式加上 `--allow-anonymous`。端口、健康检查、OIDC 登录以及 starhub-server 等外部身份提供方，见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
 
 ## 文档

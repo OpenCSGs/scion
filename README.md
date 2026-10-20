@@ -129,6 +129,17 @@ docker run -d --name scion -p 7080:7080 \
   opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
 ```
 
+**Tokens.** With authentication on, every user and CI job signs in with a token: `scn login SERVER --token scn_pat_…` once, after which every command uses it (CI can set `SCION_TOKEN` instead). An administrator creates tokens on the server with `scion admin token create`, which prints each token only once; where to run it:
+
+| Deployment | Command |
+|---|---|
+| `install.sh --server`, Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject NAME` |
+| `install.sh --server`, macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject NAME` |
+| Docker, one node | `docker exec scion scion admin token create --lite --subject NAME` |
+| Docker Compose or Standard | `docker compose exec scion scion admin token create --subject NAME` |
+
+Add `--group admins` for another administrator, and `--ttl 90d` for a token that expires. `scion admin token list` and `scion admin token revoke ID` (same options) show and revoke tokens; what each person may do is set by the access policy. With an OIDC provider configured, people sign in with `scn login SERVER` in a browser instead. See [authentication](docs/guide/auth.md).
+
 Several nodes behind a load balancer share one database and bucket ([clusters](docs/guide/cluster.md)); a regional cache runs from the same image as `scion cache` ([caching](docs/guide/cache.md)). To try everything on one machine, [`deploy/compose`](deploy/compose/docker-compose.yml) starts PostgreSQL, SeaweedFS and the server without authentication. The server refuses to listen beyond loopback without `--auth-required` unless `--allow-anonymous` is given. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details: ports, health checks, OIDC login and external identity providers such as starhub-server.
 
 ## Documentation

@@ -2,6 +2,29 @@
 
 English | [简体中文](deploy.zh-CN.md)
 
+## Release binaries
+
+Each [GitHub release](https://github.com/OpenCSGs/scion/releases) has two packages per platform: the server, `scion-server-<version>-<target>.tar.gz` (`scion`: server, regional cache and admin commands), and the client, `scn-<version>-<target>.tar.gz`. The targets are `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (glibc 2.35 or newer) and `aarch64-apple-darwin` and `x86_64-apple-darwin`; `SHA256SUMS` lists the checksums.
+
+```sh
+V=v0.1.0 T=x86_64-unknown-linux-gnu
+for p in scion-server scn; do
+  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
+done
+curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/SHA256SUMS && sha256sum --check --ignore-missing SHA256SUMS
+sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
+
+# Just this machine: loopback, no token needed
+scion server --lite --data-dir ~/.scion-data
+
+# For a team: reachable by others, so authentication is required
+scion server --lite --data-dir ~/.scion-data --listen 0.0.0.0:7080 --auth-required
+scion admin policy set --lite --data-dir ~/.scion-data acl.toml       # the policy of the Docker example below
+scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins
+```
+
+On macOS, use `shasum -a 256 --check --ignore-missing SHA256SUMS`. The binaries are not signed: a file downloaded in a browser needs `xattr -d com.apple.quarantine scion scn` before it runs. To keep the server running, run it under systemd or launchd like any other service.
+
 ## Docker image
 
 The `Dockerfile` at the repository root builds an image with `scion` (the server, the regional cache and the admin commands) and `scn` (the client). It runs as an unprivileged user (uid 10001).

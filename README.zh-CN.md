@@ -88,9 +88,27 @@ scn log
 
 ## 部署
 
+有三种运行方式：在本机运行 release 二进制、在单节点上运行容器镜像，或者多节点接 PostgreSQL 和 S3。
+
 镜像 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和 `0.1.0`）同时构建了 `linux/amd64` 和 `linux/arm64`，可以运行在 Linux 服务器上，也可以运行在 Apple 芯片和 Intel 芯片 Mac 的 Docker Desktop 里。镜像包含服务端 `scion` 和客户端 `scn`，以非特权用户运行，默认要求认证。
 
-**单节点（Lite 档：SQLite + 本地目录）。**
+**本机部署（release 二进制，不用 Docker）。** 每个 [release](https://github.com/OpenCSGs/scion/releases) 都提供服务端 `scion-server-<版本>-<平台>.tar.gz` 和客户端 `scn-<版本>-<平台>.tar.gz`，平台有 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（需要 glibc 2.35 及以上）、`aarch64-apple-darwin` 和 `x86_64-apple-darwin`，并附 `SHA256SUMS`。
+
+```sh
+V=v0.1.0 T=aarch64-apple-darwin     # 或 x86_64-apple-darwin、x86_64-unknown-linux-gnu、aarch64-unknown-linux-gnu
+for p in scion-server scn; do
+  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
+done
+sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
+
+scion server --lite --data-dir ~/.scion-data &       # 监听 127.0.0.1:7080；回环地址上不需要令牌
+scn repo create http://127.0.0.1:7080/mono
+scn clone http://127.0.0.1:7080/mono && cd mono
+```
+
+要在这台机器上给团队提供服务，加上 `--listen 0.0.0.0:7080 --auth-required`，并按下文创建第一个管理员：`scion admin policy set --lite --data-dir ~/.scion-data acl.toml` 和 `scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins`。
+
+**Docker 单节点（Lite 档：SQLite + 本地目录）。**
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest

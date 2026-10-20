@@ -88,9 +88,27 @@ scn log
 
 ## Deployment
 
+Three ways to run it: release binaries on this machine, the container image on one node, or several nodes on PostgreSQL and S3.
+
 The image `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and `0.1.0`) is built for `linux/amd64` and `linux/arm64`, so it runs on Linux servers and in Docker Desktop on Apple silicon and Intel Macs. It holds the server, `scion`, and the client, `scn`, runs as an unprivileged user, and requires authentication by default.
 
-**One node (Lite: SQLite and a local directory).**
+**Local (release binaries, no Docker).** Each [release](https://github.com/OpenCSGs/scion/releases) has the server, `scion-server-<version>-<target>.tar.gz`, and the client, `scn-<version>-<target>.tar.gz`, for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (glibc 2.35 or newer), `aarch64-apple-darwin` and `x86_64-apple-darwin`, with `SHA256SUMS`.
+
+```sh
+V=v0.1.0 T=aarch64-apple-darwin     # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
+for p in scion-server scn; do
+  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
+done
+sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
+
+scion server --lite --data-dir ~/.scion-data &       # listens on 127.0.0.1:7080; no token needed on loopback
+scn repo create http://127.0.0.1:7080/mono
+scn clone http://127.0.0.1:7080/mono && cd mono
+```
+
+To serve a team from this machine, add `--listen 0.0.0.0:7080 --auth-required` and create the first administrator as below, with `scion admin policy set --lite --data-dir ~/.scion-data acl.toml` and `scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins`.
+
+**One node in Docker (Lite: SQLite and a local directory).**
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest

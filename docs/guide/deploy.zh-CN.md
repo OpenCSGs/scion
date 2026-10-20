@@ -2,6 +2,29 @@
 
 [English](deploy.md) | 简体中文
 
+## Release 二进制
+
+每个 [GitHub release](https://github.com/OpenCSGs/scion/releases) 都为每个平台提供两个包：服务端 `scion-server-<版本>-<平台>.tar.gz`（`scion`：服务端、区域缓存和管理命令）和客户端 `scn-<版本>-<平台>.tar.gz`。平台有 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（需要 glibc 2.35 及以上）、`aarch64-apple-darwin` 和 `x86_64-apple-darwin`；`SHA256SUMS` 列出校验和。
+
+```sh
+V=v0.1.0 T=x86_64-unknown-linux-gnu
+for p in scion-server scn; do
+  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
+done
+curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/SHA256SUMS && sha256sum --check --ignore-missing SHA256SUMS
+sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
+
+# 只给本机用：监听回环地址，不需要令牌
+scion server --lite --data-dir ~/.scion-data
+
+# 给团队用：其他人能连上，所以必须开启认证
+scion server --lite --data-dir ~/.scion-data --listen 0.0.0.0:7080 --auth-required
+scion admin policy set --lite --data-dir ~/.scion-data acl.toml       # 策略内容见下文 Docker 示例
+scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins
+```
+
+macOS 上用 `shasum -a 256 --check --ignore-missing SHA256SUMS` 校验。二进制没有签名：用浏览器下载的文件要先执行 `xattr -d com.apple.quarantine scion scn` 才能运行。需要常驻运行时，和其它服务一样交给 systemd 或 launchd 管理。
+
 ## Docker 镜像
 
 仓库根目录的 `Dockerfile` 构建一个包含 `scion`（服务端、区域缓存、管理命令）和 `scn`（客户端）的镜像，以非 root 用户（uid 10001）运行。

@@ -4,6 +4,14 @@
 
 仓库根目录的 `Dockerfile` 构建一个包含 `scion`（服务端、区域缓存、管理命令）和 `scn`（客户端）的镜像，以非 root 用户（uid 10001）运行。
 
+预构建的镜像是 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest`、`0.1.0`），包含 `linux/amd64` 与 `linux/arm64` 两种架构，Linux 服务器和 Mac（Docker Desktop，Apple 芯片与 Intel）都能直接运行。自己构建多架构镜像时，编译阶段在构建机的架构上交叉编译，不需要 QEMU 模拟：
+
+```sh
+docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/scion:latest --push .
+# 访问不了 deb.debian.org 时指定 Debian 镜像源
+docker buildx build --platform linux/amd64,linux/arm64 --build-arg DEBIAN_MIRROR=mirrors.ustc.edu.cn ...
+```
+
 ```sh
 docker build -t scion .
 # 拉不到 Docker Hub 时换成镜像站

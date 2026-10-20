@@ -84,6 +84,38 @@ scn log
 
 [A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) maps git commands to scn.
 
+## Deployment
+
+The image `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and `0.1.0`) is built for `linux/amd64` and `linux/arm64`, so it runs on Linux servers and in Docker Desktop on Apple silicon and Intel Macs. It holds the server, `scion`, and the client, `scn`, runs as an unprivileged user, and requires authentication by default.
+
+**One node (Lite: SQLite and a local directory).**
+
+```sh
+docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest
+
+# The first administrator: a policy (admins manage everything; anyone signed in can read, write and land)
+docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
+  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
+  && scion admin policy set --lite /data/acl.toml'
+# and a token, shown only this once
+docker exec scion scion admin token create --lite --subject admin --group admins
+
+scn --endpoint http://localhost:7080 login --token scn_pat_…    # the policy takes effect within 30 s
+scn --endpoint http://localhost:7080 repo create mono
+```
+
+**Production (Standard: PostgreSQL and S3-compatible storage).** Point the server at both through environment variables, and run the admin commands above without `--lite`:
+
+```sh
+docker run -d --name scion -p 7080:7080 \
+  -e SCION_META=postgres://scion:PASSWORD@db:5432/scion \
+  -e SCION_BLOBS=s3://scion-objects -e SCION_S3_ENDPOINT=https://s3.example.com \
+  -e SCION_S3_ACCESS_KEY_ID=… -e SCION_S3_SECRET_ACCESS_KEY=… \
+  opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
+```
+
+Several nodes behind a load balancer share one database and bucket ([clusters](docs/guide/cluster.md)); a regional cache runs from the same image as `scion cache` ([caching](docs/guide/cache.md)). To try everything on one machine, [`deploy/compose`](deploy/compose/docker-compose.yml) starts PostgreSQL, SeaweedFS and the server without authentication. The server refuses to listen beyond loopback without `--auth-required` unless `--allow-anonymous` is given. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details: ports, health checks, OIDC login and external identity providers such as starhub-server.
+
 ## Documentation
 
 - **Using Scion:** [deployment](docs/guide/deploy.md) · [command tour](docs/guide/cli.md) · [coming from git](docs/guide/coming-from-git.md) · [importing from git](docs/guide/git-import.md) · [sparse checkout](docs/guide/sparse-checkout.md) · [repositories and branches](docs/guide/repos.md) · [archives](docs/guide/archive.md) · [directory listings](docs/guide/browse.md) · [git SHAs](docs/guide/git-sha.md)

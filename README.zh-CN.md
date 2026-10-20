@@ -84,6 +84,38 @@ scn log
 
 [scion 与 scn 使用导览](docs/guide/cli.md)（英文）介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.md)（英文）给出 git 命令与 scn 的对照。
 
+## 部署
+
+镜像 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和 `0.1.0`）同时构建了 `linux/amd64` 和 `linux/arm64`，可以运行在 Linux 服务器上，也可以运行在 Apple 芯片和 Intel 芯片 Mac 的 Docker Desktop 里。镜像包含服务端 `scion` 和客户端 `scn`，以非特权用户运行，默认要求认证。
+
+**单节点（Lite 档：SQLite + 本地目录）。**
+
+```sh
+docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest
+
+# 第一个管理员：先写入策略（admins 组管理一切；任何已登录的身份都可以读写、合入）
+docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
+  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
+  && scion admin policy set --lite /data/acl.toml'
+# 再签发令牌，令牌只显示这一次
+docker exec scion scion admin token create --lite --subject admin --group admins
+
+scn --endpoint http://localhost:7080 login --token scn_pat_…    # 策略在 30 秒内生效
+scn --endpoint http://localhost:7080 repo create mono
+```
+
+**生产环境（Standard 档：PostgreSQL + S3 兼容存储）。** 用环境变量指定两者；上面的管理命令去掉 `--lite` 即可：
+
+```sh
+docker run -d --name scion -p 7080:7080 \
+  -e SCION_META=postgres://scion:PASSWORD@db:5432/scion \
+  -e SCION_BLOBS=s3://scion-objects -e SCION_S3_ENDPOINT=https://s3.example.com \
+  -e SCION_S3_ACCESS_KEY_ID=… -e SCION_S3_SECRET_ACCESS_KEY=… \
+  opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
+```
+
+多个节点放在负载均衡后面，共用一个数据库和一个 bucket（见[多节点](docs/guide/cluster.md)）；区域缓存用同一个镜像运行 `scion cache`（见[缓存](docs/guide/cache.md)）。想在一台机器上试用全部组件，可以用 [`deploy/compose`](deploy/compose/docker-compose.yml)：它会启动 PostgreSQL、SeaweedFS 和不带认证的服务端。服务端监听在回环地址以外时，没有 `--auth-required` 就拒绝启动，除非显式加上 `--allow-anonymous`。端口、健康检查、OIDC 登录以及 starhub-server 等外部身份提供方，见[部署](docs/guide/deploy.md)和[认证](docs/guide/auth.md)。
+
 ## 文档
 
 - **使用：** [部署](docs/guide/deploy.md) · [命令导览](docs/guide/cli.md) · [从 git 迁移](docs/guide/coming-from-git.md) · [从 git 导入](docs/guide/git-import.md) · [稀疏检出](docs/guide/sparse-checkout.md) · [仓库与分支](docs/guide/repos.md) · [打包下载](docs/guide/archive.md) · [文件列表页](docs/guide/browse.md) · [git SHA](docs/guide/git-sha.md)

@@ -102,7 +102,7 @@ M5 剩余工作：YugabyteDB 档、Helm 与发布构建。
 | 合入（[`server/land/tests/bench.rs`](server/land/tests/bench.rs)） | 200 个并发客户端向同一个 ref 合入 2000 次 | PostgreSQL 每秒 885 次（p99 379 ms）；SQLite 每秒 1921 次（p99 173 ms） | 每秒 ≥ 200 次，p99 < 500 ms |
 | 历史查询（[`server/query/tests/bench.rs`](server/query/tests/bench.rs)） | 10 万提交：log、diff、祖先判断、merge-base、blame | SQLite 与 PostgreSQL 下 p99 均低于 20 ms（冷 blame 13.6 ms，`log --path` 15.6 ms） | p99 < 100 ms |
 | 文件列表页（同一基准） | 10 万提交：根目录 100 个条目各自的最后提交、仓库统计 | PostgreSQL：冷查询 p50 33 ms（p99 93 ms），合入后父提交已缓存时 p99 2.4 ms，命中缓存 p99 < 5 ms；仓库统计冷查询 131 ms，下一个提交 3.1 ms | p99 < 100 ms |
-| 真实仓库，Standard 档（[`bench/starhub`](bench/starhub/README.md)） | starhub-server（6,338 个提交、两个分支、一个 tag），PostgreSQL + MinIO，运行在 Docker 中 | 导入 92 秒，`scion admin repack` 19 秒：占 MinIO 磁盘 111 MB（每个对象单独存放时为 546 MB；git pack 82 MB）。冷读 1–4 ms，历史分页 1.5 ms。[与 Gitaly、libgit2 的对比](docs/reports/2026-10-19-starhub-server.md) | — |
+| 真实仓库，Standard 档（[`bench/starhub`](bench/starhub/README.md)） | starhub-server（6,338 个提交、两个分支、一个 tag），PostgreSQL + MinIO，运行在 Docker 中 | 导入 94 秒，`scion admin repack` 24 秒：占 MinIO 磁盘 86 MB（每个对象单独存放时为 546 MB；Gitaly 仓库 82 MB），另有 PostgreSQL 元数据 54 MB。冷读 1–4 ms，历史分页 1.6 ms。[与 Gitaly、libgit2 的对比](docs/reports/2026-10-19-starhub-server.md) | — |
 | 真实仓库（`~/git/starhub-server`，Lite 档，本机） | 导入 6,312 个提交（2,836 个合并、4,663 个文件）、clone、查询 | 导入 57 秒；zstd 压缩后对象 227 MB（未压缩 1,007 MB，git pack 392 MB）；clone 0.37 秒；status 23 ms；log、blame、show、diff 8–50 ms。文件、git SHA、blame、diff、archive 都与 git 一致 | — |
 
 ## 目录结构

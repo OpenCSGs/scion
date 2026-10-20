@@ -1,6 +1,6 @@
 # Scion on a real repository: starhub-server
 
-*2026-10-19 · Scion `main` at the time of writing*
+*2026-10-19, round 2 rerun 2026-10-20 · Scion `main` at the time of writing*
 
 Two rounds of testing on the history of [starhub-server](https://github.com/OpenCSGs/csghub-server):
 
@@ -28,8 +28,9 @@ The scripts are in [`bench/starhub/`](../../bench/starhub/README.md).
 
   This has to change before starhub can use Scion.
 - **Storage is close to git's after a repack; import is still slow.**
-  - Stored objects went from 546 MB of MinIO disk (one stored object each) to 283 MB (objects written together share a pack) to 111 MB after `scion admin repack` (deltas between versions), against git's 82 MB pack.
-  - A first import takes 92 s plus a 19 s repack, where Gitaly takes 3 s to receive a bundle.
+  - Stored objects went from 546 MB of MinIO disk (one stored object each) to 283 MB (objects written together share a pack) to 86 MB after `scion admin repack` (deltas between versions), against Gitaly's 82 MB repository.
+  - The metadata in PostgreSQL takes another 54 MB, which git keeps inside its pack.
+  - A first import takes 94 s plus a 24 s repack, where Gitaly takes 3 s to receive a bundle.
 
 ---
 
@@ -153,43 +154,45 @@ With starhub's merge-request workflow, the last-commit column of every file list
 
 | Operation | libgit2 (no network) | Gitaly | Scion |
 |---|---|---|---|
-| Read file | **0.04 / 0.3 / 1.4** | 40 / 45 / 73 | 1.1 / 3.6 / 30 |
-| List directory | **0.01 / 0.02 / 0.03** | 52 / 63 / 76 (raw RPC); 139 / 1,692 / 1,728 (starhub) | 1.0 / 1.3 / 1.3 |
-| Last commit per entry | 7.8 / 175 / 229 (`git log`) | 102 / 1,618 / 1,642 | **2.2 / 27 / 75** † |
-| History, 50 entries | 1.9 / 2.9 / 25 | 66 / 74 / 92 | **1.5 / 2.3 / 2.9** |
-| Path history, 50 entries | 17 / 31 / 31 (`git log`) | 51 / 81 / 89 | **4.5 / 7.8 / 8.0** † |
-| Single commit with changed files | **0.7 / 1.3 / 1.7** | 71 / 77 / 95 (raw RPC); 78 / 97 / 124 (starhub, with patch) | 2.9 / 3.8 / 4.1 |
-| Diff between two commits | **0.8 / 1.7 / 2.0** | 73 / 82 / 82 | 3.5 / 14 / 15 |
-| Blame | 40 / 485 / 508 (libgit2); 10 / 25 / 27 (`git blame`) | 42 / 62 / 64 | **3.2 / 14 / 16** † |
-| Archive zip (~40 MB) | 2,494 / 2,532 (`git archive`) | 4,302 / 4,344 | **1,924 / 2,325** |
-| Branch list | **0.4** | 40 | 1.2 |
+| Read file | **0.05 / 0.5 / 1.4** | 40 / 50 / 72 | 1.2 / 3.8 / 24 |
+| List directory | **0.01 / 0.04 / 0.05** | 52 / 62 / 69 (raw RPC); 140 / 1,717 / 1,824 (starhub) | 1.0 / 1.8 / 2.2 |
+| Last commit per entry | 8.8 / 203 / 246 (`git log`) | 98 / 1,617 / 1,708 | **2.3 / 28 / 71** † |
+| History, 50 entries | 1.9 / 2.8 / 25 | 68 / 76 / 94 | **1.6 / 2.0 / 3.7** |
+| Path history, 50 entries | 19 / 41 / 44 (`git log`) | 52 / 76 / 84 | **4.3 / 6.7 / 8.5** † |
+| Single commit with changed files | **0.9 / 2.4 / 2.6** | 70 / 82 / 93 (raw RPC); 78 / 101 / 112 (starhub, with patch) | 3.1 / 6.8 / 6.8 |
+| Diff between two commits | **0.8 / 1.7 / 2.6** | 72 / 133 / 149 | 4.0 / 14 / 24 |
+| Blame | 42 / 507 / 516 (libgit2); 10 / 27 / 29 (`git blame`) | 45 / 70 / 74 | **4.1 / 16 / 27** † |
+| Archive zip (~40 MB) | 2,357 / 2,574 (`git archive`) | 4,487 / 4,902 | **2,070 / 2,390** |
+| Branch list | **0.3** | 42 | 1.0 |
 
 † Not the same work: Scion follows the first-parent chain only, which is cheaper than git's walk into merged branches. Expect these to slow down once Scion attributes changes the way git does.
 
-These Scion numbers are after `scion admin repack` (see [Storage](#storage-and-import)): every object is read from one 51 MB pack, through a cache of 1 MiB blocks, and old versions through their delta chains. Before the block cache, the same repacked store answered diffs in 61 ms and single commits in 25 ms.
+These Scion numbers are after `scion admin repack` (see [Storage](#storage-and-import)): every object is read from one 27 MB pack, through a cache of 1 MiB blocks, and old versions through delta chains of up to 50.
+
+This run was 5–20% slower than the previous one on most rows, writes included, which the repack changes do not touch. To check that the longer delta chains cost nothing, the same server and data were repacked alternately with chains of at most 16 and 50, and the read workload ran after each repack, from a cold restart, twice per setting. Every row was within run-to-run noise between the two (for example, diffs 3.3–3.4 ms, blame 1.5–1.6 ms, file reads 1.1 ms in all four runs), while the pack was 32.5 MB with chains of 16 and 27.8 MB with chains of 50.
 
 ### Concurrent reads (random file reads, ms per request, p50 / p99)
 
 | Readers | libgit2 (a repository handle per thread) | Gitaly | Scion |
 |---|---|---|---|
-| 1 | **0.04 / 3.3** | 40 / 55 | 1.1 / 2.7 |
-| 8 | **0.1 / 1.3** | 100 / 269 | 2.3 / 9.1 |
-| 32 | **0.2 / 3.4** | 436 / 559 | 5.2 / 13 |
-| 64 | **0.7 / 5.1** | 881 / 972 | 8.9 / 17 |
+| 1 | **0.04 / 1.3** | 41 / 87 | 1.1 / 2.7 |
+| 8 | **0.06 / 1.3** | 107 / 177 | 2.7 / 7.4 |
+| 32 | **0.3 / 2.7** | 465 / 554 | 5.6 / 17 |
+| 64 | **0.5 / 4.5** | 945 / 1,053 | 10 / 16 |
 
-Gitaly levels off at about 65 requests per second, with its CPU peaking at 700% while git processes run. Scion serves 360–660 requests per second with its CPU peaking at 92% (and PostgreSQL's at 100%).
+Gitaly levels off at about 65 requests per second, with its CPU peaking at 680% while git processes run. Scion serves 370–610 requests per second with its CPU peaking at 82% (and PostgreSQL's at 59%).
 
 ### Writes
 
 | Operation | libgit2 (no network, no hooks) | Gitaly (starhub's `CommitFiles`, with hooks) | Scion (commit + land) |
 |---|---|---|---|
-| Edit one file | **1.3** / 6.7 ms | 298 / 369 ms | 19 / 35 ms |
-| One commit of 200 files | 80 ms | 4,518 ms | **30 ms** |
-| One 20 MB file | **52 ms** | 859 ms | 195 ms |
-| 16 writers, one branch, 160 commits, no retry | ❌ 141 failed (ref locked or moved) | ❌ 143 failed ("reference does not point to expected object"); some requests waited over a minute | ✅ **all 160** (the server rebases), 0.46 s |
-| Same, each writer retrying until it succeeds | ✅ all 160, 0.19 s | — | — |
-| Create / delete a branch | **0.03 / 0.04 ms** | 291 / 72 ms | 0.9 / 1.1 ms |
-| `git push` vs `scn commit` + `land`, 1 / 50 / 500 files | — | 884 / 906 / 1,245 ms | **155 / 175 / 255 ms** |
+| Edit one file | **1.4** / 3.5 ms | 327 / 412 ms | 19 / 36 ms |
+| One commit of 200 files | 87 ms | 4,762 ms | **37 ms** |
+| One 20 MB file | **52 ms** | 716 ms | 326 ms |
+| 16 writers, one branch, 160 commits, no retry | ❌ 138 failed (ref locked or moved) | ❌ 150 failed ("reference does not point to expected object"); some requests waited over a minute | ✅ **all 160** (the server rebases), 0.46 s |
+| Same, each writer retrying until it succeeds | ✅ all 160, 0.35 s | — | — |
+| Create / delete a branch | **0.05 / 0.05 ms** | 305 / 80 ms | 0.9 / 1.3 ms |
+| `git push` vs `scn commit` + `land`, 1 / 50 / 500 files | — | 929 / 937 / 1,250 ms | **182 / 207 / 304 ms** |
 
 git's ref update is a compare-and-swap on one file, so concurrent writers to one branch fail unless each retries, and a retry has to rebuild its commit on the new tip. Scion's land does that rebase on the server for every writer.
 
@@ -199,20 +202,22 @@ git's ref update is a compare-and-swap on one file, so concurrent writers to one
 |---|---|---|
 | Full checkout | 2.2 s (full history) | **0.83 s** (snapshot) |
 | `--depth 1` / `--filter=blob:none` | 1.2 s / 1.7 s | — |
-| Sparse checkout of two directories (1,511 files) | 0.81 s (blob:none + sparse-checkout) | **0.11 s** |
+| Sparse checkout of two directories (1,511 files) | 0.83 s (blob:none + sparse-checkout) | **0.11 s** |
 | Metadata in the working copy | `.git` 82.8 MB (shallow 38.7, partial 45.6) | **`.scion` 1.1 MB** |
-| 10 concurrent checkouts | 4.8 s (shallow) | 4.9 s |
-| `status` on a clean tree | **17 ms** | 36 ms |
+| 10 concurrent checkouts | 5.3 s (shallow) | 5.3 s |
+| `status` on a clean tree | **18 ms** | 29 ms |
 
 ### Storage and import
 
 | | Gitaly | Scion after the import | Scion after `scion admin repack` |
 |---|---|---|---|
-| Stored objects | one pack | 10,085 (packs of what each commit wrote) | **1 pack** + 3 large files |
-| Object bytes | 82 MB | 234 MB | **110 MB**: a 51 MB pack (67,847 objects, 43,291 of them deltas) and 59 MB for three binaries |
-| MinIO disk | — | 284 MB | **111 MB** |
-| Metadata in PostgreSQL | — | 57 MB | 66 MB |
-| Time | 2.9 s (receives the bundle's pack) | 92 s | + 19 s |
+| Stored objects | one pack (with its index) | 10,085 (packs of what each commit wrote) | **1 pack** + 3 large files |
+| Object bytes | 82 MB | 234 MB | **86 MB**: a 27 MB pack (67,847 objects, 51,262 of them deltas) and 59 MB for three binaries |
+| MinIO disk | — | 284 MB | **86 MB** |
+| Metadata in PostgreSQL | — | 57 MB | **54 MB** |
+| Time | 3.0 s (receives the bundle's pack) | 94 s | + 24 s |
+
+After the write workload, Gitaly's repository takes 87 MB and Scion's objects 92 MB (the workload's commits are in small packs until the next repack).
 
 How the storage got here, all on the same data:
 
@@ -220,20 +225,32 @@ How the storage got here, all on the same data:
 |---|---|---|
 | Every object stored on its own (first comparison) | 546 MB | 67,636 |
 | Objects written together share a pack | 283 MB | 10,085 |
-| `scion admin repack` (deltas between versions) | **111 MB** | 5 |
+| `scion admin repack`, each version against the next newer one at its path | 111 MB | 5 |
+| Merged branches' versions stored against the merge, delta chains of 50 | **86 MB** | 5 |
 
-- **The three binaries** are files committed by mistake, with one version each, so nothing can be stored against them: `bin/starhub-server` (30 MB), a debug binary (34 MB) and `GeoLite2-City.mmdb` (63 MB). Objects over 8 MB stay loose. git's 82 MB includes them too, so for the rest of the history Scion's pack is still larger than git's: zstd deltas against one newer version each, where git picks the best base among many candidates.
-- **PostgreSQL** grows by 9 MB at the repack: it rewrites every pack location, and the space the old rows took is reused by later writes rather than returned to the disk (`VACUUM FULL` would return it, but locks the table). `path_changes` takes 19 MB, `pack_locations` 19 MB and `objects_index` 13 MB.
+- **The three binaries** are files committed by mistake, with one version each, so nothing can be stored against them: `bin/starhub-server` (30 MB), a debug binary (34 MB) and `GeoLite2-City.mmdb` (63 MB). They take 59 MB on both sides: objects over 8 MB stay loose in Scion, and git cannot delta them either.
+- **The rest of the history** takes 27 MB in Scion's pack against about 22 MB in git's (pack and index). By kind:
+
+  | | Scion | git |
+  |---|---|---|
+  | Files (blobs) | 16.1 MB (with one 2.4 MB file stored loose) | 15.6 MB |
+  | Directories (trees) | 6.1 MB | 3.6 MB |
+  | Commits / changesets | 4.4 MB | 1.4 MB |
+  | Index of the pack | 3.4 MB (in the pack's trailer) | 1.9 MB (`.idx`) |
+
+  A changeset is larger than a git commit because it also lists the files it changed. Storing changesets as deltas against each other saved only 0.2 MB and would slow history reads, so it is not done.
+- **The repack's first version left half the trees whole.** It compared each commit with its first parent only, so the last versions on every merged branch had nothing newer to be stored against: with starhub's merge requests, that was every branch. Comparing merges with their other parents too took the pack from 51 MB to 32 MB, and allowing delta chains of 50 (as git does) instead of 16 to 27 MB.
+- **PostgreSQL**: a repack rewrites every pack location. The repack now compacts the metadata afterwards: it rewrites the pack locations table in place (64 ms of locking here; skipped for tables over 256 MB or when the lock is not granted within 200 ms) and rebuilds the indexes over object ids and paths concurrently. The database goes from 68 MB to 54 MB, about 8 MB of which is PostgreSQL's own catalog. `path_changes` takes 15 MB, `objects_index` and `pack_locations` 11 MB each.
 
 ### Deployment and resources
 
 | | Gitaly + MinIO | Scion + PostgreSQL + MinIO |
 |---|---|---|
 | Server image | 353 MB | **50 MB** (+ PostgreSQL 159 MB) |
-| Restart until serving | 5.9 s | **0.13 s** |
-| Memory, idle | Gitaly 194 MiB | Scion **8 MiB** + PostgreSQL 93 MiB |
-| Memory, peak under the workload | Gitaly 382 MiB | Scion 948 MiB + PostgreSQL 187 MiB |
-| CPU, peak | 701% | 92% (Scion) + 100% (PostgreSQL) |
+| Restart until serving | 5.7 s | **0.13 s** |
+| Memory, idle | Gitaly 194 MiB | Scion **8 MiB** + PostgreSQL 115 MiB |
+| Memory, peak under the workload | Gitaly 513 MiB | Scion 717 MiB + PostgreSQL 206 MiB |
+| CPU, peak | 682% | 82% (Scion) + 59% (PostgreSQL) |
 
 Scion's peak memory is mostly caches: objects, pack blocks (128 MiB), delta bases (64 MiB) and small packs (64 MiB).
 
@@ -241,10 +258,10 @@ Scion's peak memory is mostly caches: objects, pack blocks (128 MiB), delta base
 
 **Against git itself** (libgit2, no network):
 
-- A Scion request costs at least a round trip to its server, about 1 ms here. On top of that, Scion's reads take 0–3 ms more than libgit2's: file reads, listings, diffs and single commits. History pages are faster than libgit2's (1.5 ms against 1.9 ms) even with the round trip.
-- A single small commit is faster in git (1.3 ms against 19 ms); a commit of 200 files is faster in Scion (30 ms against 80 ms).
+- A Scion request costs at least a round trip to its server, about 1 ms here. On top of that, Scion's reads take 0–3 ms more than libgit2's: file reads, listings, diffs and single commits. History pages are faster than libgit2's (1.6 ms against 1.9 ms) even with the round trip.
+- A single small commit is faster in git (1.4 ms against 19 ms); a commit of 200 files is faster in Scion (37 ms against 87 ms).
 - Concurrent commits to one branch fail in git unless the writer retries; Scion's land rebases them on the server.
-- After a repack, Scion stores this history in 111 MB against git's 82 MB.
+- After a repack, Scion stores this history's objects in 86 MB against git's 82 MB, plus 54 MB of metadata in PostgreSQL.
 
 **Against Gitaly as starhub runs it**, Scion is far ahead on every read and write. Most of that gap is Gitaly's own overhead (a git process per request, its gRPC layer, starhub's hooks and extra work in starhub's client), not git's storage: Gitaly's raw directory listing takes 52 ms where libgit2 takes 0.01 ms.
 
@@ -253,9 +270,9 @@ Scion is also ahead on sparse checkout, working copy size, and deployment size a
 **To fix before starhub adopts it, in order:**
 
 1. **Git-compatible history attribution.** Last commit per entry, blame and path history need to follow merges into the merged branch, as git does.
-2. **Memory under load.** 948 MiB at peak: make the caches' sizes configurable and bounded together.
-3. **Storage.** Run repack automatically (now an admin command), pick delta bases among more candidates, and keep the pack locations from growing at each repack.
-4. **Import speed for migrations.** 92 s plus a repack, against 3 s for Gitaly; a server-side import is roadmap item 2.6.
+2. **Memory under load.** 717 MiB at peak: make the caches' sizes configurable and bounded together.
+3. **Storage.** Run repack automatically (now an admin command), and shrink the metadata in PostgreSQL.
+4. **Import speed for migrations.** 94 s plus a repack, against 3 s for Gitaly; a server-side import is roadmap item 2.6.
 
 ### Limits of the comparison
 

@@ -112,10 +112,12 @@ Legend: 🔵 has an initial design, ⚪ idea only.
 - **Async fork**: fork very large repositories as a background task.
 
 ### 2.9 Storage follow-ups ⚪
-Packs, deltas and `scion admin repack` are done ([object storage](../guide/object-storage.md#packs)): starhub-server takes 111 MB of MinIO against git's 82 MB. What is left:
+Packs, deltas and `scion admin repack` are done ([object storage](../guide/object-storage.md#packs)): starhub-server takes 86 MB of MinIO against Gitaly's 82 MB, plus 54 MB of metadata in PostgreSQL. What is left:
 - **Repack on its own**: a server-side schedule (after large imports, or nightly) instead of an admin command.
-- **Better delta bases**: try several candidates (other versions of the path, similar sizes) instead of only the next newer version, as git does.
-- **Pack locations**: a repack rewrites every row; partition by pack generation, or rewrite the table, so it does not grow at each repack.
+- **Better delta bases**: also try other candidates (renamed files, files of the same name and similar size), as git does. Trees take 6.1 MB against git's 3.6 MB.
+- **Smaller pack format**: deltas name their base by its full id (38 bytes each, 2 MB on starhub-server), and the trailer stores offsets that follow from the lengths (0.8 MB).
+- **Smaller metadata**: `path_changes` repeats each path in every row and in its index; ids for paths would save about 3 MB on starhub-server, at the cost of one more insert per write.
+- **Pack locations on large installs**: past 256 MB the table is only vacuumed after a repack, so it stays at twice its size; partition it by pack generation, or rewrite it without locking.
 - **Incremental repack**: only the objects written since the last one, appended as new packs.
 
 ### 2.10 Caching and multiple regions ⚪

@@ -63,6 +63,26 @@ jobs:
         with:
           key: release-${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }} -p scion -p scion-cli
+      # macOS: sign with OpenCSG's Developer ID (the certificate csglite uses), so that macOS lets
+      # scn and scion ask for local network access. Secrets: APPLE_CERTIFICATE (the .p12, base64)
+      # and APPLE_CERTIFICATE_PASSWORD; variables APPLE_SIGNING_IDENTITY and APPLE_TEAM_ID optional
+      - name: Import the Apple signing certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ vars.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "::error::APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD are not set; macOS binaries must be signed"
+            exit 1
+          fi
+          bash scripts/ci-import-apple-certificate.sh
+      - name: Sign the macOS binaries
+        if: runner.os == 'macOS'
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || '3S93B6Z434' }}
+        run: bash scripts/sign-macos.sh target/${{ matrix.target }}/release/scion target/${{ matrix.target }}/release/scn
       - name: Check the binaries run
         if: matrix.target != 'x86_64-apple-darwin' || runner.arch == 'X64'
         run: |
@@ -76,7 +96,7 @@ jobs:
             name="${pkg%%:*}-$TAG-${{ matrix.target }}"
             mkdir -p "dist/$name"
             cp "$bin/${pkg##*:}" LICENSE README.md "dist/$name/"
-            tar -C dist -czf "dist/$name.tar.gz" "$name"
+            COPYFILE_DISABLE=1 tar -C dist -czf "dist/$name.tar.gz" "$name"
           done
       - uses: actions/upload-artifact@v4
         with:

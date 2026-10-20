@@ -79,6 +79,13 @@ pub async fn plan(
             walk.emit(rec.id);
             let parent = rec.first_parent().and_then(|p| roots.get(&p).copied());
             walk.trees(blobs, rec.root_tree, parent).await?;
+            // A merge's other parents: their versions are stored against the merge's too, or
+            // every merged branch's last versions would have nothing newer to pair with
+            for p in rec.parents.iter().skip(1) {
+                if let Some(&root) = roots.get(p) {
+                    walk.trees(blobs, rec.root_tree, Some(root)).await?;
+                }
+            }
         }
     }
     Ok((walk.items, changesets))
@@ -210,6 +217,61 @@ mod tests {
                 assert!(pos[&b] < i, "a base comes before the objects stored against it");
             }
         }
+    }
+
+    /// A merged branch's last tree is stored against the merge's, not left whole.
+    #[tokio::test]
+    async fn merged_branch_versions_pair_with_the_merge() {
+        use bytes::Bytes;
+        use scion_object::{Changeset, FileChange, Signature};
+        use scion_store::{IndexedObject, MemStore};
+        let store = Arc::new(MemStore::new());
+        store.create_repo("r").await.expect("repo");
+        let writer = scion_land::ChangesetWriter::new(store.clone(), store.clone());
+        let sig = Signature {
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+            time_ms: 1,
+            tz_offset_minutes: 0,
+        };
+        let mut n = 0u8;
+        let mut commit = async |parents: Vec<ObjectId>, files: &[(&str, &str)]| {
+            n += 1;
+            let mut delta = Vec::new();
+            for &(path, content) in files {
+                let id = ObjectId::of_blob(content.as_bytes());
+                let data = Bytes::copy_from_slice(content.as_bytes());
+                store.put(id, data).await.expect("put");
+                let obj = IndexedObject {
+                    id,
+                    size: content.len() as u64,
+                };
+                store.index_objects("r", &[obj]).await.expect("index");
+                delta.push(FileChange::put(path, EntryMode::File, id, content.len() as u64));
+            }
+            let cs = Changeset::new(
+                parents,
+                sig.clone(),
+                sig.clone(),
+                format!("c{n}"),
+                [n; 16],
+                delta,
+                Default::default(),
+            )
+            .expect("changeset");
+            writer.create("r", &cs).await.expect("create")
+        };
+        let a = commit(vec![], &[("a/x", "1"), ("b/y", "1")]).await;
+        let branch = commit(vec![a.id], &[("a/x", "2")]).await;
+        let main = commit(vec![a.id], &[("b/y", "2")]).await;
+        let merge = commit(vec![main.id, branch.id], &[("a/x", "2")]).await;
+        let (items, _) = plan(store.as_ref(), store.as_ref(), &["r".to_owned()])
+            .await
+            .expect("plan");
+        let base: HashMap<ObjectId, Option<ObjectId>> = items.iter().map(|i| (i.id, i.base)).collect();
+        assert_eq!(base[&merge.root_tree], None, "the newest version is whole");
+        assert_eq!(base[&branch.root_tree], Some(merge.root_tree));
+        assert_eq!(base[&main.root_tree], Some(merge.root_tree));
     }
 
     /// Many versions of a few files, committed into a packed local store, then repacked.

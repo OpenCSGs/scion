@@ -124,7 +124,7 @@ download() {
 latest_version() {
     url="https://github.com/${REPO}/releases/latest"
     if command -v curl >/dev/null 2>&1; then
-        loc="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null || true)"
+        loc="$(curl -fsSLI --connect-timeout 15 --retry 3 -o /dev/null -w '%{url_effective}' "$url" 2>/dev/null || true)"
     else
         loc="$(wget -S --spider "$url" 2>&1 | sed -n 's/^ *Location: *//p' | tail -1 || true)"
     fi
@@ -149,6 +149,13 @@ fetch() {
     tar -xzf "${TMP}/${name}.tar.gz" -C "$TMP"
 }
 
+# sudo can run: without a password, or with a terminal to ask for one (not over `ssh host cmd`)
+can_sudo() {
+    command -v sudo >/dev/null 2>&1 || return 1
+    sudo -n true 2>/dev/null && return 0
+    (: </dev/tty) 2>/dev/null
+}
+
 resolve_install_dir() {
     if [ -n "$INSTALL_DIR" ]; then
         mkdir -p "$INSTALL_DIR" 2>/dev/null || as_root mkdir -p "$INSTALL_DIR"
@@ -162,7 +169,7 @@ resolve_install_dir() {
         for d in "${HOME}/.local/bin" "${HOME}/bin"; do
             case ":${PATH}:" in *":${d}:"*) INSTALL_DIR="$d"; break ;; esac
         done
-        if [ "$INSTALL_DIR" = /usr/local/bin ] && ! command -v sudo >/dev/null 2>&1; then
+        if [ "$INSTALL_DIR" = /usr/local/bin ] && ! can_sudo; then
             INSTALL_DIR="${HOME}/.local/bin"
         fi
     fi
@@ -289,6 +296,25 @@ EOF
     STOP_HINT="launchctl bootout gui/$(id -u)/${LABEL}"
 }
 
+# Put a directory of the user's on PATH for future shells, through the login shell's profile
+add_to_path() {
+    case "$INSTALL_DIR" in
+        "${HOME}"/*) ;;
+        *) warn "${INSTALL_DIR} is not on PATH; add it: export PATH=\"${INSTALL_DIR}:\$PATH\""; return ;;
+    esac
+    case "$(basename "${SHELL:-sh}")" in
+        zsh) profile="${HOME}/.zprofile" ;;
+        bash) profile="${HOME}/.bash_profile" ;;
+        *) profile="${HOME}/.profile" ;;
+    esac
+    dir="\$HOME${INSTALL_DIR#"${HOME}"}"
+    line="case \":\$PATH:\" in *\":${dir}:\"*) ;; *) export PATH=\"${dir}:\$PATH\" ;; esac"
+    if ! grep -qF "$line" "$profile" 2>/dev/null; then
+        printf '\n# Added by the CSG Scion installer\n%s\n' "$line" >> "$profile"
+    fi
+    info "added ${INSTALL_DIR} to PATH in ${profile}; for this shell: export PATH=\"${INSTALL_DIR}:\$PATH\""
+}
+
 wait_ready() {
     host="${LISTEN%:*}" port="${LISTEN##*:}"
     case "$host" in 0.0.0.0|"[::]"|"") host=127.0.0.1 ;; esac
@@ -332,7 +358,7 @@ main() {
 
     case ":${PATH}:" in
         *":${INSTALL_DIR}:"*) ;;
-        *) warn "${INSTALL_DIR} is not on PATH; add it: export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
+        *) add_to_path ;;
     esac
 
     host="${LISTEN%:*}"

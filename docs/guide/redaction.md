@@ -1,91 +1,93 @@
-# Redaction 与数据校验
+# Redaction and fsck
 
-## Redaction：清除泄露的内容
+English | [简体中文](redaction.zh-CN.md)
 
-密码、密钥等敏感内容被提交进仓库后，改写历史代价很大：提交 id 全部改变，所有工作副本都要重新同步。Scion 的做法是 **redact**：
+## Redaction: removing leaked content
 
-- 对象 id 和历史都不变；
-- 读取被 redact 的文件内容时返回 `REDACTED`（gRPC `NOT_FOUND`，`ErrorInfo.reason = REDACTED`，metadata 带 `ids` 和 `redaction_ids`）；
-- 需要彻底删除时再 **purge**，在宽限期后物理删除对象字节。
+When a password, a key or other secret has been committed, rewriting history is expensive: every commit id changes and every working copy has to resync. Scion **redacts** instead:
 
-只有文件内容（blob）可以 redact。目录树和提交对象是历史结构，不能 redact。
+- object ids and history stay the same;
+- reading a redacted file returns `REDACTED` (gRPC `NOT_FOUND` with `ErrorInfo.reason = REDACTED`, and `ids` and `redaction_ids` in the metadata);
+- to delete it for good, **purge** it, which removes the object bytes after a grace period.
 
-### 操作
+Only file contents (blobs) can be redacted. Trees and commit objects are the structure of history and cannot.
+
+### Commands
 
 ```sh
-# 按 REV:PATH 或 blob id 指定，可以一次指定多个
+# By REV:PATH or blob id, several at once if needed
 scion admin redact --repo mono --path main:config/prod.env --reason "leaked database password"
 scion admin redact --repo mono b1a3f0… --reason "..."
 
-# 同一个对象可能也在 fork 里：一并 redact 所有含它的仓库
+# The same object may be in forks too: redact it in every repository that has it
 scion admin redact --repo mono --path main:config/prod.env --all-repos --reason "..."
 
-scion admin redactions [--repo mono] [--id rd_…]   # 列出
-scion admin unredact rd_…                          # 撤销（purge 执行之前）
-scion admin purge rd_… [--grace 24h]               # 安排物理删除，宽限期内可以撤销
-scion admin purge rd_… --now                       # 立即删除，不可撤销
+scion admin redactions [--repo mono] [--id rd_…]   # list
+scion admin unredact rd_…                          # undo (before a purge runs)
+scion admin purge rd_… [--grace 24h]               # schedule deletion; undoable during the grace period
+scion admin purge rd_… --now                       # delete now, for good
 ```
 
-这些命令直接读写存储，存储参数与 `scion server` 相同（`--meta postgres://…`、`--lite --data-dir DIR` 等）。也可以通过 `AdminService` 远程调用 `Redact`、`Unredact`、`Purge`、`ListRedactions`：
+These commands read and write the stores directly, with the same storage options as `scion server` (`--meta postgres://…`, `--lite --data-dir DIR` and so on). `AdminService` also offers `Redact`, `Unredact`, `Purge` and `ListRedactions` remotely:
 
-| 操作 | 需要的权限 |
+| Operation | Permission needed |
 |---|---|
-| Redact 一个仓库 | 该仓库的 admin |
-| Redact 所有仓库（`all_repos`） | 系统管理 |
-| Unredact、Purge | 涉及的每个仓库的 admin |
-| 列出某个仓库 | 该仓库的 admin |
-| 不限仓库地列出 | 系统管理 |
+| Redact in one repository | admin of that repository |
+| Redact in every repository (`all_repos`) | system admin |
+| Unredact, purge | admin of every repository involved |
+| List one repository's | admin of that repository |
+| List across repositories | system admin |
 
-每条记录保存原因、操作人和时间。服务端日志以 warn 级别记录每次操作。
+Every record keeps the reason, who did it and when. The server logs each operation at warn level.
 
-### 生效范围
+### Where it takes effect
 
-| 位置 | 行为 |
+| Where | Behavior |
 |---|---|
-| 服务端 | `GetObjects`、`ReadFile`、`Blame` 立即返回 `REDACTED`；`ListDir`、`Diff`、`Log` 照常（只涉及路径和 id） |
-| 合入 | rebase 需要三方合并 redact 过的版本时，合入失败并返回 `REDACTED`，内容不会被合并进新提交 |
-| 区域缓存 `scion cache` | 每个仓库最多每 10 秒用调用者的令牌向服务端同步一次（`ObjectService.ListRedactedObjects`），之后返回 `REDACTED` 并删除本地副本 |
-| 本机 daemon | 同上，按（服务端, 仓库）同步 |
-| 同步失败 | 上游不可用、超时或离线时，缓存层**拒绝**读取（`UNAVAILABLE`），不返回本地副本；令牌被拒等错误原样返回。只有不支持 redaction 的旧服务端（`UNIMPLEMENTED`）按没有 redaction 处理 |
-| 撤销 | 同样最多 10 秒后在缓存层生效 |
+| The server | `GetObjects`, `ReadFile` and `Blame` return `REDACTED` at once; `ListDir`, `Diff` and `Log` work as before (they involve only paths and ids) |
+| Landing | When a rebase needs a three-way merge of a redacted version, the land fails with `REDACTED`; the content is never merged into a new commit |
+| The regional cache, `scion cache` | Syncs with the server at most every 10 seconds per repository, with the caller's token (`ObjectService.ListRedactedObjects`), then returns `REDACTED` and deletes its local copy |
+| The local daemon | The same, per server and repository |
+| When a sync fails | With the upstream unavailable, timing out or offline, cache layers **refuse** to read (`UNAVAILABLE`) rather than serve their local copy; errors such as a rejected token are passed on as they are. Only an old server without redaction (`UNIMPLEMENTED`) is treated as having no redactions |
+| Undoing | Takes effect in cache layers within 10 seconds as well |
 
-redaction 按仓库生效：同一个对象在别的仓库里没有被 redact 时，那个仓库照常可以读取。
+Redactions are per repository: the same object, if not redacted in another repository, can still be read there.
 
-### Purge 的条件
+### When a purge deletes
 
-对象字节在所有仓库之间只存一份。只有对象索引中有它的**每个**仓库都已 redact，服务端才会删除字节。否则保持待删除，每轮检查时记一条 warn 日志，列出还能读取它的仓库，可以用 `--all-repos` 补上。
+Object bytes are stored once for all repositories. The server deletes them only when **every** repository whose object index has the object has redacted it. Otherwise the deletion stays pending, and each check logs a warning naming the repositories that can still read it; `--all-repos` covers them.
 
-- **执行者**：服务端的 janitor 定期执行到期的删除（默认每 10 分钟）。删除是幂等的，集群中多个节点同时执行也没有问题。
-- **宽限期**：`scion server --purge-grace` 设置 `AdminService.Purge` 未指定时的默认值，默认 24 小时。
-- **删除后**：不能再撤销。缓存层的副本在 redact 时已经删除。
+- **Who runs it:** the server's janitor runs due deletions periodically (every 10 minutes by default). Deletion is idempotent, so several nodes of a cluster running it at once is fine.
+- **Grace period:** `scion server --purge-grace` sets the default when `AdminService.Purge` gives none, 24 hours by default.
+- **After deletion:** it cannot be undone. Cache layers already deleted their copies at redaction.
 
-### 限制
+### Limits
 
-- **检出**：检出包含被 redact 文件的版本会失败。先提交一个删除或替换该文件的修改，再 redact 历史中的版本。
-- **Blame**：追溯到被 redact 的历史版本时，blame 返回 `REDACTED`。
-- **重新上传**：purge 之后有人又上传了相同内容，字节会重新写入。仓库里的 redaction 记录仍在，读取照样返回 `REDACTED`，但字节要等下一次 redact 并 purge 才会删除。
+- **Checkouts:** checking out a revision with a redacted file fails. Commit a change that deletes or replaces the file first, then redact the versions in history.
+- **Blame:** blame returns `REDACTED` when it reaches a redacted version in history.
+- **Uploading again:** if someone uploads the same content after a purge, the bytes are written again. The repository's redaction record remains and reads still return `REDACTED`, but the bytes are deleted only by the next redaction and purge.
 
-## `scion admin fsck`：数据校验
+## `scion admin fsck`: checking the data
 
-只读地检查每个仓库：
+Checks every repository, read-only:
 
-- 每个 ref 指向的提交有记录；
-- 每条提交记录的父提交有记录，提交对象存在、哈希正确、能解码，且父提交与记录一致；
-- 从每个提交的根目录树出发的引用闭包：
-  - 目录树存在、哈希正确、能解码；
-  - 文件在仓库的对象索引里，索引中的大小与目录项一致，字节存在；
-  - 被 redact 的文件只检查索引，已经 purge 的允许字节不存在。
+- each ref points at a commit that has a record;
+- each commit record's parents have records, and its commit object exists, hashes correctly, decodes and has the same parents as the record;
+- the closure of references from each commit's root tree:
+  - trees exist, hash correctly and decode;
+  - files are in the repository's object index, the index's size matches the tree entry, and the bytes exist;
+  - redacted files are checked only in the index, and purged ones may have no bytes.
 
 ```sh
 scion admin fsck --meta postgres://… --blobs s3://bucket
-scion admin fsck --repo mono --verify   # --verify 读出每个文件并校验哈希（默认只确认存在）
+scion admin fsck --repo mono --verify   # --verify reads and hashes every file (by default it only checks they exist)
 ```
 
-最多列出 1000 个问题，最后一行给出问题总数。发现问题时退出码非 0，可以用于定时巡检。在元数据迁移（`migrate-meta`）之后也应运行一次。
+It lists up to 1,000 problems and ends with their total. It exits non-zero when it finds any, so it suits scheduled checks. Run it after a metadata migration (`migrate-meta`) too.
 
-## `scion admin lease ls`：租约
+## `scion admin lease ls`: leases
 
-列出合入 leader 等租约：持有者、换手次数（token）和剩余时间。用于排查集群中某个 ref 由哪个节点处理。
+Lists leases such as land leaders': the holder, how many times it changed hands (token) and the time left. Useful to find which node handles a ref in a cluster.
 
 ```sh
 scion admin lease ls --meta postgres://…

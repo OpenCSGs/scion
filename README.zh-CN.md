@@ -68,19 +68,18 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 ## 快速开始
 
 ```sh
-# 以 Lite 模式（SQLite + 本地目录）从源码启动服务端
-cargo run -p scion -- server --lite --data-dir ./.scion-data
-# 或者用 PostgreSQL + S3 兼容存储：docker compose -f deploy/compose/docker-compose.yml up -d --build
+# 安装客户端，并把服务端作为系统服务运行在 127.0.0.1:7080（Linux 或 macOS）
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
 
-# 在另一个终端
-cargo install --path client/cli
-scn repo create mono
-scn clone mono && cd mono
+scn repo create http://127.0.0.1:7080/mono
+scn clone http://127.0.0.1:7080/mono && cd mono
 echo hello > README.md
 scn commit -m "add readme"
 scn land                          # 把 main 移到这个提交；main 已前进时由服务端 rebase
 scn log
 ```
+
+不加 `--server` 时只安装客户端 `scn`。也可以从源码运行：`cargo run -p scion -- server --lite --data-dir ./.scion-data` 和 `cargo install --path client/cli`。
 
 **熟悉 git？** 大多数 git 命令在 scn 里可以照原样输入，从 `scn clone http://host/REPO` 开始，完整列表见 [scn 中的 git 命令](docs/guide/git-commands.zh-CN.md)。
 
@@ -88,27 +87,22 @@ scn log
 
 ## 部署
 
-有三种运行方式：在本机运行 release 二进制、在单节点上运行容器镜像，或者多节点接 PostgreSQL 和 S3。
+有三种运行方式：在本机一键安装、在单节点上运行容器镜像，或者多节点接 PostgreSQL 和 S3。
 
-镜像 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和 `0.1.0`）同时构建了 `linux/amd64` 和 `linux/arm64`，可以运行在 Linux 服务器上，也可以运行在 Apple 芯片和 Intel 芯片 Mac 的 Docker Desktop 里。镜像包含服务端 `scion` 和客户端 `scn`，以非特权用户运行，默认要求认证。
-
-**本机部署（release 二进制，不用 Docker）。** 每个 [release](https://github.com/OpenCSGs/scion/releases) 都提供服务端 `scion-server-<版本>-<平台>.tar.gz` 和客户端 `scn-<版本>-<平台>.tar.gz`，平台有 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（需要 glibc 2.35 及以上）、`aarch64-apple-darwin` 和 `x86_64-apple-darwin`，并附 `SHA256SUMS`。
+**本机一键安装（Linux 或 macOS）。** [`install.sh`](install.sh) 下载最新的 [release](https://github.com/OpenCSGs/scion/releases)，按 `SHA256SUMS` 校验后安装：
 
 ```sh
-V=v0.1.0 T=aarch64-apple-darwin     # 或 x86_64-apple-darwin、x86_64-unknown-linux-gnu、aarch64-unknown-linux-gnu
-for p in scion-server scn; do
-  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
-done
-sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
-
-scion server --lite --data-dir ~/.scion-data &       # 监听 127.0.0.1:7080；回环地址上不需要令牌
-scn repo create http://127.0.0.1:7080/mono
-scn clone http://127.0.0.1:7080/mono && cd mono
+# 客户端 scn
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh
+# 加上服务端，作为系统服务运行在 127.0.0.1:7080
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
+# 给团队用：开启认证，并打印第一个管理员令牌
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server --listen 0.0.0.0:7080
 ```
 
-要在这台机器上给团队提供服务，加上 `--listen 0.0.0.0:7080 --auth-required`，并按下文创建第一个管理员：`scion admin policy set --lite --data-dir ~/.scion-data acl.toml` 和 `scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins`。
+服务端在 Linux 上由 systemd 管理（用户 `scion`，数据在 `/var/lib/scion`），在 macOS 上由 launchd 管理（数据在 `~/Library/Application Support/scion`）。`--version`、`--data-dir`、`--no-service`、`--install-dir` 可以改默认值，`SCION_DOWNLOAD_URL` 指向 release 文件的镜像；`sh install.sh --help` 列出全部选项。想手动下载安装，见 [release 二进制](docs/guide/deploy.zh-CN.md#release-二进制)。
 
-**Docker 单节点（Lite 档：SQLite + 本地目录）。**
+**Docker 单节点（Lite 档：SQLite + 本地目录）。** 镜像 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和版本号，例如 `0.1.1`）同时构建了 `linux/amd64` 和 `linux/arm64`，可以运行在 Linux 服务器上，也可以运行在 Apple 芯片和 Intel 芯片 Mac 的 Docker Desktop 里。镜像包含服务端 `scion` 和客户端 `scn`，以非特权用户运行，默认要求认证。
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest

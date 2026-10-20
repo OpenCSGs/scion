@@ -4,10 +4,40 @@
 
 ## Release 二进制
 
+### 安装脚本
+
+[`install.sh`](../../install.sh) 在 Linux 或 macOS 上安装最新的 release：按平台选择安装包，按 `SHA256SUMS` 校验，把 `scn`（加 `--server` 时还有 `scion`）放进 `/usr/local/bin`；不需要 sudo 就能装进用户自己 `PATH` 里的目录时，就装到那里。
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh                       # 客户端
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server        # 加上服务端，作为系统服务运行
+```
+
+加 `--server` 时，服务端以 Lite 模式作为系统服务运行：
+
+| | Linux | macOS |
+|---|---|---|
+| 服务 | systemd 单元 `scion`，以系统用户 `scion` 运行 | launchd agent `com.opencsg.scion`，以当前用户运行 |
+| 数据 | `/var/lib/scion` | `~/Library/Application Support/scion` |
+| 日志 | `journalctl -u scion` | `~/Library/Logs/scion.log` |
+| 停止 | `sudo systemctl stop scion` | `launchctl bootout gui/$(id -u)/com.opencsg.scion` |
+
+| 选项 | 默认值 | 说明 |
+|---|---|---|
+| `--listen ADDR` | `127.0.0.1:7080` | 监听回环地址以外时，服务要求认证；安装脚本写入策略（admins 组管理一切，任何已登录身份可以读写、合入），并打印第一个管理员令牌。重复执行时保留已有的策略 |
+| `--data-dir DIR` | 见上表 | |
+| `--no-service` | | 只安装二进制，并打印启动服务端的命令 |
+| `--version vX.Y.Z` | 最新版 | 也可以用 `SCION_VERSION` |
+| `--install-dir DIR` | 见上文 | 也可以用 `SCION_INSTALL_DIR` |
+
+GitHub 访问慢或访问不了时，`SCION_DOWNLOAD_URL` 把 `https://github.com/OpenCSGs/scion/releases/download` 换成镜像地址，目录结构同为 `<tag>/<文件>`。没有 systemd 时（例如在容器里），安装脚本只安装二进制，并打印启动服务端的命令。
+
+### 手动安装
+
 每个 [GitHub release](https://github.com/OpenCSGs/scion/releases) 都为每个平台提供两个包：服务端 `scion-server-<版本>-<平台>.tar.gz`（`scion`：服务端、区域缓存和管理命令）和客户端 `scn-<版本>-<平台>.tar.gz`。平台有 `x86_64-unknown-linux-gnu`、`aarch64-unknown-linux-gnu`（需要 glibc 2.35 及以上）、`aarch64-apple-darwin` 和 `x86_64-apple-darwin`；`SHA256SUMS` 列出校验和。
 
 ```sh
-V=v0.1.0 T=x86_64-unknown-linux-gnu
+V=v0.1.1 T=x86_64-unknown-linux-gnu
 for p in scion-server scn; do
   curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
 done
@@ -29,7 +59,7 @@ macOS 上用 `shasum -a 256 --check --ignore-missing SHA256SUMS` 校验。二进
 
 仓库根目录的 `Dockerfile` 构建一个包含 `scion`（服务端、区域缓存、管理命令）和 `scn`（客户端）的镜像，以非 root 用户（uid 10001）运行。
 
-预构建的镜像是 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest`、`0.1.0`），包含 `linux/amd64` 与 `linux/arm64` 两种架构，Linux 服务器和 Mac（Docker Desktop，Apple 芯片与 Intel）都能直接运行。自己构建多架构镜像时，编译阶段在构建机的架构上交叉编译，不需要 QEMU 模拟：
+预构建的镜像是 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和版本号，例如 `0.1.1`），包含 `linux/amd64` 与 `linux/arm64` 两种架构，Linux 服务器和 Mac（Docker Desktop，Apple 芯片与 Intel）都能直接运行。自己构建多架构镜像时，编译阶段在构建机的架构上交叉编译，不需要 QEMU 模拟：
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/scion:latest --push .

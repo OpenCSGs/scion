@@ -68,19 +68,18 @@ Against Git on the same machine, CSG Scion's full and `apps/web` checkouts both 
 ## Quick start
 
 ```sh
-# A server in Lite mode (SQLite + a local directory), from source
-cargo run -p scion -- server --lite --data-dir ./.scion-data
-# or with PostgreSQL + S3-compatible storage: docker compose -f deploy/compose/docker-compose.yml up -d --build
+# Install the client and run the server as a service on 127.0.0.1:7080 (Linux or macOS)
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
 
-# In another terminal
-cargo install --path client/cli
-scn repo create mono
-scn clone mono && cd mono
+scn repo create http://127.0.0.1:7080/mono
+scn clone http://127.0.0.1:7080/mono && cd mono
 echo hello > README.md
 scn commit -m "add readme"
 scn land                          # move main to the commit; the server rebases if main moved
 scn log
 ```
+
+Without `--server`, the script installs only the client, `scn`. From source instead: `cargo run -p scion -- server --lite --data-dir ./.scion-data` and `cargo install --path client/cli`.
 
 **Know git?** Most git commands work in scn as you type them, starting with `scn clone http://host/REPO`: see [git commands in scn](docs/guide/git-commands.md) for the full list.
 
@@ -88,27 +87,22 @@ scn log
 
 ## Deployment
 
-Three ways to run it: release binaries on this machine, the container image on one node, or several nodes on PostgreSQL and S3.
+Three ways to run it: one command on this machine, the container image on one node, or several nodes on PostgreSQL and S3.
 
-The image `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and `0.1.0`) is built for `linux/amd64` and `linux/arm64`, so it runs on Linux servers and in Docker Desktop on Apple silicon and Intel Macs. It holds the server, `scion`, and the client, `scn`, runs as an unprivileged user, and requires authentication by default.
-
-**Local (release binaries, no Docker).** Each [release](https://github.com/OpenCSGs/scion/releases) has the server, `scion-server-<version>-<target>.tar.gz`, and the client, `scn-<version>-<target>.tar.gz`, for `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` (glibc 2.35 or newer), `aarch64-apple-darwin` and `x86_64-apple-darwin`, with `SHA256SUMS`.
+**On this machine, in one command (Linux or macOS).** [`install.sh`](install.sh) downloads the latest [release](https://github.com/OpenCSGs/scion/releases), checks it against `SHA256SUMS` and installs it:
 
 ```sh
-V=v0.1.0 T=aarch64-apple-darwin     # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
-for p in scion-server scn; do
-  curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
-done
-sudo install scion-server-$V-$T/scion scn-$V-$T/scn /usr/local/bin/
-
-scion server --lite --data-dir ~/.scion-data &       # listens on 127.0.0.1:7080; no token needed on loopback
-scn repo create http://127.0.0.1:7080/mono
-scn clone http://127.0.0.1:7080/mono && cd mono
+# The client, scn
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh
+# and the server, as a service on 127.0.0.1:7080
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
+# for a team: authentication on, and the first administrator's token printed
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server --listen 0.0.0.0:7080
 ```
 
-To serve a team from this machine, add `--listen 0.0.0.0:7080 --auth-required` and create the first administrator as below, with `scion admin policy set --lite --data-dir ~/.scion-data acl.toml` and `scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins`.
+The server runs under systemd on Linux (user `scion`, data in `/var/lib/scion`) and launchd on macOS (data in `~/Library/Application Support/scion`). `--version`, `--data-dir`, `--no-service` and `--install-dir` change the defaults, and `SCION_DOWNLOAD_URL` points at a mirror of the release files; `sh install.sh --help` lists them. To install the release files by hand instead, see [release binaries](docs/guide/deploy.md#release-binaries).
 
-**One node in Docker (Lite: SQLite and a local directory).**
+**One node in Docker (Lite: SQLite and a local directory).** The image `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and a version such as `0.1.1`) is built for `linux/amd64` and `linux/arm64`, so it runs on Linux servers and in Docker Desktop on Apple silicon and Intel Macs. It holds the server, `scion`, and the client, `scn`, runs as an unprivileged user, and requires authentication by default.
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest

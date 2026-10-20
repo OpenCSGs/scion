@@ -4,10 +4,40 @@ English | [简体中文](deploy.zh-CN.md)
 
 ## Release binaries
 
+### The installer
+
+[`install.sh`](../../install.sh) installs the latest release on Linux or macOS: it picks the platform's packages, checks them against `SHA256SUMS`, and puts `scn` (and with `--server`, `scion`) in `/usr/local/bin`, or in a directory of the user's on `PATH` when that needs no sudo.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh                       # the client
+curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server        # and the server as a service
+```
+
+With `--server`, the server runs in Lite mode as a service:
+
+| | Linux | macOS |
+|---|---|---|
+| Service | systemd unit `scion`, as the system user `scion` | launchd agent `com.opencsg.scion`, as you |
+| Data | `/var/lib/scion` | `~/Library/Application Support/scion` |
+| Logs | `journalctl -u scion` | `~/Library/Logs/scion.log` |
+| Stop | `sudo systemctl stop scion` | `launchctl bootout gui/$(id -u)/com.opencsg.scion` |
+
+| Option | Default | What |
+|---|---|---|
+| `--listen ADDR` | `127.0.0.1:7080` | Beyond loopback, the service requires authentication, and the installer writes a policy (admins manage everything; anyone signed in can read, write and land) and prints the first administrator's token. Run again, it keeps an existing policy |
+| `--data-dir DIR` | as above | |
+| `--no-service` | | Install the binaries only, and print how to start the server |
+| `--version vX.Y.Z` | the latest | Also `SCION_VERSION` |
+| `--install-dir DIR` | as above | Also `SCION_INSTALL_DIR` |
+
+`SCION_DOWNLOAD_URL` replaces `https://github.com/OpenCSGs/scion/releases/download` with a mirror holding the same `<tag>/<file>` layout, where GitHub is slow or unreachable. Without systemd (in a container, say), the installer installs the binaries and prints the command to start the server.
+
+### By hand
+
 Each [GitHub release](https://github.com/OpenCSGs/scion/releases) has two packages per platform: the server, `scion-server-<version>-<target>.tar.gz` (`scion`: server, regional cache and admin commands), and the client, `scn-<version>-<target>.tar.gz`. The targets are `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (glibc 2.35 or newer) and `aarch64-apple-darwin` and `x86_64-apple-darwin`; `SHA256SUMS` lists the checksums.
 
 ```sh
-V=v0.1.0 T=x86_64-unknown-linux-gnu
+V=v0.1.1 T=x86_64-unknown-linux-gnu
 for p in scion-server scn; do
   curl -fsSLO https://github.com/OpenCSGs/scion/releases/download/$V/$p-$V-$T.tar.gz && tar -xzf $p-$V-$T.tar.gz
 done
@@ -29,7 +59,7 @@ On macOS, use `shasum -a 256 --check --ignore-missing SHA256SUMS`. The binaries 
 
 The `Dockerfile` at the repository root builds an image with `scion` (the server, the regional cache and the admin commands) and `scn` (the client). It runs as an unprivileged user (uid 10001).
 
-The prebuilt image is `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and `0.1.0`), for `linux/amd64` and `linux/arm64`: it runs on Linux servers and in Docker Desktop on Macs, Apple silicon and Intel alike. A multi-arch build of your own cross-compiles on the build machine's architecture, without QEMU emulation:
+The prebuilt image is `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and a version such as `0.1.1`), for `linux/amd64` and `linux/arm64`: it runs on Linux servers and in Docker Desktop on Macs, Apple silicon and Intel alike. A multi-arch build of your own cross-compiles on the build machine's architecture, without QEMU emulation:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/scion:latest --push .

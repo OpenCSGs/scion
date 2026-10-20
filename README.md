@@ -43,13 +43,13 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 
 | Scenario | Git, M5 | CSG Scion, M5 | Git, M4 Pro | CarterT27, M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
-| Full checkout (28,068 files) | 2.65 s | **2.28 s** | 2.90 s | 14.96 s |
-| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 0.21 s | 0.97 s |
-| Clean status | **98 ms** | 153 ms | — | — |
+| Full checkout (28,068 files) | 2.13 s | 2.20 s | 2.90 s | 14.96 s |
+| Checkout of `apps/web` (1,521 files) | 0.173 s | 0.178 s | 0.21 s | 0.97 s |
+| Clean status | 98 ms | **75 ms** | — | — |
 | Full history: Git's clone, Scion's import | 3.96 s | 103 s + 42 s repack | 3.56 s | 23 min 18 s |
 | Storage of the history | 557 MB pack | 247 MB in MinIO + 90 MB in PostgreSQL | — | — |
 
-Against Git on the same machine, CSG Scion's full checkout takes 0.86× Git's time and its `apps/web` checkout 1.03×; CarterT27/scion's take 5.2× and 4.6×. Its clean status is 1.6× Git's. A Scion import builds and stores every commit on the server, so it is compared with the other implementation's import rather than with Git's clone; CarterT27/scion publishes no status or storage numbers. Every checkout is checked file by file against Git, and Git's pack is the one cloned from GitHub, not repacked.
+Against Git on the same machine, CSG Scion's full and `apps/web` checkouts both take 1.03× Git's time; CarterT27/scion's take 5.2× and 4.6×. Its clean status takes 0.77× Git's. A Scion import builds and stores every commit on the server, so it is compared with the other implementation's import rather than with Git's clone; CarterT27/scion publishes no status or storage numbers. Every checkout is checked file by file against Git, and Git's pack is the one cloned from GitHub, not repacked.
 
 - [Report: CarterT27/scion's benchmarks](docs/reports/2026-10-20-openscion-workloads.md), with the method, every number and how to rerun it.
 - [Report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, compared with starhub's Gitaly + MinIO stack and with libgit2.

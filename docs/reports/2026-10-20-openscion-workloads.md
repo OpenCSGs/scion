@@ -12,9 +12,9 @@ The scripts are in [`bench/openscion/`](../../bench/openscion/README.md).
   - against Git: 2–12× faster;
   - against CarterT27, both with token authentication: 1.8–2.2× faster for full checkouts, 1.1–2.5× for one-directory checkouts, 2.1–4× for commits and 7–17% for imports.
 - **t3code, 28,068 files**:
-  - **checkout: on par with Git.** The full checkout takes 2.28 s against Git's 2.65 s; the sparse checkout of `apps/web` takes 0.178 s against 0.172 s. CarterT27 reports 5.2× and 4.6× Git's time for the same checkouts.
+  - **checkout: on par with Git.** The full checkout takes 2.20 s against Git's 2.13 s; the sparse checkout of `apps/web` takes 0.178 s against 0.173 s. CarterT27 reports 5.2× and 4.6× Git's time for the same checkouts.
   - **import: 103 s plus a 42 s repack.** CarterT27 reports 23 min 18 s.
-  - **status is 1.6× Git's time.** Scanning a 28k-file working copy is the slow spot.
+  - **status: faster than Git.** A clean status takes 75 ms against Git's 98 ms, scanning the working tree on several threads (`b0d3127`; 153 ms before).
 - **Two bugs found and fixed on the way**, neither of which starhub-server's history hits:
   - the importer failed on a commit that removes a submodule (`5109efb`);
   - an empty file in a large pack could not be read (`4a2bf9b`).
@@ -54,18 +54,19 @@ CSG Scion and Git ran on the M5; the M4 Pro columns are CarterT27/scion's publis
 
 | Scenario | Git, M5 | CSG Scion, M5 | Git, M4 Pro | CarterT27, M4 Pro |
 |---|---:|---:|---:|---:|
-| Full checkout (28,068 files) | 2.65 s | **2.28 s** | 2.90 s | 14.96 s |
-| Checkout of `apps/web` (1,521 files) | 0.172 s | 0.178 s | 0.21 s | 0.97 s |
-| First checkout after a restart, full / `apps/web` | 2.66 / 0.222 s | 2.96 / 0.186 s | — | — |
-| Clean status | **98 ms** | 153 ms | — | — |
-| Status with one edited file | **98 ms** | 154 ms | — | — |
-| Clean status, `apps/web` only | 11.8 ms | **8.7 ms** | — | — |
-| 100 first-parent history entries | **6.5 ms** | 10.7 ms | — | — |
-| Read README.md | **5.9 ms** | 11.8 ms | — | — |
+| Full checkout (28,068 files) | 2.13 s | 2.20 s | 2.90 s | 14.96 s |
+| Checkout of `apps/web` (1,521 files) | 0.173 s | 0.178 s | 0.21 s | 0.97 s |
+| First checkout after a restart, full / `apps/web` | 2.38 / 0.181 s | 2.48 / 0.187 s | — | — |
+| Clean status | 98 ms | **75 ms** | — | — |
+| Status with one edited file | 98 ms | **74 ms** | — | — |
+| Clean status, `apps/web` only | 11.3 ms | **7.0 ms** | — | — |
+| 100 first-parent history entries | **6.4 ms** | 11.7 ms | — | — |
+| Read README.md | **5.6 ms** | 10.5 ms | — | — |
 | Full history: Git's clone, Scion's import | 3.96 s | 103 s + 42 s repack | 3.56 s | 23 min 18 s |
 
-Against Git on the same machine, CSG Scion's full checkout takes 0.86× Git's time and its `apps/web` checkout 1.03×; CarterT27/scion's take 5.2× and 4.6×. CarterT27/scion publishes no numbers for the other rows. A Scion import builds and stores every commit on the server, so imports compare across the two implementations, not with Git's clone (`git clone --no-local --single-branch --no-checkout` of the bare repository, as in CarterT27's script).
+Against Git on the same machine, CSG Scion's full and `apps/web` checkouts both take 1.03× Git's time; CarterT27/scion's take 5.2× and 4.6×. CarterT27/scion publishes no numbers for the other rows. A Scion import builds and stores every commit on the server, so imports compare across the two implementations, not with Git's clone (`git clone --no-local --single-branch --no-checkout` of the bare repository, as in CarterT27's script).
 
+- The checkout and command rows are from a rerun on the same import after the status change (`b0d3127`) and the checkout's path checks (`173843c`, `bb481dd`). Full checkouts vary from run to run on both sides (Git 2.07–2.64 s, Scion 2.06–2.32 s); the first run had Scion's at 2.28 s against Git's 2.65 s.
 - Scion's sparse checkout also writes the 17 files at the repository's root (1,538 files); Git's sparse pattern here is `apps/web` only.
 - The command rows include starting `scn`, a few milliseconds; CarterT27's synthetic numbers exclude its process start.
 

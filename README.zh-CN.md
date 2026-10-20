@@ -43,13 +43,13 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 
 | 场景 | Git，M5 | CSG Scion，M5 | Git，M4 Pro | CarterT27，M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
-| 完整检出（28,068 个文件） | 2.65 秒 | **2.28 秒** | 2.90 秒 | 14.96 秒 |
-| 检出 `apps/web`（1,521 个文件） | 0.172 秒 | 0.178 秒 | 0.21 秒 | 0.97 秒 |
-| 干净工作区的 status | **98 ms** | 153 ms | — | — |
+| 完整检出（28,068 个文件） | 2.13 秒 | 2.20 秒 | 2.90 秒 | 14.96 秒 |
+| 检出 `apps/web`（1,521 个文件） | 0.173 秒 | 0.178 秒 | 0.21 秒 | 0.97 秒 |
+| 干净工作区的 status | 98 ms | **75 ms** | — | — |
 | 完整历史：Git 克隆、Scion 导入 | 3.96 秒 | 103 秒 + repack 42 秒 | 3.56 秒 | 23 分 18 秒 |
 | 历史占用的存储 | pack 557 MB | MinIO 247 MB + PostgreSQL 90 MB | — | — |
 
-和同一台机器上的 Git 相比，CSG Scion 完整检出用时是 Git 的 0.86 倍，检出 `apps/web` 是 1.03 倍；CarterT27/scion 分别是 5.2 倍和 4.6 倍。CSG Scion 的干净工作区 status 是 Git 的 1.6 倍。Scion 的导入要在服务端构建并存下每一个提交，所以拿来和另一个实现的导入比，而不是和 Git 的克隆比；CarterT27/scion 没有公布 status 和存储的数字。每次检出都逐个文件和 Git 核对；Git 的 pack 是从 GitHub 直接克隆下来的，没有重新打包。
+和同一台机器上的 Git 相比，CSG Scion 完整检出和检出 `apps/web` 的用时都是 Git 的 1.03 倍；CarterT27/scion 分别是 5.2 倍和 4.6 倍。CSG Scion 的干净工作区 status 用时是 Git 的 0.77 倍。Scion 的导入要在服务端构建并存下每一个提交，所以拿来和另一个实现的导入比，而不是和 Git 的克隆比；CarterT27/scion 没有公布 status 和存储的数字。每次检出都逐个文件和 Git 核对；Git 的 pack 是从 GitHub 直接克隆下来的，没有重新打包。
 
 - [报告：CarterT27/scion 的测试](docs/reports/2026-10-20-openscion-workloads.md)（英文）：方法、全部数据和复现方式。
 - [报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的对比。

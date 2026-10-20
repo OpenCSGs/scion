@@ -1137,3 +1137,75 @@ async fn repo_and_branch_commands() {
     .expect("join");
     let _ = tx.send(());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repository_urls_name_the_server() {
+    let store = Arc::new(MemStore::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, async {
+        let _ = rx.await;
+    }));
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || {
+        let repo_url = format!("{u}/org/app");
+        // No --endpoint anywhere: the server comes from the URL
+        json_of(&scn_in(&root, &["repo", "create", &repo_url, "--json"]));
+        let v = json_of(&scn_in(&root, &["repo", "info", &repo_url, "--json"]));
+        assert_eq!(v["name"], "org/app");
+        let v = json_of(&scn_in(&root, &["repo", "ls", &format!("{u}/"), "--json"]));
+        assert_eq!(v["repos"].as_array().map(Vec::len), Some(1));
+        json_of(&scn_in(&root, &["doctor", &u, "--json"]));
+        assert_ne!(
+            scn_in(&root, &["whoami", &u]).status.code(),
+            Some(2),
+            "a server URL is accepted"
+        );
+        assert_eq!(scn_in(&root, &["whoami", "host:1"]).status.code(), Some(2));
+
+        let v = json_of(&scn_in(&root, &["clone", &format!("{repo_url}/"), "--json"]));
+        assert_eq!(v["repo"], "org/app");
+        let wc = root.join("app");
+
+        // Inside the working copy, the server it was cloned from is remembered
+        std::fs::write(wc.join("README.md"), "hello\n").expect("write");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "readme", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let v = json_of(&scn_in(&wc, &["log", "--json"]));
+        assert_eq!(v["entries"].as_array().map(Vec::len), Some(1));
+
+        // --repo takes a URL too, outside a working copy
+        let out = scn_in(&root, &["cat", "README.md", "--repo", &repo_url]);
+        assert_eq!(out.stdout, b"hello\n");
+        json_of(&scn_in(
+            &root,
+            &["repo", "fork", &repo_url, &format!("{u}/org/fork"), "--json"],
+        ));
+        let out = scn_in(&root, &["cat", "README.md", "--repo", &format!("{u}/org/fork")]);
+        assert_eq!(out.stdout, b"hello\n");
+
+        // Malformed URLs are usage errors
+        assert_eq!(scn_in(&root, &["clone", &format!("{u}/a?b")]).status.code(), Some(2));
+        assert_eq!(scn_in(&root, &["clone", &u]).status.code(), Some(2));
+        assert_eq!(
+            scn_in(&root, &["repo", "fork", &repo_url, "http://elsewhere:1/x"])
+                .status
+                .code(),
+            Some(2)
+        );
+    })
+    .await
+    .expect("join");
+    let _ = tx.send(());
+}

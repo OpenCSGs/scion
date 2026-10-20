@@ -27,7 +27,8 @@ struct Cli {
     /// Server address; defaults to the working copy's, then http://127.0.0.1:7080.
     #[arg(long, global = true, env = "SCION_ENDPOINT")]
     endpoint: Option<String>,
-    /// Repository, for commands run outside a working copy.
+    /// Repository, for commands run outside a working copy: a name, or its URL
+    /// http(s)://host[:port]/REPOSITORY (whose server then replaces --endpoint).
     #[arg(long, global = true, env = "SCION_REPO")]
     repo: Option<String>,
     /// Print JSON (with a schema field) for agents and scripts.
@@ -40,11 +41,15 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Check the connection to the server and what it supports.
-    Doctor,
+    Doctor {
+        /// The server, http(s)://host[:port]; instead of --endpoint.
+        server: Option<String>,
+    },
     /// Print the client and protocol versions.
     Version,
     /// Check out a repository into a local directory.
     Clone {
+        /// A repository name, or its URL: http(s)://host[:port]/REPOSITORY.
         repo: String,
         dir: Option<PathBuf>,
         #[arg(long = "ref", default_value = "main")]
@@ -268,6 +273,8 @@ enum Command {
     Import(ImportCmd),
     /// Log in to the server: in a browser (OIDC device flow) by default, or with an existing token (PAT).
     Login {
+        /// The server, http(s)://host[:port]; instead of --endpoint.
+        server: Option<String>,
         /// Log in with this token instead of a browser.
         #[arg(long, value_name = "TOKEN", conflicts_with = "with_token")]
         token: Option<String>,
@@ -276,9 +283,15 @@ enum Command {
         with_token: bool,
     },
     /// Delete the saved credentials.
-    Logout,
+    Logout {
+        /// The server, http(s)://host[:port]; instead of --endpoint.
+        server: Option<String>,
+    },
     /// Show who you are logged in as.
-    Whoami,
+    Whoami {
+        /// The server, http(s)://host[:port]; instead of --endpoint.
+        server: Option<String>,
+    },
     /// The local daemon (L1 cache), started on demand by other commands; `SCION_NO_DAEMON=1` turns it off.
     #[command(subcommand)]
     Daemon(DaemonCmd),
@@ -451,47 +464,88 @@ async fn run(cli: Cli) -> ExitCode {
             );
         }
     };
-    let ctx = Ctx {
+    let json = cli.json;
+    let mut ctx = Ctx {
         endpoint: cli.endpoint.clone(),
-        repo: cli.repo.clone(),
+        repo: None,
         cwd,
     };
-    let json = cli.json;
+    // A repository or server given as a URL replaces --endpoint for this command.
+    macro_rules! arg {
+        ($e:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => return fail(&e, json),
+            }
+        };
+    }
+    if let Some(r) = &cli.repo {
+        ctx.repo = Some(arg!(ctx.named_repo_arg(r)));
+    }
     match cli.command {
         Command::Version => emit(Ok(version_out()), json),
-        Command::Doctor => emit(commands::doctor(&ctx).await, json),
+        Command::Doctor { server } => {
+            if let Some(s) = server {
+                arg!(ctx.server_arg(&s));
+            }
+            emit(commands::doctor(&ctx).await, json)
+        }
         Command::Clone {
             repo,
             dir,
             reference,
             sparse,
-        } => emit(
-            commands::clone(&ctx, &repo, dir.as_deref(), &reference, sparse.as_deref()).await,
-            json,
-        ),
+        } => {
+            let repo = arg!(ctx.named_repo_arg(&repo));
+            emit(
+                commands::clone(&ctx, &repo, dir.as_deref(), &reference, sparse.as_deref()).await,
+                json,
+            )
+        }
         Command::Sparse(cmd) => emit(commands::sparse(&ctx, cmd).await, json),
         Command::Repo(cmd) => match cmd {
             RepoCmd::Create {
                 name,
                 default_branch,
                 description,
-            } => emit(
-                repos::create(&ctx, &name, default_branch.as_deref(), &description).await,
-                json,
-            ),
-            RepoCmd::Ls { prefix, deleted, limit } => emit(repos::list(&ctx, &prefix, deleted, limit).await, json),
-            RepoCmd::Info { name } => emit(repos::info(&ctx, &name).await, json),
+            } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(
+                    repos::create(&ctx, &name, default_branch.as_deref(), &description).await,
+                    json,
+                )
+            }
+            RepoCmd::Ls { prefix, deleted, limit } => {
+                let prefix = arg!(ctx.repo_arg(&prefix));
+                emit(repos::list(&ctx, &prefix, deleted, limit).await, json)
+            }
+            RepoCmd::Info { name } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(repos::info(&ctx, &name).await, json)
+            }
             RepoCmd::Set {
                 name,
                 default_branch,
                 description,
-            } => emit(
-                repos::update(&ctx, &name, default_branch.as_deref(), description.as_deref()).await,
-                json,
-            ),
-            RepoCmd::Rm { name } => emit(repos::delete(&ctx, &name).await, json),
-            RepoCmd::Restore { name } => emit(repos::restore(&ctx, &name).await, json),
-            RepoCmd::Fork { source, target } => emit(repos::fork(&ctx, &source, &target).await, json),
+            } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(
+                    repos::update(&ctx, &name, default_branch.as_deref(), description.as_deref()).await,
+                    json,
+                )
+            }
+            RepoCmd::Rm { name } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(repos::delete(&ctx, &name).await, json)
+            }
+            RepoCmd::Restore { name } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(repos::restore(&ctx, &name).await, json)
+            }
+            RepoCmd::Fork { source, target } => {
+                let (source, target) = arg!(ctx.fork_args(&source, &target));
+                emit(repos::fork(&ctx, &source, &target).await, json)
+            }
         },
         Command::Branch {
             cmd,
@@ -744,7 +798,14 @@ async fn run(cli: Cli) -> ExitCode {
             Ok(path) => emit(history::diff(&ctx, &revisions, path.as_deref(), name_only).await, json),
             Err(e) => fail(&e, json),
         },
-        Command::Login { token, with_token } => {
+        Command::Login {
+            server,
+            token,
+            with_token,
+        } => {
+            if let Some(s) = server {
+                arg!(ctx.server_arg(&s));
+            }
             let token = if with_token {
                 let mut s = String::new();
                 match std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
@@ -759,8 +820,18 @@ async fn run(cli: Cli) -> ExitCode {
                 None => emit(login::login_device(&ctx, |m| eprintln!("{m}")).await, json),
             }
         }
-        Command::Logout => emit(login::logout(&ctx), json),
-        Command::Whoami => emit(login::whoami(&ctx).await, json),
+        Command::Logout { server } => {
+            if let Some(s) = server {
+                arg!(ctx.server_arg(&s));
+            }
+            emit(login::logout(&ctx), json)
+        }
+        Command::Whoami { server } => {
+            if let Some(s) = server {
+                arg!(ctx.server_arg(&s));
+            }
+            emit(login::whoami(&ctx).await, json)
+        }
         Command::Daemon(cmd) => {
             let mut cfg = daemon::config(|k| std::env::var(k).ok());
             match cmd {
@@ -950,10 +1021,16 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Login {
+                server: None,
                 token: Some(_),
                 with_token: false
             }
         ));
+        let cli = Cli::try_parse_from(["scn", "login", "https://h", "--token", "t"]).expect("parse");
+        assert!(matches!(cli.command, Command::Login { server: Some(ref s), .. } if s == "https://h"));
+        for cmd in ["doctor", "logout", "whoami"] {
+            assert!(Cli::try_parse_from(["scn", cmd, "http://h:1"]).is_ok(), "{cmd}");
+        }
         assert!(Cli::try_parse_from(["scn", "login", "--token", "t", "--with-token"]).is_err());
         let cli = Cli::try_parse_from(["scn", "daemon", "stop"]).expect("parse");
         assert!(matches!(cli.command, Command::Daemon(DaemonCmd::Stop)));

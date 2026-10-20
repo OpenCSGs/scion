@@ -35,8 +35,8 @@ docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]
 # The first token (shown only this once)
 docker exec scion scion admin token create --lite --subject admin --group admins
 
-scn --endpoint http://localhost:7080 login --token scn_pat_…
-scn --endpoint http://localhost:7080 repo create mono
+scn login http://localhost:7080 --token scn_pat_…
+scn repo create http://localhost:7080/mono
 ```
 
 The server refuses to start when it listens beyond loopback without authentication, since anyone who can reach it could then read and write every repository. To run anonymously anyway (for example, for a test on an internal network), add `--allow-anonymous` (`SCION_ALLOW_ANONYMOUS=true`):
@@ -69,9 +69,9 @@ REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.ym
 # With the regional cache as well (7090)
 docker compose -f deploy/compose/docker-compose.yml --profile cache up -d
 
-scn --endpoint http://localhost:7080 doctor
-scn --endpoint http://localhost:7080 repo create demo
-scn --endpoint http://localhost:7080 clone demo
+scn doctor http://localhost:7080
+scn repo create http://localhost:7080/demo
+scn clone http://localhost:7080/demo
 curl -s localhost:9464/metrics | head
 ```
 

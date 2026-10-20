@@ -34,8 +34,8 @@ docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]
 # 第一个令牌（只显示这一次）
 docker exec scion scion admin token create --lite --subject admin --group admins
 
-scn --endpoint http://localhost:7080 login --token scn_pat_…
-scn --endpoint http://localhost:7080 repo create mono
+scn login http://localhost:7080 --token scn_pat_…
+scn repo create http://localhost:7080/mono
 ```
 
 服务端监听在回环地址以外、又没有开认证时拒绝启动，因为能连上的人都能读写所有仓库。确实要匿名运行（例如只在内网测试）时加 `--allow-anonymous`（`SCION_ALLOW_ANONYMOUS=true`）：
@@ -68,9 +68,9 @@ REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.ym
 # 同时启动区域缓存（7090）
 docker compose -f deploy/compose/docker-compose.yml --profile cache up -d
 
-scn --endpoint http://localhost:7080 doctor
-scn --endpoint http://localhost:7080 repo create demo
-scn --endpoint http://localhost:7080 clone demo
+scn doctor http://localhost:7080
+scn repo create http://localhost:7080/demo
+scn clone http://localhost:7080/demo
 curl -s localhost:9464/metrics | head
 ```
 

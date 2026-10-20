@@ -19,7 +19,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | git | scn | Notes |
 |---|---|---|
 | `git init` | `scn repo create NAME` | Repositories live on the server |
-| `git clone URL [DIR]` | `scn clone REPO [DIR] [--ref B]` | Downloads the snapshot, not the history |
+| `git clone URL [DIR]` | `scn clone URL [DIR] [--ref B]`, or `scn --endpoint SERVER clone REPO` | `URL` is `http(s)://host[:port]/REPO`. Downloads the snapshot, not the history; inside the working copy, commands need no address |
 | `git clone --sparse` + `git sparse-checkout set` | `scn clone REPO --sparse src --sparse docs`, `scn sparse set/add/rm/disable` | Directories; `--sparse a,b` works too |
 | `git status` | `scn status` | `A` / `M` / `D`, plus `C` for conflicts |
 | `git add`, `git rm`, `git mv` | not needed | Just change the files |

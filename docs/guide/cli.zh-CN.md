@@ -24,6 +24,8 @@ scn repo create mono                # 仓库和分支：scn repo / scn branch（
 
 # 日常工作流
 scn clone mono && cd mono          # 检出（默认 ref 为 main；空仓库也可以）
+# 也可以像 git 一样用一个 URL 同时写服务端和仓库，进入工作副本后不用再写地址：
+# scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # 支持 .gitignore 和 .scionignore（gitignore 语法）
 scn status                          # A .gitignore, A README.md
@@ -62,6 +64,15 @@ scn import git ~/src/my-repo --repo mono
 # 升级已有数据的服务端后、启动之前：修复提交谱系并补建派生索引（可以重复执行）
 cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
 ```
+
+## 服务端地址
+
+仓库有两种写法：
+
+- **URL，与 git 相同**：`http(s)://host[:port]/REPO`，例如 `scn clone http://scion.example.com:7080/org/app`。凡是写仓库的地方都可以用：`clone`、`--repo`（`scn cat README.md --repo http://host/org/app`），以及 `repo create / info / set / rm / restore / fork / ls`。只涉及服务端的命令直接写地址：`scn login URL`、`scn logout URL`、`scn whoami URL`、`scn doctor URL`。
+- **仓库名加服务端**：`scn --endpoint http://host:7080 clone org/app`，或者设置一次 `SCION_ENDPOINT`。
+
+工作副本会记住克隆时的服务端，所以进入目录后 `status`、`commit`、`land`、`sync`、`log` 等命令都不用再写地址。同时给出多个地址时，优先级依次是 URL 中的地址、`--endpoint` / `SCION_ENDPOINT`、工作副本记录的地址、`http://127.0.0.1:7080`。
 
 ## 检出不会写入的路径
 

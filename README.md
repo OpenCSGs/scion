@@ -100,8 +100,9 @@ docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]
 # and a token, shown only this once
 docker exec scion scion admin token create --lite --subject admin --group admins
 
-scn --endpoint http://localhost:7080 login --token scn_pat_…    # the policy takes effect within 30 s
-scn --endpoint http://localhost:7080 repo create mono
+scn login http://localhost:7080 --token scn_pat_…    # the policy takes effect within 30 s
+scn repo create http://localhost:7080/mono
+scn clone http://localhost:7080/mono && cd mono     # inside it, no address is needed
 ```
 
 **Production (Standard: PostgreSQL and S3-compatible storage).** Point the server at both through environment variables, and run the admin commands above without `--lite`:

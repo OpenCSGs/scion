@@ -63,6 +63,76 @@ impl Ctx {
     }
 }
 
+/// Splits a repository URL, `http(s)://host[:port]/REPO`, into the server's address and the
+/// repository name (empty when the URL names only the server). Anything else is `None`: a plain
+/// repository name.
+pub fn split_repo_url(s: &str) -> Result<Option<(String, String)>, CliError> {
+    let Some(scheme_end) = ["http://", "https://"]
+        .iter()
+        .find_map(|p| s.starts_with(p).then_some(p.len()))
+    else {
+        return Ok(None);
+    };
+    let (host, path) = s[scheme_end..].split_once('/').unwrap_or((&s[scheme_end..], ""));
+    if host.is_empty() || host.contains('@') || s.contains(['?', '#']) {
+        return Err(CliError::Usage(format!(
+            "{s}: expected http(s)://host[:port]/REPOSITORY"
+        )));
+    }
+    let repo = path.trim_matches('/');
+    if repo.split('/').any(str::is_empty) && !repo.is_empty() {
+        return Err(CliError::Usage(format!("{s}: empty segment in the repository name")));
+    }
+    Ok(Some((s[..scheme_end + host.len()].to_owned(), repo.to_owned())))
+}
+
+impl Ctx {
+    /// A repository argument that may be a URL: the server's address in it replaces
+    /// `--endpoint` / `SCION_ENDPOINT` for this command, and the repository name is returned.
+    pub fn repo_arg(&mut self, arg: &str) -> Result<String, CliError> {
+        match split_repo_url(arg)? {
+            Some((endpoint, repo)) => {
+                self.endpoint = Some(endpoint);
+                Ok(repo)
+            }
+            None => Ok(arg.to_owned()),
+        }
+    }
+
+    /// Like [`Ctx::repo_arg`], for arguments that must name a repository.
+    pub fn named_repo_arg(&mut self, arg: &str) -> Result<String, CliError> {
+        let repo = self.repo_arg(arg)?;
+        if repo.is_empty() {
+            return Err(CliError::Usage(format!("{arg}: the URL names no repository")));
+        }
+        Ok(repo)
+    }
+
+    /// `repo fork SOURCE TARGET`: either may be a URL, and URLs must name the same server,
+    /// since a fork stays on one server.
+    pub fn fork_args(&mut self, source: &str, target: &str) -> Result<(String, String), CliError> {
+        if let (Some((a, _)), Some((b, _))) = (split_repo_url(source)?, split_repo_url(target)?)
+            && a != b
+        {
+            return Err(CliError::Usage(format!(
+                "a fork stays on one server: {a} and {b} differ"
+            )));
+        }
+        Ok((self.named_repo_arg(source)?, self.named_repo_arg(target)?))
+    }
+
+    /// A server given as an argument (`scn login URL`): its address, without a path.
+    pub fn server_arg(&mut self, arg: &str) -> Result<(), CliError> {
+        match split_repo_url(arg)? {
+            Some((endpoint, _)) => {
+                self.endpoint = Some(endpoint);
+                Ok(())
+            }
+            None => Err(CliError::Usage(format!("{arg}: expected http(s)://host[:port]"))),
+        }
+    }
+}
+
 /// 连接服务端：默认经本机 daemon（必要时拉起它），daemon 不可用时直连。
 pub async fn connect(endpoint: &str, repo: Option<&str>) -> Result<Client, CliError> {
     let mut b = Client::builder()
@@ -1280,6 +1350,63 @@ mod tests {
             ..o
         };
         assert_eq!(o.text(), "nothing to import into r");
+    }
+
+    #[test]
+    fn split_repo_url_parses_server_and_repository() {
+        let ok = |s: &str| split_repo_url(s).expect("valid");
+        assert_eq!(ok("mono"), None);
+        assert_eq!(ok("org/mono"), None);
+        assert_eq!(
+            ok("http://host:7080/org/mono"),
+            Some(("http://host:7080".into(), "org/mono".into()))
+        );
+        assert_eq!(ok("https://h/mono/"), Some(("https://h".into(), "mono".into())));
+        assert_eq!(ok("http://h"), Some(("http://h".into(), String::new())));
+        assert_eq!(ok("http://h/"), Some(("http://h".into(), String::new())));
+        for bad in [
+            "http:///mono",
+            "http://u@h/mono",
+            "http://h/a?x=1",
+            "http://h/a#f",
+            "http://h/a//b",
+        ] {
+            assert!(matches!(split_repo_url(bad), Err(CliError::Usage(_))), "{bad}");
+        }
+    }
+
+    #[test]
+    fn repository_urls_replace_the_endpoint() {
+        let mut ctx = Ctx {
+            endpoint: Some("http://flag".into()),
+            ..Default::default()
+        };
+        assert_eq!(ctx.named_repo_arg("mono").expect("name"), "mono");
+        assert_eq!(ctx.endpoint.as_deref(), Some("http://flag"));
+        assert_eq!(ctx.named_repo_arg("http://h:1/org/mono").expect("url"), "org/mono");
+        assert_eq!(ctx.endpoint.as_deref(), Some("http://h:1"));
+        assert!(matches!(ctx.named_repo_arg("http://h:2"), Err(CliError::Usage(_))));
+        assert_eq!(ctx.repo_arg("http://h:3/").expect("prefix"), "");
+        assert_eq!(ctx.endpoint.as_deref(), Some("http://h:3"));
+
+        ctx.server_arg("https://s:4/ignored").expect("server");
+        assert_eq!(ctx.endpoint.as_deref(), Some("https://s:4"));
+        assert!(matches!(ctx.server_arg("s:4"), Err(CliError::Usage(_))));
+
+        let mut ctx = Ctx::default();
+        assert_eq!(
+            ctx.fork_args("http://h/a", "b").expect("fork"),
+            ("a".to_owned(), "b".to_owned())
+        );
+        assert_eq!(ctx.endpoint.as_deref(), Some("http://h"));
+        assert_eq!(
+            ctx.fork_args("http://h/a", "http://h/b").expect("same server"),
+            ("a".to_owned(), "b".to_owned())
+        );
+        assert!(matches!(
+            ctx.fork_args("http://h/a", "http://other/b"),
+            Err(CliError::Usage(_))
+        ));
     }
 
     #[test]

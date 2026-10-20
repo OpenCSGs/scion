@@ -24,6 +24,8 @@ scn repo create mono                # repositories and branches: scn repo / scn 
 
 # Everyday workflow
 scn clone mono && cd mono          # check out (ref main by default; empty repositories work too)
+# or name the server and repository in one URL, as with git; inside the working copy no address is needed:
+# scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
 scn status                          # A .gitignore, A README.md
@@ -62,6 +64,15 @@ scn import git ~/src/my-repo --repo mono
 # After upgrading a server that already has data, before starting it: repair lineage and backfill derived indexes (idempotent)
 cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
 ```
+
+## Server addresses
+
+A repository can be named in two ways:
+
+- **A URL, as with git:** `http(s)://host[:port]/REPO`, such as `scn clone http://scion.example.com:7080/org/app`. It works wherever a repository is named: `clone`, `--repo` (`scn cat README.md --repo http://host/org/app`), and `repo create / info / set / rm / restore / fork / ls`. Commands about the server alone take its address: `scn login URL`, `scn logout URL`, `scn whoami URL`, `scn doctor URL`.
+- **A name and a server:** `scn --endpoint http://host:7080 clone org/app`, or `SCION_ENDPOINT` set once.
+
+A working copy remembers the server it was cloned from, so inside it `status`, `commit`, `land`, `sync`, `log` and the rest need no address. Where several are given, the address in a URL comes first, then `--endpoint` / `SCION_ENDPOINT`, then the working copy's, then `http://127.0.0.1:7080`.
 
 ## What a checkout will not write
 

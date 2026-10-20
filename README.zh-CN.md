@@ -100,8 +100,9 @@ docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]
 # 再签发令牌，令牌只显示这一次
 docker exec scion scion admin token create --lite --subject admin --group admins
 
-scn --endpoint http://localhost:7080 login --token scn_pat_…    # 策略在 30 秒内生效
-scn --endpoint http://localhost:7080 repo create mono
+scn login http://localhost:7080 --token scn_pat_…    # 策略在 30 秒内生效
+scn repo create http://localhost:7080/mono
+scn clone http://localhost:7080/mono && cd mono     # 进入目录后不用再写地址
 ```
 
 **生产环境（Standard 档：PostgreSQL + S3 兼容存储）。** 用环境变量指定两者；上面的管理命令去掉 `--lite` 即可：

@@ -37,6 +37,8 @@ jobs:
 
   build:
     needs: check
+    # The Apple signing secrets live in the release environment
+    environment: release
     strategy:
       fail-fast: false
       matrix:

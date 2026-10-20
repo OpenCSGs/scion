@@ -195,7 +195,7 @@ const PACK_BLOCK: u64 = 1 << 20;
 const BLOCK_CACHE: u64 = 128 << 20;
 const MAX_BLOCKS_PER_READ: u64 = 4;
 /// Longest delta chain repack writes, and the longest a read follows (damaged data could loop).
-const MAX_DELTA_DEPTH: u8 = 16;
+const MAX_DELTA_DEPTH: u8 = 50;
 const MAX_READ_DEPTH: u8 = 64;
 /// Repack packs objects up to this size (larger ones stay loose), into packs of this size.
 const REPACK_MAX_OBJECT: usize = 8 << 20;
@@ -1434,6 +1434,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repack_cuts_chains_at_the_maximum_depth() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (s, index) = packed(dir.path());
+        let n = usize::from(MAX_DELTA_DEPTH) + 2;
+        let vs: Vec<(ObjectId, Bytes)> = (0..n)
+            .map(|v| {
+                let d: String = (0..n).map(|i| format!("line {i}: {}\n", u8::from(i == v))).collect();
+                let d = Bytes::from(d);
+                (ObjectId::of_blob(&d), d)
+            })
+            .collect();
+        s.put_many(&vs).await.expect("pack");
+        let stats = s.repack(&chain(&vs)).await.expect("repack");
+        // The newest whole, MAX_DELTA_DEPTH deltas, then whole again
+        assert_eq!((stats.packed, stats.deltas), (n, n - 2));
+        let fresh = ObjectBlobStore::local(dir.path()).expect("open").with_packs(index);
+        for (id, d) in vs.iter().rev() {
+            assert_eq!(fresh.get(id).await.as_ref(), Ok(&Some(d.clone())));
+        }
+    }
+
+    #[tokio::test]
     async fn repack_stores_versions_as_deltas_and_prune_removes_what_it_superseded() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (s, index) = packed(dir.path());
@@ -1448,8 +1470,8 @@ mod tests {
             .map(|f| f.metadata().expect("meta").len())
             .sum();
         let stats = s.repack(&chain(&vs)).await.expect("repack");
-        // The chain is cut at MAX_DELTA_DEPTH: v20 whole, 16 deltas, one whole, 3 deltas
-        assert_eq!((stats.packed, stats.deltas, stats.packs, stats.missing), (21, 19, 1, 0));
+        // v20 whole, the others deltas
+        assert_eq!((stats.packed, stats.deltas, stats.packs, stats.missing), (21, 20, 1, 0));
         let fresh = || {
             ObjectBlobStore::local(dir.path())
                 .expect("open")

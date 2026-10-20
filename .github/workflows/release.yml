@@ -94,7 +94,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - run: cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS && cp ../install.sh .
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,3 +106,38 @@ jobs:
           else
             gh release create "$TAG" dist/* --title "$TAG" --verify-tag "${notes[@]}"
           fi
+
+  # The published release, installed the way users install it
+  verify:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+      - name: Install the client and the server as a service, and use them
+        env:
+          SCION_NO_DAEMON: "1"
+        run: |
+          sh install.sh --server --version "$TAG"
+          scn --version
+          scn repo create http://127.0.0.1:7080/mono
+          cd "$RUNNER_TEMP" && scn clone http://127.0.0.1:7080/mono && cd mono
+          echo hello > README.md
+          scn commit -m readme --author "CI <ci@example.com>" && scn land && scn log
+      - name: An address beyond loopback requires the printed token
+        env:
+          SCION_NO_DAEMON: "1"
+        run: |
+          out=$(sh install.sh --server --version "$TAG" --listen 0.0.0.0:7081)
+          echo "$out"
+          token=$(printf '%s\n' "$out" | sed -n 's/.*scn login [^ ]* --token //p')
+          test -n "$token"
+          export SCION_CREDENTIALS_FILE="$RUNNER_TEMP/creds.json"
+          ! scn repo create http://127.0.0.1:7081/denied
+          scn login http://127.0.0.1:7081 --token "$token"
+          scn repo create http://127.0.0.1:7081/team

@@ -25,6 +25,14 @@ jobs:
       # 依赖方向：客户端不得依赖服务端，服务端内部只能依赖下层
       - run: cargo xtask layers
 
+  # The installer is POSIX sh, run as `curl … | sh` on Linux and macOS
+  install-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: shellcheck -s sh install.sh
+      - run: sh install.sh --help
+
   proto:
     runs-on: ubuntu-latest
     steps:

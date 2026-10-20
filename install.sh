@@ -216,11 +216,11 @@ bootstrap_auth() {
 }
 
 service_linux() {
-    command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || {
+    if ! command -v systemctl >/dev/null 2>&1 || ! [ -d /run/systemd/system ]; then
         warn "systemd is not running here, so no service was registered. Start the server with:"
         printf '  %s/scion %s\n' "$INSTALL_DIR" "$(server_args)"
         return 0
-    }
+    fi
     DATA_DIR="${DATA_DIR:-/var/lib/scion}"
     id scion >/dev/null 2>&1 || as_root useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin scion 2>/dev/null \
         || as_root useradd --system --home-dir "$DATA_DIR" --shell /sbin/nologin scion

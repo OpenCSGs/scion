@@ -145,8 +145,10 @@ async fn three_way(
             .flat_map(|(_, _, files)| files.iter().flatten().map(|f| f.id))
             .collect();
         let mut data = client.get_objects(&ids).await?.into_iter();
-        for (path, mode, [_, o, t]) in part {
-            let (Some(bd), Some(od), Some(td)) = (data.next(), data.next(), data.next()) else {
+        for (path, mode, [b, o, t]) in part {
+            // Added on both sides: no base, so an empty one
+            let bd = if b.is_some() { data.next() } else { Some(Bytes::new()) };
+            let (Some(bd), Some(od), Some(td)) = (bd, data.next(), data.next()) else {
                 return Err(Error::Corrupt(format!("no content fetched for {path}")));
             };
             let f = match merge::merge_lines(&bd, &od, &td) {
@@ -156,7 +158,11 @@ async fn three_way(
                     Final::Data(TreeFile { mode: *mode, id }, merged)
                 }
                 Err((kind, marked)) => Final::Conflict {
-                    kind,
+                    kind: if b.is_none() && kind == ConflictKind::Content {
+                        ConflictKind::AddAdd
+                    } else {
+                        kind
+                    },
                     marked: marked.map(Bytes::from),
                     ours: *o,
                     theirs: *t,

@@ -1268,3 +1268,60 @@ async fn checkout_refuses_paths_reserved_for_the_working_copy() {
     assert!(matches!(err, Error::UnsafePath { .. }), "{err}");
     assert!(err.to_string().contains(".scion/state.json"), "{err}");
 }
+
+#[tokio::test]
+async fn files_added_on_both_sides_conflict_with_markers() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&a_dir, "seed.txt", "seed\n");
+    a.commit(&c, "seed", None).await.expect("commit").expect("changes");
+    a.land(&c).await.expect("land");
+    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
+        .await
+        .expect("clone");
+
+    // Both add the same new file with different text: both sides appear between markers, as in git
+    write(&a_dir, "new.txt", "from alice\n");
+    a.commit(&c, "a", None).await.expect("commit").expect("changes");
+    a.land(&c).await.expect("land");
+    write(&b_dir, "new.txt", "from bob\n");
+    b.commit(&c, "b", None).await.expect("commit").expect("changes");
+    let err = b.sync(&c).await.expect_err("conflict");
+    assert!(
+        matches!(&err, Error::Conflict(p) if p == &vec!["new.txt".to_string()]),
+        "{err:?}"
+    );
+    let marked = std::fs::read_to_string(b_dir.join("new.txt")).expect("read");
+    assert!(
+        marked.contains("<<<<<<<") && marked.contains("from bob") && marked.contains("from alice"),
+        "{marked}"
+    );
+    assert_eq!(
+        b.state()
+            .conflict
+            .as_ref()
+            .map(|c| c.paths.values().map(|s| s.kind.clone()).collect::<Vec<_>>()),
+        Some(vec![ConflictKind::AddAdd.as_str().to_owned()])
+    );
+    assert!(matches!(
+        b.resolve(&c, &["new.txt".into()], None, false).await,
+        Err(Error::MarkersRemain(_))
+    ));
+    write(&b_dir, "new.txt", "from both\n");
+    assert!(
+        b.resolve(&c, &["new.txt".into()], None, false)
+            .await
+            .expect("resolve")
+            .is_empty()
+    );
+    b.commit(&c, "", None).await.expect("commit").expect("changes");
+    b.land(&c).await.expect("land");
+    let tip = c.log("main", None, 1, None).await.expect("log").entries.remove(0);
+    let content = c.read_file(&tip.id.to_string(), "new.txt").await.expect("read");
+    assert_eq!(&content[..], b"from both\n");
+}

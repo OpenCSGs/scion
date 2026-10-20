@@ -93,6 +93,11 @@ pub(crate) fn step(b: Option<TreeFile>, o: Option<TreeFile>, t: Option<TreeFile>
     let (b, o, t) = match (b, o, t) {
         (_, None, Some(_)) => return Step::Conflict(ConflictKind::DeleteModify),
         (_, Some(_), None) => return Step::Conflict(ConflictKind::ModifyDelete),
+        // Added on both sides: text files merge lines against an empty base, as in git, so the
+        // conflict shows both sides; a symbolic link keeps ours
+        (None, Some(o), Some(t)) if o.mode != crate::Mode::Symlink && t.mode != crate::Mode::Symlink => {
+            return Step::Lines { mode: o.mode };
+        }
         (None, Some(_), Some(_)) => return Step::Conflict(ConflictKind::AddAdd),
         (Some(b), Some(o), Some(t)) => (b, o, t),
         // o == t covers (None, None)
@@ -179,7 +184,13 @@ mod tests {
         assert_eq!(step(None, None, b), Step::Done(Resolution::Take(b)), "theirs added");
         assert_eq!(step(a, None, b), Step::Conflict(ConflictKind::DeleteModify));
         assert_eq!(step(a, b, None), Step::Conflict(ConflictKind::ModifyDelete));
-        assert_eq!(step(None, b, c), Step::Conflict(ConflictKind::AddAdd));
+        assert_eq!(
+            step(None, b, c),
+            Step::Lines { mode: Mode::File },
+            "added on both sides"
+        );
+        let link = with_mode(Mode::Symlink, "t");
+        assert_eq!(step(None, link, c), Step::Conflict(ConflictKind::AddAdd));
         assert_eq!(step(a, None, None), Step::Same, "both deleted");
         assert_eq!(step(a, b, c), Step::Lines { mode: Mode::File });
         let link = with_mode(Mode::Symlink, "t");

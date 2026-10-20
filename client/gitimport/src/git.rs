@@ -220,13 +220,22 @@ pub fn parse_raw_diff(out: &[u8]) -> Result<Vec<Change>> {
         let path = String::from_utf8(path.to_vec())
             .map_err(|e| Error::NonUtf8Path(String::from_utf8_lossy(e.as_bytes()).into_owned()))?;
         let parts: Vec<&str> = meta.trim_start_matches(':').split(' ').collect();
-        let [_, new_mode, _, new_sha, status] = parts.as_slice() else {
+        let [old_mode, new_mode, _, new_sha, status] = parts.as_slice() else {
             return Err(Error::Parse(format!("bad diff header {meta:?}")));
         };
+        // Submodules are not imported: removing one changes nothing, and a file that becomes one
+        // is removed
+        let was_file = !matches!(*old_mode, "000000" | "160000");
         let new = if status.starts_with('D') {
+            if !was_file {
+                continue;
+            }
             None
         } else {
-            Some((GitMode::parse(new_mode)?, new_sha.to_string()))
+            match GitMode::parse(new_mode)? {
+                GitMode::Gitlink if was_file => None,
+                mode => Some((mode, new_sha.to_string())),
+            }
         };
         changes.push(Change { path, new });
     }
@@ -362,6 +371,34 @@ subject\n\nbody\n";
         assert_eq!(c[2].new, Some((GitMode::Executable, "dddd".into())));
         assert_eq!(c[3].new, Some((GitMode::Symlink, "ffff".into())));
         assert!(parse_raw_diff(b"").expect("empty").is_empty());
+    }
+
+    #[test]
+    fn parse_raw_diff_submodules() {
+        // Added and removed submodules: the addition is skipped by the importer, the removal here
+        let out = b":000000 160000 0000 aaaa A\0sub\0:160000 000000 aaaa 0000 D\0gone\0";
+        let c = parse_raw_diff(out).expect("ok");
+        assert_eq!(
+            c,
+            vec![Change {
+                path: "sub".into(),
+                new: Some((GitMode::Gitlink, "aaaa".into()))
+            }]
+        );
+        // A file that becomes a submodule is removed; a submodule that becomes a file is added
+        let out = b":100644 160000 bbbb aaaa T\0was-file\0:160000 100644 aaaa bbbb T\0now-file\0";
+        let c = parse_raw_diff(out).expect("ok");
+        assert_eq!(
+            c[0],
+            Change {
+                path: "was-file".into(),
+                new: None
+            }
+        );
+        assert_eq!(c[1].new, Some((GitMode::File, "bbbb".into())));
+        // A submodule moved to another commit stays skipped
+        let c = parse_raw_diff(b":160000 160000 aaaa cccc M\0sub\0").expect("ok");
+        assert_eq!(c[0].new, Some((GitMode::Gitlink, "cccc".into())));
     }
 
     #[test]

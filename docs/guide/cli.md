@@ -1,5 +1,7 @@
 # A tour of scion and scn
 
+English | [简体中文](cli.zh-CN.md)
+
 Starting a server, then the commands of an everyday workflow. [Coming from git](coming-from-git.md) maps git commands to their scn equivalents; every command has `--help`, and `--json` for scripts.
 
 ```sh

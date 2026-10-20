@@ -1,574 +1,576 @@
-# Scion 服务端架构设计（Rust）
+# Scion server architecture (Rust)
 
-> 版本：Draft v0.1 · 2026-10-16
-> 前置阅读：[`scion-research.md`](./scion-research.md)（Scion 的背景、原文要点和整体方案）
-> 参考实现：CarterT27/scion（Apache 2.0）。**只借鉴思路，不拷贝代码**（2026-10-16 决定），本项目代码全部自行实现。
+English | [简体中文](rust-server-architecture.zh-CN.md)
+
+> Version: Draft v0.1 · 2026-10-16
+> Read first: [`scion-research.md`](./scion-research.md) (Scion's background, the original article's key points and the overall plan)
+> Reference implementation: CarterT27/scion (Apache 2.0). **Ideas only, no copied code** (decided 2026-10-16): all code in this project is written here.
 
 ---
 
-## 0. 设计目标
+## 0. Design goals
 
-| # | 目标 | 衡量标准 |
+| # | Goal | Measure |
 |---|---|---|
-| G1 | **协议与语言无关**，官方只提供 Rust 默认客户端 | 默认客户端 `scn` 只依赖公开协议（见 [`rust-client-architecture.md`](./rust-client-architecture.md) §0）；不需要实现规范编码也能完成 clone/commit/land，以后任何语言都可以按协议自行实现客户端 |
-| G2 | 高可用 | 单 AZ 故障无感；RPO=0；元数据 RTO 不超过 60 秒；无状态层故障秒级恢复 |
-| G3 | 高并发 | 单 ref 每秒 200 次以上 land；L2 缓存单节点 20 万对象读/秒以上；10 万合入/天、3,000 万 checkout/天 |
-| G4 | 提交成本与仓库大小无关 | 创建 changeset 的成本 = O(改动路径数 × 目录深度) |
-| G5 | 简单部署 | Lite 模式单进程零依赖；`docker compose up` 起 Standard 全栈；生产用 Helm；所有服务共用一个二进制，靠子命令区分角色；**不依赖任何商业许可的组件** |
+| G1 | **A language-neutral protocol**, with only a default Rust client from the project | The default client `scn` depends only on the public protocol (see §0 of [`rust-client-architecture.md`](./rust-client-architecture.md)); clone/commit/land need no canonical encoding, so clients in any language can be written from the protocol later |
+| G2 | High availability | A single-AZ failure goes unnoticed; RPO=0; metadata RTO at most 60 seconds; stateless layers recover in seconds |
+| G3 | High concurrency | 200+ lands per second on one ref; 200,000+ object reads per second per L2 cache node; 100,000 lands and 30 million checkouts a day |
+| G4 | Commit cost independent of repository size | Creating a changeset costs O(changed paths × directory depth) |
+| G5 | Simple deployment | Lite mode in one process with no dependencies; `docker compose up` for the full Standard stack; Helm in production; one binary for every service, with roles chosen by subcommand; **no commercially licensed components** |
 
-非目标（v1）：Git 协议兼容、离线和多主写入、代码 review UI、CI 调度。
+Non-goals (v1): git protocol compatibility, offline and multi-master writes, a code review UI, CI scheduling.
 
-**架构图**（PNG 用于浏览，SVG 是可编辑的源文件）：
+**Architecture diagrams** (PNGs to view, SVGs as the editable sources):
 
-![Scion 独立部署架构](./images/arch-01-standalone.png)
+![Scion standalone architecture](./images/arch-01-standalone.en.png)
 
-![部署三档](./images/arch-02-deployment-tiers.png)
+![The three deployment tiers](./images/arch-02-deployment-tiers.png)
 
-外部集成见 [`starhub-integration.md`](./starhub-integration.md)（图 3、图 4）。
+External integrations are in [`starhub-integration.md`](./starhub-integration.md) (figures 3 and 4).
 
 ---
 
-## 1. 两条核心原则
+## 1. Two core principles
 
-### 1.1 协议优先（Protocol is the product）
-- `proto/` 加上 `SPEC.md` 加上一致性测试套件，**才是系统真正的接口**。Rust 服务端只是其中一种实现。
-- proto 用 **buf** 管理：每个 PR 都跑 `buf lint` 和 `buf breaking`，**禁止破坏性变更**；需要新语义就加字段，或者开 `v2` 包。
-- 官方只维护 **Rust SDK 与 CLI**（`scion-client` / `scn`）。proto 以 buf module 形式发布，其它语言的使用方可以自行生成 stub。
+### 1.1 The protocol is the product
+- `proto/` plus `SPEC.md` plus the conformance suite **are the system's real interface**. The Rust server is one implementation of it.
+- The protos are managed with **buf**: every PR runs `buf lint` and `buf breaking`, and **breaking changes are forbidden**; new semantics get new fields or a `v2` package.
+- The project maintains only **the Rust SDK and CLI** (`scion-client` / `scn`). The protos are published as a buf module, so users in other languages can generate their own stubs.
 
-### 1.2 瘦客户端（Thin client）
-所有难做对的逻辑都放在服务端，客户端只需要会做三件事：
+### 1.2 Thin clients
+Everything hard to get right lives on the server; a client needs to do only three things:
 
-| 客户端必须会 | 难度 |
+| A client must | Difficulty |
 |---|---|
-| 计算 blob ID = `BLAKE3(原始文件字节)` | 各语言都有现成的 BLAKE3 库，一行代码 |
-| zstd 解压（服务端也可以按协商返回未压缩数据，见 §3.4） | 各语言都有库 |
-| 调用 gRPC | 由 proto 生成 |
+| Compute blob ids = `BLAKE3(raw file bytes)` | Every language has a BLAKE3 library: one line |
+| Decompress zstd (the server can also return uncompressed data by negotiation, §3.4) | Every language has a library |
+| Call gRPC | Generated from the protos |
 
-**客户端不需要**：编码 Tree/Changeset、计算 tree hash、做 rebase 或 merge、算 merge-base。服务端返回 tree 时，会**同时**给出规范编码的原始字节（供想校验的客户端用）和解码后的 proto 结构（供普通客户端直接用）。
+**Clients do not need to:** encode trees or changesets, compute tree hashes, rebase or merge, or find merge bases. When the server returns a tree, it gives **both** the canonical bytes (for clients that want to verify) and the decoded proto structure (for ordinary clients to use as it is).
 
 ---
 
-## 2. 系统总览
+## 2. System overview
 
 ```
-            ┌──────────── 客户端 ─────────────────┐
+            ┌──────────── Clients ────────────────┐
             │ scn CLI / scn daemon / Rust SDK    │
-            │ Agent / CI / Web(gRPC-Web, JSON)   │
+            │ agents / CI / web (gRPC-Web, JSON) │
             └───────────────┬────────────────────┘
-                            │ gRPC(HTTP/2) | gRPC-Web | REST/JSON
-                            │ TLS + Bearer Token
+                            │ gRPC (HTTP/2) | gRPC-Web | REST/JSON
+                            │ TLS + bearer token
 ┌───────────────────────────▼───────────────────────────────┐
-│ scion cache   (L2, 区域级)   同一个 ObjectService           │
-│   foyer(内存+NVMe) · rendezvous 分片 · singleflight · 对冲  │
+│ scion cache   (L2, regional)   the same ObjectService       │
+│   foyer (memory + NVMe) · rendezvous sharding · singleflight · hedging │
 └───────────────────────────┬───────────────────────────────┘
-                            │ 内部 gRPC + mTLS
+                            │ internal gRPC + mTLS
 ┌───────────────────────────▼───────────────────────────────┐
-│ scion server  (L3, 权威, 无状态)                            │
-│  Gateway 层：tonic + tonic-web + axum(REST)                 │
-│  中间件：认证 · 鉴权 · 限流 · 并发上限 · deadline · 幂等 · 追踪 │
-│  服务：Object · Write · Land · Ref · Query · Auth · Admin   │
-│  引擎：TreeBuilder · Merge · LandCoordinator · Derive       │
+│ scion server  (L3, authoritative, stateless)               │
+│  Gateway: tonic + tonic-web + axum (REST)                   │
+│  Middleware: authn · authz · rate limits · concurrency cap · deadlines · idempotency · tracing │
+│  Services: Object · Write · Land · Ref · Query · Auth · Admin │
+│  Engines: TreeBuilder · Merge · LandCoordinator · Derive    │
 ├────────────────────────────────────────────────────────────┤
-│ scion deriver  (后台：跟随 cs_log 计算派生数据)              │
-│ scion janitor  (后台：孤儿对象清理、redaction purge、快照)   │
+│ scion deriver  (background: derived data following cs_log) │
+│ scion janitor  (background: orphan cleanup, redaction purges, snapshots) │
 ├────────────────────────────────────────────────────────────┤
-│ MetaStore 三档: SQLite(Lite) | PostgreSQL(Standard, 默认)    │
-│                 | YugabyteDB(Distributed)  — 同一套 sqlx 代码  │
-│ BlobStore: S3 兼容(AWS/MinIO/Ceph/OSS…)·GCS·Azure·本地 FS   │
-│ EventBus : NATS JetStream (ref 变更、合入事件)               │
+│ MetaStore in three tiers: SQLite (Lite) | PostgreSQL (Standard, default) │
+│                 | YugabyteDB (Distributed) — the same sqlx code │
+│ BlobStore: S3-compatible (AWS/MinIO/Ceph/OSS…) · GCS · Azure · local FS │
+│ EventBus : NATS JetStream (ref changes, land events)        │
 └────────────────────────────────────────────────────────────┘
 ```
 
-**单一二进制**：`scion server | cache | deriver | janitor | import | admin`。部署时同一个镜像按角色启动，运维面最小。
+**One binary:** `scion server | cache | deriver | janitor | import | admin`. One image starts in each role, for the smallest operational surface.
 
-**Lite 模式**：`scion server --lite --data-dir ~/.scion` 在**一个进程**里运行 server、deriver 和 janitor，元数据用 SQLite，对象存在本地文件系统。适用于开发、单机、边缘设备，以及嵌入 CSGLite 这类本地产品。
+**Lite mode:** `scion server --lite --data-dir ~/.scion` runs server, deriver and janitor **in one process**, with SQLite metadata and objects on the local file system. For development, single machines, edge devices and embedding in local products such as CSGLite.
 
 ---
 
-## 3. 协议设计（跨语言契约）
+## 3. The protocol (a cross-language contract)
 
-### 3.1 传输
-| 方式 | 用途 | 实现 |
+### 3.1 Transports
+| Transport | Use | Implementation |
 |---|---|---|
-| **gRPC / HTTP2** | 主协议，所有 SDK 和 daemon 使用 | `tonic` |
-| **gRPC-Web** | 浏览器 | `tonic-web` |
-| **REST/JSON** | 脚本和 curl：读文件、log、land、ref 查询等常用子集 | `axum`，proto↔JSON 用 `pbjson` 生成 serde，字段与 proto JSON 映射一致 |
+| **gRPC / HTTP2** | The main protocol, used by every SDK and the daemon | `tonic` |
+| **gRPC-Web** | Browsers | `tonic-web` |
+| **REST/JSON** | Scripts and curl: a common subset of reading files, log, land, refs | `axum`, with serde generated by `pbjson` for proto↔JSON, fields as in the proto JSON mapping |
 
-所有流式 RPC 都必须是**可恢复的**：请求携带 offset 或 cursor，断开后可以从断点继续。
+Every streaming RPC must be **resumable**: requests carry an offset or cursor, so a broken stream continues where it stopped.
 
-### 3.2 服务划分（package `scion.v1`）
+### 3.2 Services (package `scion.v1`)
 
 ```proto
 service ServerInfoService {
-  rpc GetServerInfo(GetServerInfoRequest) returns (ServerInfo); // 协议版本、特性、限额、上游拓扑提示
+  rpc GetServerInfo(GetServerInfoRequest) returns (ServerInfo); // protocol version, features, limits, upstream topology hints
 }
 
-service ObjectService {           // L1/L2/L3 三层都实现，只有它能被缓存
-  rpc GetObjects(GetObjectsRequest) returns (stream ObjectChunk);   // 按 id 批量取，大对象分块流式返回
-  rpc GetTrees(GetTreesRequest)     returns (stream TreeChunk);     // 从 root 递归取，支持 depth 和路径前缀过滤
-  rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);   // 即 FindMissing
+service ObjectService {           // implemented by L1, L2 and L3; the only cacheable service
+  rpc GetObjects(GetObjectsRequest) returns (stream ObjectChunk);   // by id in batches; large objects streamed in chunks
+  rpc GetTrees(GetTreesRequest)     returns (stream TreeChunk);     // recursive from a root, with depth and path prefix filters
+  rpc HasObjects(HasObjectsRequest) returns (HasObjectsResponse);   // FindMissing
 }
 
 service WriteService {
-  rpc UploadBlobs(stream UploadBlobChunk) returns (UploadBlobsResponse); // 内容寻址，天然幂等
+  rpc UploadBlobs(stream UploadBlobChunk) returns (UploadBlobsResponse); // content-addressed, so idempotent
   rpc CreateChangeset(CreateChangesetRequest) returns (CreateChangesetResponse);
   rpc Rebase(RebaseRequest) returns (RebaseResponse);
   rpc Merge(MergeRequest)   returns (MergeResponse);
 }
 
 service LandService {
-  rpc Land(LandRequest) returns (LandResponse);                  // 服务端 rebase + CAS（可能经批处理）
-  rpc GetLandStatus(GetLandStatusRequest) returns (LandStatus);  // 用于超时后按 request_id 查询结果
+  rpc Land(LandRequest) returns (LandResponse);                  // server-side rebase + CAS (possibly batched)
+  rpc GetLandStatus(GetLandStatusRequest) returns (LandStatus);  // look a result up by request_id after a timeout
 }
 
 service RefService {
-  rpc ResolveRef(ResolveRefRequest) returns (ResolveRefResponse);     // 永远不缓存
+  rpc ResolveRef(ResolveRefRequest) returns (ResolveRefResponse);     // never cached
   rpc ListRefs / CreateRef / UpdateRef / DeleteRef / GetRefLog
-  rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);          // daemon 预取、CI 触发
+  rpc WatchRefs(WatchRefsRequest) returns (stream RefEvent);          // daemon prefetching, CI triggers
 }
 
-service QueryService {            // 「源码管理即 API」：不需要本地仓库
+service QueryService {            // "source control as an API": no local repository needed
   rpc ReadFile(ReadFileRequest) returns (stream ReadFileChunk);   // rev:path
   rpc ListDir / Stat / Log / Blame / Diff(stream) / IsAncestor / MergeBase / ResolveRevision
-  rpc GetDerived(GetDerivedRequest) returns (GetDerivedResponse);  // 通用派生数据查询
+  rpc GetDerived(GetDerivedRequest) returns (GetDerivedResponse);  // generic derived data queries
 }
 
 service AuthService  { rpc StartDeviceLogin / PollDeviceLogin / WhoAmI / CheckAccess }
 service AdminService { rpc Redact / Unredact / Purge / ListRedactions / ReloadPolicy }
 ```
 
-**每个请求都带 `repo`**：从 v1 起就支持多仓库，不像参考实现那样只有单仓库。
+**Every request names its `repo`:** several repositories from v1, unlike the reference implementation's single repository.
 
-### 3.3 能力协商：`GetServerInfo`
+### 3.3 Capability negotiation: `GetServerInfo`
 ```proto
 message ServerInfo {
   string protocol_version = 1;          // "1.3"
   repeated string features = 2;         // "land.batch", "objects.uncompressed", "query.blame", ...
   Limits limits = 3;                    // max_batch_objects, max_inline_bytes, chunk_size, max_changes_per_cs ...
-  repeated Endpoint read_endpoints = 4; // 推荐使用的区域 cache 地址（客户端可以选择不用）
+  repeated Endpoint read_endpoints = 4; // regional cache addresses to use (clients may decline)
   HashAlgo hash = 5;                    // BLAKE3_256
 }
 ```
-规则：客户端**只依赖 `features` 里声明的能力**；服务端新增能力只加 feature 标记，从不改变已有语义。这样新旧版本的 `scn` 可以和新旧版本的服务端混合运行，滚动升级时不需要客户端和服务端同时更新。
+The rule: clients **depend only on capabilities declared in `features`**; new server capabilities only add feature flags and never change existing semantics. Old and new `scn` versions then mix with old and new servers, and rolling upgrades need no lockstep between client and server.
 
-### 3.4 对象传输格式
+### 3.4 Object transfer format
 ```proto
 message ObjectChunk {
-  bytes id = 1;              // 34 字节：algo(1) | kind(1) | digest(32)
-  uint64 offset = 2;         // 大对象分块
+  bytes id = 1;              // 34 bytes: algo(1) | kind(1) | digest(32)
+  uint64 offset = 2;         // chunks of large objects
   bytes data = 3;
-  Encoding encoding = 4;     // ZSTD | IDENTITY  (请求里用 accept_encodings 协商)
+  Encoding encoding = 4;     // ZSTD | IDENTITY  (negotiated with accept_encodings in the request)
   bool last = 5;
   uint64 total_size = 6;
 }
 message TreeChunk {
   bytes id = 1;
-  bytes canonical = 2;       // 规范编码字节，可选（请求 want_canonical=true）
-  repeated TreeEntry entries = 3;  // 已解码结构，普通客户端只用这个
+  bytes canonical = 2;       // canonical bytes, optional (request want_canonical=true)
+  repeated TreeEntry entries = 3;  // the decoded structure, all ordinary clients use
 }
 ```
 
-### 3.5 统一错误模型
-使用 `google.rpc.Status` 加 `ErrorInfo{reason, domain="scion.dev", metadata}`。重试语义写在规范里，`scion-client` 严格照此实现，其它语言的客户端也应遵循：
+### 3.5 The error model
+`google.rpc.Status` with `ErrorInfo{reason, domain="scion.dev", metadata}`. Retry semantics are part of the specification; `scion-client` implements them strictly, and clients in other languages should too:
 
-| reason | gRPC code | 可重试 | 附带的详情 |
+| reason | gRPC code | Retryable | Details |
 |---|---|---|---|
-| `MERGE_CONFLICT` | ABORTED | 否（需要人或 Agent 介入） | 冲突路径列表及三方 blob id |
-| `LAND_CONTENTION` | UNAVAILABLE | 是 | `RetryInfo` |
-| `ALREADY_LANDED` | ALREADY_EXISTS | — | 已合入的结果 changeset |
-| `REF_VERSION_MISMATCH` | FAILED_PRECONDITION | 先重新读取再重试 | 当前版本 |
-| `OBJECT_MISSING` | FAILED_PRECONDITION | 先上传再重试 | 缺失的 id 列表 |
-| `REDACTED` | NOT_FOUND | 否 | redaction id |
-| `RATE_LIMITED` | RESOURCE_EXHAUSTED | 是 | `RetryInfo` |
+| `MERGE_CONFLICT` | ABORTED | No (a person or agent must step in) | Conflicting paths and the three blob ids |
+| `LAND_CONTENTION` | UNAVAILABLE | Yes | `RetryInfo` |
+| `ALREADY_LANDED` | ALREADY_EXISTS | — | The landed changeset |
+| `REF_VERSION_MISMATCH` | FAILED_PRECONDITION | After reading again | The current version |
+| `OBJECT_MISSING` | FAILED_PRECONDITION | After uploading | The missing ids |
+| `REDACTED` | NOT_FOUND | No | The redaction id |
+| `RATE_LIMITED` | RESOURCE_EXHAUSTED | Yes | `RetryInfo` |
 
-### 3.6 幂等与分页
-- **所有写请求**都必须带 `request_id`（客户端生成的 UUIDv7）。服务端在 `idempotency` 表里保留 24 小时：同一个 id 直接返回首次结果，参数不同则报 `INVALID_ARGUMENT`。
-- 列表类接口统一使用 `page_size` 加不透明的 `page_token`；超大结果改用流式返回。
+### 3.6 Idempotency and paging
+- **Every write request** carries a `request_id` (a client-generated UUIDv7). The server keeps it in the `idempotency` table for 24 hours: the same id returns the first result, and different parameters are `INVALID_ARGUMENT`.
+- Listings use `page_size` and an opaque `page_token`; very large results stream instead.
 
-### 3.7 认证
-- 统一放在 gRPC metadata 的 `authorization: Bearer <token>` 中。
-- token 来源：OIDC（企业 IdP 或 GitHub device flow）、service principal（Agent/CI 使用，短期 token 通过 workload identity 交换）、PAT（仅限开发）。
-- 服务端签发自己的短期 JWT（15 分钟，ES256），cache 层**只验签，不查库**。
-- 服务之间使用 mTLS（rustls；可选接入 SPIFFE）。
+### 3.7 Authentication
+- Always in the gRPC metadata `authorization: Bearer <token>`.
+- Token sources: OIDC (an enterprise IdP or the GitHub device flow), service principals (agents and CI, exchanging workload identities for short-lived tokens), PATs (development only).
+- The server issues its own short-lived JWTs (15 minutes, ES256), which cache layers **verify without database lookups**.
+- Services talk to each other over mTLS (rustls; SPIFFE optional).
 
 ---
 
-## 4. 数据模型
+## 4. Data model
 
-### 4.1 对象 ID
-`ObjectId = algo(u8) | kind(u8) | digest[32]`，文本形式为 `b1…`/`t1…`/`c1…`/`l1…`（前缀字母表示 kind，数字表示哈希算法，后接 64 位小写十六进制）。
-- Blob：digest = BLAKE3(原始字节)
-- Tree/Changeset：digest = BLAKE3(规范编码)
+### 4.1 Object ids
+`ObjectId = algo(u8) | kind(u8) | digest[32]`, in text as `b1…`/`t1…`/`c1…`/`l1…` (the letter is the kind, the digit the hash algorithm, followed by 64 lowercase hex digits).
+- Blob: digest = BLAKE3(raw bytes)
+- Tree/Changeset: digest = BLAKE3(canonical encoding)
 
-### 4.2 规范编码
-**已确定：自定义 varint 格式**（2026-10-16）。LEB128 varint 加长度前缀加严格排序的极简二进制格式，规范见仓库根目录 [`SPEC.md`](../../SPEC.md)，并提供 **golden 测试向量**（`testdata/vectors/*.json`：输入结构 → 编码字节 → id；另有非法输入向量 → 预期错误）。格式自行定义，不追求与参考实现互通。只有需要自行校验的客户端才实现它，其它客户端可以忽略。
+### 4.2 Canonical encoding
+**Decided: a custom varint format** (2026-10-16). A minimal binary format of LEB128 varints, length prefixes and strict ordering, specified in [`SPEC.md`](../../SPEC.md) at the repository root, with **golden test vectors** (`testdata/vectors/*.json`: input structures → encoded bytes → ids, and invalid inputs → expected errors). The format is our own, with no attempt at interoperating with the reference implementation. Only clients that verify on their own implement it; the others can ignore it.
 
-### 4.3 Changeset 与 Tree 的关系（关键决策）
+### 4.3 Changesets and trees (a key decision)
 ```
 Changeset { parents, author, committer, time, message, change_id, delta: [FileChange], extensions }
 ```
-- **changeset id 只对 delta 计算**，不包含 root_tree，这一点与 Anthropic 原文一致。
-- root_tree 作为**强制、同步的派生数据**：`CreateChangeset` 在同一次请求中构建好 tree，写入 `cs_tree` 表后再返回。建 tree 的成本是 O(k × depth)，仍然只和改动大小有关。
+- **A changeset's id covers only the delta**, not root_tree, as in Anthropic's article.
+- root_tree is **mandatory, synchronous derived data**: `CreateChangeset` builds the tree in the same request and writes it to the `cs_tree` table before returning. Building it costs O(k × depth), still proportional to the change.
 
-这样做同时得到两个好处：返回的 changeset 立刻可以 checkout，和参考实现一样方便；将来要改 tree 格式（例如加 fsnode 统计）时，只需要对 tree 重新派生，**changeset id 不受影响**。
+This gets both benefits: a returned changeset can be checked out at once, as conveniently as in the reference implementation, and a future change of tree format (adding fsnode statistics, say) only rederives trees, **leaving changeset ids alone**.
 
-### 4.4 元数据存储：三档部署
+### 4.4 Metadata storage: three tiers
 
-| 档位 | 数据库 | 对象存储 | 高可用 | 场景 | 许可证 |
+| Tier | Database | Object storage | High availability | Use | License |
 |---|---|---|---|---|---|
-| **Lite** | **SQLite**（WAL 模式，sqlx 内置驱动） | 本地文件系统 | 无（单机） | 开发、单机、边缘设备、嵌入 CSGLite 等本地产品 | Public Domain |
-| **Standard**（默认） | **PostgreSQL 15+**，用 Patroni 做高可用 | MinIO / S3 兼容 | 主备自动切换，同步复制时 RPO=0 | 常规私有化部署，和 starhub（PG 15）同一套运维栈 | PostgreSQL License |
-| **Distributed** | **YugabyteDB**（YSQL，兼容 PG 协议） | MinIO / S3 / 云 OSS | 跨 3 AZ，Raft，RPO=0 | 多可用区、大规模、高写入 | Apache 2.0 |
+| **Lite** | **SQLite** (WAL mode, sqlx's built-in driver) | Local file system | None (single node) | Development, single machines, edge devices, embedding in local products such as CSGLite | Public Domain |
+| **Standard** (default) | **PostgreSQL 15+**, with Patroni for high availability | MinIO / S3-compatible | Automatic failover; RPO=0 with synchronous replication | Ordinary private deployments, on the same operations stack as starhub (PG 15) | PostgreSQL License |
+| **Distributed** | **YugabyteDB** (YSQL, PG wire-compatible) | MinIO / S3 / cloud OSS | Across 3 AZs, Raft, RPO=0 | Several availability zones, large scale, heavy writes | Apache 2.0 |
 
-> 不选 CockroachDB：v24.3（2024-11）起取消了免费的 Core 版。年营收超过 1,000 万美元的企业和政府用户必须购买商业许可，而且必须上报遥测，与私有化部署和内网隔离环境冲突。
+> Not CockroachDB: from v24.3 (2024-11) the free Core edition is gone. Companies with over US$10 million of annual revenue, and government users, must buy a commercial license, and telemetry must be reported, which conflicts with private and air-gapped deployments.
 
-**一套代码，方言抽象**：`scion-store-sql` 基于 sqlx 实现，三档共用表结构和绝大部分 SQL，差异集中在 `Dialect` trait 中处理：
+**One codebase, dialects abstracted:** `scion-store-sql` is built on sqlx; the three tiers share the schema and almost all SQL, and the differences live in a `Dialect` trait:
 
-| 差异点 | SQLite | PostgreSQL | YugabyteDB |
+| Difference | SQLite | PostgreSQL | YugabyteDB |
 |---|---|---|---|
-| ref CAS | `BEGIN IMMEDIATE` + `UPDATE … WHERE version=?` | `UPDATE … WHERE version=? RETURNING` | 同 PostgreSQL |
-| 事务冲突时重试 | `SQLITE_BUSY`（加 busy_timeout） | `40001`、`40P01` | `40001`（需要显式重试）、`40P01` |
-| 隔离级别 | 天然串行（单写者） | 关键事务用 SERIALIZABLE；ref CAS 用单行条件更新，不依赖隔离级别 | 同 PostgreSQL |
-| `cs_log` 序号 | 单写者下直接 `max+1` | 每个仓库一个计数行，在事务中自增 | 同 PostgreSQL；也可以用带 cache 的 sequence |
-| 热点打散 | 不需要 | B-tree 即可 | 表和索引按 `HASH(repo_id, …)` 分片 |
-| 只读副本 | 不需要 | 不可变数据读备库（Patroni replica） | follower read（`yb_read_from_followers`，加上有界陈旧度） |
-| 批量写入 | 多行 INSERT | `UNNEST` 批量 INSERT | 同 PostgreSQL |
+| Ref CAS | `BEGIN IMMEDIATE` + `UPDATE … WHERE version=?` | `UPDATE … WHERE version=? RETURNING` | As PostgreSQL |
+| Retrying transaction conflicts | `SQLITE_BUSY` (with busy_timeout) | `40001`, `40P01` | `40001` (explicit retries needed), `40P01` |
+| Isolation | Serial by nature (one writer) | SERIALIZABLE for key transactions; ref CAS as a single-row conditional update, independent of isolation | As PostgreSQL |
+| `cs_log` sequence numbers | `max+1` under one writer | A counter row per repository, incremented in the transaction | As PostgreSQL; or a sequence with a cache |
+| Spreading hot spots | Not needed | B-trees are enough | Tables and indexes sharded by `HASH(repo_id, …)` |
+| Read replicas | Not needed | Immutable data from standbys (Patroni replicas) | Follower reads (`yb_read_from_followers`, with bounded staleness) |
+| Bulk writes | Multi-row INSERT | `UNNEST` bulk INSERT | As PostgreSQL |
 
-**档位迁移**：`scion admin migrate-meta --from sqlite://… --to postgres://…`，PG 迁到 YugabyteDB 同样适用。对象按内容寻址，换档时**对象数据原样复用**（本地文件系统可以用 `scion admin blob-sync` 搬到 S3），只需要迁移元数据。迁移前需要短暂冻结写入，迁移后跑 `fsck` 校验。
+**Moving between tiers:** `scion admin migrate-meta --from sqlite://… --to postgres://…`, and likewise from PG to YugabyteDB. Objects are content-addressed, so a tier change **reuses the object data as it is** (`scion admin blob-sync` moves a local file system to S3) and migrates only metadata. Writes freeze briefly during the migration, and `fsck` checks the result.
 
-**一致性测试**：`scion-store` 的 conformance 测试套件对三种数据库**全部运行**。PostgreSQL 和 SQLite 每个 PR 都跑，YugabyteDB 每晚跑。
+**Conformance tests:** the conformance suite of `scion-store` **runs against all three databases**: PostgreSQL and SQLite on every PR, YugabyteDB nightly.
 
-### 4.4.1 元数据表
-| 表 | 主键 | 说明 |
+### 4.4.1 Metadata tables
+| Table | Primary key | What |
 |---|---|---|
-| `repos` | repo_id | 配置、限额 |
-| `objects_index` | (repo_id, id) | 仓库能看到哪些对象：大小、redaction 标记。对象字节本身全局只存一份，这张表决定可见性 |
-| `objects_inline` | (repo_id, id) | 小于 4 KiB 的对象直接内联存储（tree 大多很小） |
-| `changesets` | (repo_id, cs_id) | 规范编码字节、gen、first_parent |
-| `cs_log` | (repo_id, seq) | WAL，序号单调递增（每仓库一个 sequence） |
-| `cs_tree` | (repo_id, cs_id) | root tree id |
-| `refs` | (repo_id, name) | target, version；**唯一的可变状态** |
-| `ref_log` | (repo_id, name, version) | 审计记录 |
-| `landed` | (repo_id, ref, change_id) | 防止同一个 change 重复合入（M3 实现） |
-| `derived` | (repo_id, kind, kind_version, cs_id) | 派生数据的值或指针 |
-| `idempotency` | (repo_id, request_id) | 带 TTL（M3 实现，默认 24 小时） |
-| `leases` | (scope) | land leader 和 deriver 分片的租约（M3 实现 land leader） |
+| `repos` | repo_id | Configuration, limits |
+| `objects_index` | (repo_id, id) | Which objects a repository can see: size, redaction flag. Object bytes are stored once globally; this table decides visibility |
+| `objects_inline` | (repo_id, id) | Objects under 4 KiB stored inline (most trees are small) |
+| `changesets` | (repo_id, cs_id) | Canonical bytes, gen, first_parent |
+| `cs_log` | (repo_id, seq) | WAL with monotonically increasing sequence numbers (a sequence per repository) |
+| `cs_tree` | (repo_id, cs_id) | The root tree id |
+| `refs` | (repo_id, name) | target, version; **the only mutable state** |
+| `ref_log` | (repo_id, name, version) | Audit records |
+| `landed` | (repo_id, ref, change_id) | Keeps a change from landing twice (M3) |
+| `derived` | (repo_id, kind, kind_version, cs_id) | Derived values or pointers |
+| `idempotency` | (repo_id, request_id) | With a TTL (M3, 24 hours by default) |
+| `leases` | (scope) | Leases of land leaders and deriver shards (land leaders in M3) |
 
-热点规避：Distributed 档的表都以 `HASH(repo_id)` 作为分片键，避免同一个仓库的写入集中到单个 tablet；`cs_log` 的序号做法见上表。Standard 和 Lite 档不需要处理热点。
+Avoiding hot spots: in the Distributed tier, tables shard by `HASH(repo_id)`, so one repository's writes do not pile onto one tablet; `cs_log` numbering is as in the table above. The Standard and Lite tiers need no hot-spot handling.
 
-### 4.5 Blob 存储布局
-`s3://bucket/{prefix}objects/{kind}/{hh}/{hex}`。**对象字节全局只存一份**，不按仓库分目录：相同内容（例如同一模型的量化版、微调版之间的公共分片）在所有仓库中只存一次。仓库能读到哪些对象由 `objects_index` 决定，`HasObjects` 和 `GetObjects` 都先查索引，因此一个仓库无法探测其它仓库有哪些对象。M1 存原始字节，zstd 压缩在后续里程碑加入（以 key 后缀区分，旧对象照常可读）。
+### 4.5 Blob storage layout
+`s3://bucket/{prefix}objects/{kind}/{hh}/{hex}`. **Object bytes are stored once globally**, not per repository: the same content (such as the chunks quantized and fine-tuned versions of one model share) is stored once across all repositories. What a repository can read is decided by `objects_index`; `HasObjects` and `GetObjects` consult the index first, so one repository cannot probe which objects another has. M1 stores raw bytes; zstd compression comes in a later milestone (told apart by key suffix, with old objects readable as before).
 
-写入顺序不变式：**blob 持久化 → changeset 与 cs_tree 持久化 → ref CAS**。读路径永远不会看到悬挂引用。
+The write ordering invariant: **blobs persisted → changeset and cs_tree persisted → ref CAS**. Reads never see a dangling reference.
 
-大文件（大于 8 MiB）用 FastCDC 分块，blob 本身变成 `ChunkList` 对象（kind=0x05），客户端读取时由服务端透明拼接，因此**对客户端不可见**。
+Large files (over 8 MiB) are chunked with FastCDC, and the blob becomes a `ChunkList` object (kind=0x05) that the server reassembles transparently on reads, so it is **invisible to clients**.
 
-### 4.6 对象存储兼容性（MinIO / S3 兼容存储）
+### 4.6 Object storage compatibility (MinIO / S3-compatible storage)
 
-**目标**：一套代码能运行在 AWS S3、**MinIO**、Ceph RGW、SeaweedFS，以及阿里云 OSS、华为 OBS、腾讯 COS 等 S3 兼容存储上；也可以直接复用 starhub 现有的 MinIO。
+**Goal:** one codebase on AWS S3, **MinIO**, Ceph RGW, SeaweedFS and S3-compatible services such as Alibaba Cloud OSS, Huawei OBS and Tencent COS; starhub's existing MinIO reusable as it is.
 
-**原则：只使用 S3 核心 API 子集**
-| 使用 | 不依赖 |
+**Principle: only S3's core API subset**
+| Used | Not relied on |
 |---|---|
-| PutObject、GetObject（含 Range）、HeadObject、DeleteObject(s)、ListObjectsV2、分块上传（Create/UploadPart/Complete/Abort/ListParts）、CopyObject/UploadPartCopy、预签名 GET/PUT（SigV4） | S3 Select、Object Lambda、事件通知、Object Lock（作为可选项）、**条件写入（If-None-Match）**、存储桶策略、厂商特有的扩展头 |
+| PutObject, GetObject (with Range), HeadObject, DeleteObject(s), ListObjectsV2, multipart uploads (Create/UploadPart/Complete/Abort/ListParts), CopyObject/UploadPartCopy, presigned GET/PUT (SigV4) | S3 Select, Object Lambda, event notifications, Object Lock (optional), **conditional writes (If-None-Match)**, bucket policies, vendor-specific headers |
 
-**为什么不需要条件写入**：对象内容寻址，同一个 key 的内容必然相同，重复写入天然幂等，并发写同一个对象也不会出错。唯一的可变状态 ref 放在 MetaStore 里，不放在对象存储中。
+**Why conditional writes are not needed:** objects are content-addressed, so one key always has the same content, repeated writes are idempotent, and concurrent writes of one object cannot go wrong. The only mutable state, refs, lives in the MetaStore, not in object storage.
 
-**配置项**（`[blobstore.s3]`，基于 `object_store` crate 的 `AmazonS3Builder`）：
+**Settings** (`[blobstore.s3]`, on the `object_store` crate's `AmazonS3Builder`):
 ```toml
 [blobstore.s3]
-endpoint          = "http://minio:9000"     # 留空则使用 AWS
-region            = "us-east-1"             # MinIO 可以随便填
+endpoint          = "http://minio:9000"     # empty for AWS
+region            = "us-east-1"             # anything for MinIO
 bucket            = "scion-objects"
-prefix            = "prod/"                 # 允许和其它业务共用一个 bucket
-addressing        = "path"                  # MinIO/Ceph 用 path；阿里云 OSS 等需要 virtual-hosted
-allow_http        = true                    # 仅内网使用
-access_key_id     = "${S3_ACCESS_KEY}"      # 也可以用 IRSA、实例角色或 STS 临时凭证
+prefix            = "prod/"                 # lets other services share the bucket
+addressing        = "path"                  # path for MinIO/Ceph; virtual-hosted for Alibaba Cloud OSS and others
+allow_http        = true                    # internal networks only
+access_key_id     = "${S3_ACCESS_KEY}"      # or IRSA, instance roles, STS temporary credentials
 secret_access_key = "${S3_SECRET_KEY}"
-ca_bundle         = "/etc/scion/ca.pem"     # 私有 CA
-checksum          = "when_required"         # 不默认发送新版 CRC 校验头(部分兼容存储会拒绝)
+ca_bundle         = "/etc/scion/ca.pem"     # private CA
+checksum          = "when_required"         # no new-style CRC headers by default (some compatible stores reject them)
 multipart_part_size = "16MiB"
 max_concurrency   = 256
 request_timeout   = "30s"
 sse               = "none"                  # none | sse-s3 | sse-kms(key_id) | sse-c
-storage_class     = ""                      # 可选
+storage_class     = ""                      # optional
 ```
 
-**一致性要求**：新写入的对象必须能立即读到（read-after-write）。AWS S3（2020 年起）、MinIO、Ceph RGW 都满足。§4.5 的写入顺序不变式依赖这一点，所以启动时会做自检。
+**Consistency requirement:** new objects must be readable at once (read-after-write). AWS S3 (since 2020), MinIO and Ceph RGW all are. The write ordering invariant of §4.5 depends on it, hence the self-test at start.
 
-**启动自检**：执行 `scion admin blobstore-check`，server 启动时也会自动跑一遍。检查项：PUT 后立即 GET 和 HEAD、Range 读、超过 5 GiB 的分块上传与 UploadPartCopy（可选）、预签名 URL 访问、批量删除时的条数上限、ListObjectsV2 分页、时钟偏差（SigV4 对时间敏感）。检查结果写成 feature 标记，例如不支持 UploadPartCopy 时自动改走「读出再写入」的方式。
+**Self-test at start:** `scion admin blobstore-check`, which the server also runs at start. It checks GET and HEAD right after PUT, Range reads, multipart uploads over 5 GiB and UploadPartCopy (optional), presigned URL access, the batch delete limit, ListObjectsV2 paging and clock skew (SigV4 is time-sensitive). The results become feature flags: without UploadPartCopy, for example, it falls back to reading and writing again.
 
-> **实现说明**（2026-10-17）：服务适配层在 `server/store-blob/src/provider.rs`。`SCION_S3_PROVIDER` 可选 `auto`（默认）、`minio`、`seaweedfs`、`aws`、`generic`。启动检查依次执行：按 `Server` 响应头识别服务（显式配置与识别结果冲突时报错）、该服务的健康接口（MinIO `/minio/health/ready`、SeaweedFS `/healthz`）、bucket 是否存在（不存在时提示该服务的创建方法）、读写自检。请求风格按服务决定默认值，只有 AWS 默认 virtual-hosted。CI 在 SeaweedFS 4.48 与 MinIO 2023.12.23（bitnami 镜像，与 starhub 部署一致）上各跑一遍完整的存储一致性测试。使用说明见 [`docs/guide/object-storage.md`](../guide/object-storage.md)。
+> **Implementation note** (2026-10-17): the service adaptation layer is `server/store-blob/src/provider.rs`. `SCION_S3_PROVIDER` is `auto` (default), `minio`, `seaweedfs`, `aws` or `generic`. The checks at start, in order: identify the service by its `Server` header (an explicit setting that conflicts with the result is an error), the service's health endpoint (MinIO `/minio/health/ready`, SeaweedFS `/healthz`), whether the bucket exists (if not, how to create it on that service), and a read-write self-test. The request style defaults by service, virtual-hosted only for AWS. CI runs the full storage conformance tests on SeaweedFS 4.48 and on MinIO 2023.12.23 (the bitnami image, as in starhub's deployment). Usage is in [`docs/guide/object-storage.md`](../guide/object-storage.md).
 
-**直连对象存储下载（减轻服务端带宽压力）**：
-- 超过阈值（默认 64 MiB）的 blob，`GetObjects` 可以不返回数据流，而是返回 `redirect{presigned_url, expires}`。前提是请求里声明了 `accept_redirect`，并且服务端开启了 `objects.presigned` 特性。
-- 客户端直接从 MinIO 或 S3 下载，**下载后仍然校验 BLAKE3**。
-- 敏感对象（`cacheable=false` 的那类）永远不走这个方式。
+**Downloads straight from object storage (sparing server bandwidth):**
+- For blobs over a threshold (64 MiB by default), `GetObjects` can return `redirect{presigned_url, expires}` instead of a data stream, when the request declares `accept_redirect` and the server has the `objects.presigned` feature on.
+- Clients download from MinIO or S3 directly and **still check BLAKE3 afterwards**.
+- Sensitive objects (those with `cacheable=false`) never go this way.
 
-**直连对象存储上传**：
-1. 大 blob 先调用 `BeginUpload`，拿到暂存区 key `staging/<upload_id>` 和一组预签名的分块 PUT 地址。
-2. 客户端直接把数据传到对象存储。
-3. 客户端调用 `CommitUpload(expected_id)`。服务端流式读回数据并校验 hash，通过后用 CopyObject 放到正式的 CAS key 下，然后删除暂存数据。
-4. 校验失败就删除暂存数据并返回错误。janitor 会清理超过 24 小时仍未提交的暂存数据。
+**Uploads straight to object storage:**
+1. For a large blob, `BeginUpload` returns a staging key `staging/<upload_id>` and a set of presigned part PUT URLs.
+2. The client uploads straight to object storage.
+3. The client calls `CommitUpload(expected_id)`. The server streams the data back and checks its hash, then CopyObjects it to its CAS key and deletes the staging data.
+4. When the check fails, the staging data is deleted and an error returned. The janitor cleans up staging data uncommitted after 24 hours.
 
-**key 布局**：`{prefix}objects/{kind}/{hh}/{hex}`。用 hash 作前缀，可以把对象均匀分散到 MinIO 的各个 erasure set 和 S3 的各个分区；`staging/` 和 `snapshots/` 是独立的前缀，方便单独配置生命周期规则。
+**Key layout:** `{prefix}objects/{kind}/{hh}/{hex}`. A hash prefix spreads objects evenly over MinIO's erasure sets and S3's partitions; `staging/` and `snapshots/` are separate prefixes, so lifecycle rules can be set on them alone.
 
-**兼容性测试矩阵（CI）**：
-| 后端 | 方式 | 频率 |
+**Compatibility test matrix (CI):**
+| Backend | How | How often |
 |---|---|---|
-| SeaweedFS（锁定版本，开启签名鉴权） | CI 中 `docker run`，与本地开发环境 `deploy/dev` 相同 | 每个 PR |
-| 本地文件系统（`object_store::local`） | 单元测试和 Lite 档 | 每个 PR |
-| Ceph RGW、RustFS、MinIO 存量版本 | 容器 | 每晚 |
-| AWS S3、阿里云 OSS、华为 OBS | 真实账号，使用专门的测试 bucket | 每周和发布前 |
+| SeaweedFS (pinned version, signature auth on) | `docker run` in CI, as in the local development environment `deploy/dev` | Every PR |
+| Local file system (`object_store::local`) | Unit tests and the Lite tier | Every PR |
+| Ceph RGW, RustFS, older MinIO versions | Containers | Nightly |
+| AWS S3, Alibaba Cloud OSS, Huawei OBS | Real accounts with dedicated test buckets | Weekly and before releases |
 
-> **MinIO 开源版已停止维护**（2026-10 核实）：官方下载站对全部社区版程序返回 `410 Gone`，说明 MinIO Server、mc、KES 开源项目已归档，不再提供安全更新，也不再处理漏洞报告。因此：
-> - 开发环境和 PR 级 CI 改用 **SeaweedFS**（Apache 2.0，仍在维护）作为默认 S3 兼容存储；
-> - 我们**只依赖标准 S3 语义，不使用任何 MinIO 专有 API**（如 `mc admin`、MinIO 的事件通知），所以 starhub 现有的 MinIO 依然可以直接使用，以后迁到 SeaweedFS、Ceph、RustFS 或云厂商存储时不需要改代码；
-> - 建议新部署优先选择仍在维护的 S3 兼容存储，存量 MinIO 部署评估迁移计划。
+> **MinIO's open-source edition is no longer maintained** (checked 2026-10): the official download site returns `410 Gone` for every community build, meaning the MinIO Server, mc and KES open-source projects are archived, with no more security updates and no handling of vulnerability reports. So:
+> - the development environment and PR-level CI use **SeaweedFS** (Apache 2.0, still maintained) as the default S3-compatible store;
+> - we **rely only on standard S3 semantics and no MinIO-specific APIs** (such as `mc admin` or MinIO's event notifications), so starhub's existing MinIO still works as it is, and moving to SeaweedFS, Ceph, RustFS or a cloud provider later needs no code changes;
+> - new deployments should prefer an S3-compatible store that is still maintained, and existing MinIO deployments should plan a migration.
 
 ---
 
-## 5. 服务端内部架构（Rust）
+## 5. Server internals (Rust)
 
-### 5.1 Workspace 结构与分层
+### 5.1 Workspace layout and layering
 
-顶层目录按**角色**划分，一眼可以看出哪些代码属于服务端、哪些属于客户端、哪些两边共用。目录名表示位置和职责，crate 名统一带 `scion-` 前缀（避免与 crates.io 上的 `object` 等同名库冲突）。
+Top-level directories follow **roles**, so it is clear at a glance which code is the server's, which the client's and which both share. Directory names say where and what; crate names all carry the `scion-` prefix (avoiding clashes with crates.io libraries such as `object`).
 
 ```
-proto/scion/v1/        协议定义 (.proto)，语言无关
-SPEC.md                对象模型与规范编码；testdata/vectors/ 为 golden 向量
+proto/scion/v1/        protocol definitions (.proto), language-neutral
+SPEC.md                object model and canonical encoding; golden vectors in testdata/vectors/
 
-common/                服务端和客户端共用，只能依赖 common
-  protocol/            scion-proto        tonic/prost 生成代码，零业务逻辑
-  object/              scion-object       ObjectId、规范编码、Tree/Changeset、校验（无 IO）
+common/                shared by server and client; may depend only on common
+  protocol/            scion-proto        tonic/prost generated code, no business logic
+  object/              scion-object       ObjectId, canonical encoding, Tree/Changeset, validation (no IO)
 
-server/                服务端，可依赖 common 与更低层的 server crate
-  store/               scion-store        trait MetaStore / BlobStore + 内存实现 + 后端一致性测试套件
-  store-sql/           scion-store-sql    sqlx：SQLite / PostgreSQL / YugabyteDB 三档 + Dialect
-  store-blob/          scion-store-blob   object_store：S3 兼容存储 / 本地文件系统
-  merge/               scion-merge        diff3、三方合并、冲突描述（纯计算）
-  tree/                scion-tree         增量 TreeBuilder
-  derive/              scion-derive       派生框架 + 各 deriver
-  land/                scion-land         LandCoordinator（批处理 leader）、rebase 流水线
+server/                the server; may depend on common and lower server crates
+  store/               scion-store        traits MetaStore / BlobStore + in-memory implementation + backend conformance suite
+  store-sql/           scion-store-sql    sqlx: SQLite / PostgreSQL / YugabyteDB tiers + Dialect
+  store-blob/          scion-store-blob   object_store: S3-compatible storage / local file system
+  merge/               scion-merge        diff3, three-way merges, conflict descriptions (pure computation)
+  tree/                scion-tree         incremental TreeBuilder
+  derive/              scion-derive       the derivation framework + derivers
+  land/                scion-land         LandCoordinator (batching leader), the rebase pipeline
   query/               scion-query        log / blame / diff / merge-base
-  authz/  auth/        scion-authz / scion-auth   策略引擎；OIDC / JWT / device flow
-  cache/               scion-cache        分层缓存核心：foyer + singleflight + rendezvous
+  authz/  auth/        scion-authz / scion-auth   policy engine; OIDC / JWT / device flow
+  cache/               scion-cache        tiered cache core: foyer + singleflight + rendezvous
   obs/                 scion-obs          tracing / OTel / metrics
-  api/                 scion-api          tonic 服务实现 + axum REST + tower 中间件
-  scion/               scion              服务端单二进制，子命令分角色
+  api/                 scion-api          tonic services + axum REST + tower middleware
+  scion/               scion              the single server binary, roles by subcommand
 
-client/                客户端，只能依赖 common 与 client，禁止依赖 server
+client/                the client; may depend only on common and client, never server
   sdk/                 scion-client       Rust SDK
-  wc/                  scion-wc           工作副本
-  daemon/              scion-daemon       节点 L1 缓存
-  vfs/                 scion-vfs          虚拟化 checkout（M7 之后）
-  gitimport/           scion-gitimport    git 历史导入（只走公开协议，scn import git）
-  cli/                 scion-cli          二进制 scn
+  wc/                  scion-wc           working copy
+  daemon/              scion-daemon       node L1 cache
+  vfs/                 scion-vfs          virtualized checkouts (after M7)
+  gitimport/           scion-gitimport    git history import (public protocol only, scn import git)
+  cli/                 scion-cli          the scn binary
 
-testing/               scion-testkit（假后端、故障注入、git 差分对照、lincheck）
-                       scion-conformance（黑盒协议一致性套件，可指向任何服务端地址）
-xtask/                 仓库维护任务：cargo xtask layers（依赖方向检查）
+testing/               scion-testkit (fake backends, fault injection, git differential checks, lincheck)
+                       scion-conformance (black-box protocol conformance suite, pointable at any server)
+xtask/                 repository maintenance: cargo xtask layers (dependency direction checks)
 ```
-客户端部分的设计见 [`rust-client-architecture.md`](./rust-client-architecture.md)。目录按里程碑逐步创建，M0 已有 `common/protocol`、`common/object`、`server/store`、`server/api`、`server/scion`、`client/sdk`、`client/cli`。
+The client side is designed in [`rust-client-architecture.md`](./rust-client-architecture.md). Directories appear milestone by milestone; M0 has `common/protocol`, `common/object`, `server/store`, `server/api`, `server/scion`, `client/sdk` and `client/cli`.
 
-**分层规则**（`cargo xtask layers` 在 CI 中检查，只检查普通依赖，dev-dependencies 不受限）：
-- 区域规则：`common` 只依赖 `common`；`client` 只依赖 `common` 和 `client`；`server` 只依赖 `common` 和 `server`。区域由 crate 所在的顶层目录自动判定。
-- 服务端内部按层：`store` ← `store-sql/store-blob` ← `tree` ← `merge/derive/query` ← `land` ← `api` ← `scion`，只能依赖更低层；新增服务端 crate 必须在 xtask 中登记层级，否则检查失败。`authz` 只在 `api` 层生效。
+**Layering rules** (checked in CI by `cargo xtask layers`, on normal dependencies only; dev-dependencies are free):
+- Zone rules: `common` depends only on `common`; `client` only on `common` and `client`; `server` only on `common` and `server`. A crate's zone is its top-level directory.
+- Inside the server, by layer: `store` ← `store-sql/store-blob` ← `tree` ← `merge/derive/query` ← `land` ← `api` ← `scion`, each depending only on lower layers; a new server crate must register its layer in xtask or the check fails. `authz` applies only at the `api` layer.
 
-### 5.2 运行时与关键依赖
-| 用途 | crate |
+### 5.2 Runtime and key dependencies
+| Use | Crates |
 |---|---|
-| 异步运行时 | `tokio` |
+| Async runtime | `tokio` |
 | gRPC | `tonic`, `prost`, `tonic-web`, `tonic-health`, `tonic-reflection` |
 | REST | `axum`, `pbjson` |
-| 中间件 | `tower`（timeout、concurrency limit、load shed）、`governor`（令牌桶） |
-| SQL | `sqlx`（sqlite 和 postgres 两个驱动；YugabyteDB 走 postgres 驱动；事务冲突的重试按 Dialect 统一处理） |
-| 对象存储 | `object_store` |
-| 缓存 | `foyer`（内存加磁盘混合，L2 使用）、`moka`（进程内小缓存） |
-| 哈希/压缩/分块 | `blake3`, `zstd`, `fastcdc` |
+| Middleware | `tower` (timeout, concurrency limit, load shed), `governor` (token buckets) |
+| SQL | `sqlx` (the sqlite and postgres drivers; YugabyteDB through the postgres driver; transaction conflict retries handled uniformly by Dialect) |
+| Object storage | `object_store` |
+| Caches | `foyer` (hybrid memory + disk, for L2), `moka` (small in-process caches) |
+| Hashing / compression / chunking | `blake3`, `zstd`, `fastcdc` |
 | TLS/JWT | `rustls`, `jsonwebtoken` |
-| 可观测 | `tracing`, `opentelemetry-otlp`, `metrics` + Prometheus exporter |
-| 测试 | `proptest`, `insta`, `testcontainers`, `loom`（并发原语） |
+| Observability | `tracing`, `opentelemetry-otlp`, `metrics` + a Prometheus exporter |
+| Tests | `proptest`, `insta`, `testcontainers`, `loom` (concurrency primitives) |
 
-### 5.3 请求处理管线（tower 中间件，从外到内）
+### 5.3 The request pipeline (tower middleware, outside in)
 ```
-TLS → 请求 id 和 trace 上下文 → 认证(验签 JWT) → 按租户/仓库限流(governor)
-    → 全局并发上限 + 过载丢弃(load shed) → deadline 传递(取客户端值与上限的较小者)
-    → 幂等检查(写请求) → 鉴权(仓库/路径/ref) → handler
+TLS → request id and trace context → authentication (JWT verification) → per-tenant/repository rate limits (governor)
+    → global concurrency cap + load shedding → deadline propagation (the smaller of the client's and the cap)
+    → idempotency check (writes) → authorization (repository/path/ref) → handler
 ```
 
 ---
 
-## 6. 写路径
+## 6. The write path
 
 ### 6.1 CreateChangeset
 ```
-1. 校验：parents 存在；delta 中每个 blob 已存在(否则返回 OBJECT_MISSING 及缺失列表)；路径合法；写权限；限额
-2. 读 parent 的 root tree → TreeBuilder 只重写 delta 涉及路径上的节点 (O(k·depth))
-3. 新 tree 节点：小于 4K 的写 objects_inline，否则写 S3
-4. 一个 SQL 事务内：changesets + cs_tree + cs_log
-5. 返回 {cs_id, root_tree}
+1. Validate: parents exist; every blob in the delta exists (otherwise OBJECT_MISSING with the missing list); paths are valid; write permission; limits
+2. Read the parent's root tree → TreeBuilder rewrites only the nodes on the delta's paths (O(k·depth))
+3. New tree nodes: under 4K into objects_inline, otherwise to S3
+4. In one SQL transaction: changesets + cs_tree + cs_log
+5. Return {cs_id, root_tree}
 ```
-**更简单的客户端入口**：`CreateChangeset` 也可以直接接受 `inline_content`（小于 1 MiB 的文件内容），服务端负责算 hash 并存储。Agent 改几个文件时，一次 RPC 就能完成提交。
+**A simpler entry for clients:** `CreateChangeset` also accepts `inline_content` (file contents under 1 MiB), hashed and stored by the server, so an agent changing a few files commits in one RPC.
 
-### 6.2 Land 与 LandCoordinator（高并发核心）
-单行 CAS 本身是正确的，但在热点 ref 上会出现**重试风暴**，而且每次重试都要重新 rebase。解决办法是**每个 ref 一个 leader 加批处理**：
+### 6.2 Land and the LandCoordinator (the core of high concurrency)
+A single-row CAS is correct on its own, but on a hot ref it causes **retry storms**, and every retry rebases again. The answer is **a leader per ref, with batching**:
 
 ```
-Land 请求 → 任意 server → 查 leases 表找到 (repo, ref) 的 leader
-        → 本机是 leader 就直接入队，否则通过内部 gRPC 转给 leader
+Land request → any server → look up the leader of (repo, ref) in the leases table
+        → enqueue locally if this node is the leader, otherwise forward to the leader over internal gRPC
 
-LandCoordinator (每个热点 ref 一个 tokio 任务):
-  在内存中维护 head (每次 CAS 成功后更新；租约刚拿到时从库里重新读取)
+LandCoordinator (one tokio task per hot ref):
+  keeps head in memory (updated after each successful CAS; reread from the database when the lease is taken)
   loop:
-    batch = 收集请求，直到 (5ms 或 64 个，先到为准)
+    batch = collect requests until (5ms or 64, whichever first)
     onto = head
-    for req in batch:                    # 顺序 rebase，彼此冲突时各自报错，不影响整批
-      r = rebase(req.stack, onto)        # 冲突检测只看 base..onto 期间与本次 delta 的路径交集
+    for req in batch:                    # rebase in order; conflicts fail individually, not the whole batch
+      r = rebase(req.stack, onto)        # conflict detection looks only at paths shared by base..onto and this delta
       ok  → onto = r.tip; accepted += r
-      err → 回复该请求 MERGE_CONFLICT
-    一个事务: CAS(ref, expect=head_version, new=onto) + ref_log + landed 行
-    成功 → head = onto；逐个回复
-    失败(版本不对，说明租约被抢或有外部写入) → 重新读 head，整批重做
+      err → answer that request MERGE_CONFLICT
+    one transaction: CAS(ref, expect=head_version, new=onto) + ref_log + landed rows
+    success → head = onto; answer each
+    failure (wrong version: the lease was taken or something wrote from outside) → reread head, redo the batch
 ```
 
-- **批内冲突**：第 i 个请求和前面已接受的请求冲突时，只有它自己失败，不影响其它请求。
-- **租约**：TTL 5 秒，每 2 秒续约；CAS 时检查版本号，作为 fencing token，即使 leader 的租约过期，也不会产生错误写入。
-- **冷 ref**（低频的 release 分支等）直接走 CAS 和抖动重试，不启用 leader。是否启用 leader 由 ref 的 QPS 自动决定。
-- **客户端超时**：用相同的 `request_id` 重试，或者调用 `GetLandStatus` 查询，保证不会重复合入。
-- 预期性能：一次 CAS 往返约 10 毫秒，每批平均 20 到 50 个请求，**单 ref 每秒可以合入几百到上千次**。
+- **Conflicts within a batch:** when request i conflicts with requests accepted before it, only it fails.
+- **Leases:** TTL 5 seconds, renewed every 2; the CAS checks the version, which is the fencing token, so even a leader whose lease expired cannot write wrongly.
+- **Cold refs** (rarely landed release branches and the like) use CAS with jittered retries, without a leader. Whether a ref gets a leader is decided automatically by its QPS.
+- **Client timeouts:** retry with the same `request_id`, or call `GetLandStatus`; nothing lands twice.
+- Expected performance: a CAS round trip is about 10 ms and a batch averages 20 to 50 requests, so **one ref takes hundreds to thousands of lands per second**.
 
-### 6.3 rebase 与冲突检测
-- 候选冲突路径 = `paths(delta)` ∩ `changed_paths(base..onto)`。后者由派生数据 `path_history` 加 changeset 跳表快速得到，**不需要遍历整棵树**。
-- 交集为空：直接把 delta 应用到 onto 上（最常见的情况）。
-- 交集非空：对每个路径做三方合并。文本文件用 diff3；二进制文件、模式变化、删除与修改相冲突的情况都直接报冲突。
-- 冲突详情会把 base、ours、theirs 三个 blob id 都返回给客户端，Agent 可以据此自动解决冲突，再重新提交。
-
----
-
-## 7. 读路径与缓存层
-
-### 7.1 三层同构
-`ObjectService` 在 daemon（L1，客户端侧，可以用任何语言实现）、`scion cache`（L2）、`scion server`（L3）都提供，**消息定义完全相同**。因为对象内容寻址且不可变，各层可以**永久缓存，不需要做失效**。ref 永远不缓存。
-
-### 7.2 L2 区域缓存 `scion cache`
-- **存储**：foyer 混合缓存，内存层几 GB 到几十 GB，NVMe 层几百 GB 到几 TB。
-- **分片**：以 cache 节点列表做 rendezvous hashing，按对象 id 路由。节点收到不属于自己的 id 时，先在节点之间转发一跳，再决定是否回源，从而避免每个节点都向上游回源。
-- **合并回源**：用 singleflight 合并同一 id 的并发 miss；`GetTrees` 递归请求会被拆成多个 id 的批量回源。
-- **请求对冲**：上游请求超过 p95 延迟仍未返回时，向另一个上游副本再发一份。
-- **故障隔离**：每个上游一个熔断器；回源并发设上限；**上游异常时绝不让流量绕过 L2 直连源站**；区域整体故障时客户端会收到 UNAVAILABLE 和 RetryInfo。
-- **预热**：订阅 `WatchRefs`，main 每次前进时预取新的 tree 节点（只取变化的路径）。
-- 本层**没有任何持久状态**：节点挂掉只损失命中率，补一个新节点即可。
-
-### 7.3 L3 server 读路径
-小对象查 `objects_inline`，大对象查 S3。进程内还有一个 moka 缓存，存放 tree 和元数据。所有 S3 读都经过 singleflight 和并发上限。
+### 6.3 Rebase and conflict detection
+- Candidate conflict paths = `paths(delta)` ∩ `changed_paths(base..onto)`. The latter comes quickly from the derived data `path_history` and the changeset skip list, **without walking the whole tree**.
+- An empty intersection: apply the delta to onto directly (the most common case).
+- A non-empty one: a three-way merge per path. Text files with diff3; binary files, mode changes and modify/delete conflicts are reported as conflicts.
+- Conflict details return the base, ours and theirs blob ids, so agents can resolve them automatically and submit again.
 
 ---
 
-## 8. 派生数据框架
+## 7. The read path and cache layers
+
+### 7.1 Three layers, one interface
+`ObjectService` is served by the daemon (L1, client side, implementable in any language), `scion cache` (L2) and `scion server` (L3), **with identical messages**. Objects are content-addressed and immutable, so every layer **caches them forever without invalidation**. Refs are never cached.
+
+### 7.2 The L2 regional cache, `scion cache`
+- **Storage:** a foyer hybrid cache, with a memory tier of gigabytes to tens of gigabytes and an NVMe tier of hundreds of gigabytes to terabytes.
+- **Sharding:** rendezvous hashing over the cache nodes, routing by object id. A node asked for an id it does not own forwards one hop to its owner before deciding to fetch upstream, so not every node fetches from upstream.
+- **Merged fetches:** singleflight merges concurrent misses of one id; recursive `GetTrees` requests become batched fetches of many ids.
+- **Hedged requests:** when an upstream request has not returned after the p95 latency, the same request goes to another upstream replica.
+- **Fault isolation:** a circuit breaker per upstream; a cap on upstream concurrency; **when upstream misbehaves, traffic never bypasses L2 to the origin**; when a whole region fails, clients get UNAVAILABLE with RetryInfo.
+- **Warming:** subscribe to `WatchRefs` and prefetch the new tree nodes each time main moves (only along changed paths).
+- This layer has **no durable state:** losing a node costs only hit rate, and a new one replaces it.
+
+### 7.3 The L3 server read path
+Small objects from `objects_inline`, large ones from S3, with an in-process moka cache for trees and metadata. Every S3 read goes through singleflight and a concurrency cap.
+
+---
+
+## 8. The derivation framework
 
 ```rust
 #[async_trait]
 pub trait Deriver: Send + Sync + 'static {
     const KIND: DerivedKind;       // Tree, Gen, SkipList, PathHistory, Blame, PathIndex, ...
-    const VERSION: u32;            // 格式升级时递增；新旧版本可以并存、后台回填
+    const VERSION: u32;            // bumped when the format changes; versions coexist and backfill in the background
     type Value: Encode + Decode;
     fn deps(&self) -> &'static [DerivedKind];
     async fn derive(&self, ctx: &DeriveCtx, cs: &Changeset,
                     parents: &[Self::Value]) -> Result<Self::Value>;
 }
 ```
-- **lazy**：查询时发现缺失，就沿 first-parent 链回溯到最近一个已计算的祖先，再按拓扑顺序逐个计算回来。同一个 (kind, cs) 的并发计算通过 singleflight 合并，同时加上 `leases` 表防止多个节点重复计算。
-- **eager**：`scion deriver` 跟随 `cs_log` 推进；工作按 (repo, kind) 分片，用租约分配给各个 worker。
-- **首批 deriver**：`Gen`（拓扑深度）、`SkipList`（祖先跳表，用于 merge-base 和 is-ancestor）、`PathHistory`（每个路径上一次被修改的位置，用于 log、blame 和冲突检测）、`Blame`、`PathIndex`（路径前缀搜索）、`GitSha`（Git 互操作）。
-- 派生数据的值统一走 `GetDerived` 和具体的 Query RPC 返回，**派生格式本身永远不暴露给客户端**。
+- **Lazy:** when a query finds a value missing, it goes back along the first-parent chain to the nearest computed ancestor and computes forward in topological order. Concurrent computations of one (kind, cs) merge through singleflight, and the `leases` table keeps several nodes from computing the same thing.
+- **Eager:** `scion deriver` follows `cs_log`; work is sharded by (repo, kind) and assigned to workers by lease.
+- **The first derivers:** `Gen` (topological depth), `SkipList` (an ancestor skip list for merge-base and is-ancestor), `PathHistory` (where each path last changed, for log, blame and conflict detection), `Blame`, `PathIndex` (path prefix search), `GitSha` (git interoperability).
+- Derived values reach clients only through `GetDerived` and the specific query RPCs; **derived formats themselves are never exposed**.
 
 ---
 
-## 9. 权限与安全
+## 9. Permissions and security
 
-- **策略**：`acl.toml` 放在仓库之外（存在 MetaStore 中，`ReloadPolicy` 热加载）。按路径前缀和 ref 模式，给 principal 或 group 分配 read/write/land/admin 权限。
-- **读权限的执行点**：在 `GetTrees` 和 `ListDir` 返回 tree 时，过滤掉无权访问的子目录条目（客户端只会看到一个 `inaccessible` 标记）。拿不到子树 hash，就无法请求其中的内容。
-- **cache 层的模型**：256 位的 hash 视为 capability。L2 只确认 token 有效，不做路径鉴权。对于**敏感前缀**（策略中标记为 `sensitive=true` 的路径），对应 blob 的 key 带有 ACL 域标签，L2 对这类对象一律回源 L3 鉴权，并且不缓存。
-- **Redaction**：在 `objects_index` 上打标记，从此读取一律返回 `REDACTED`，ID 和历史都不变；`janitor` 负责在宽限期后从 S3 物理删除。这个思路借鉴自参考实现。
-- **审计**：所有写操作、ref 变更和管理操作都写入 `ref_log`，并作为审计事件发到 NATS。
+- **Policy:** `acl.toml` lives outside the repository (in the MetaStore, hot-reloaded by `ReloadPolicy`), granting read/write/land/admin to principals or groups by path prefix and ref pattern.
+- **Where read permission is enforced:** `GetTrees` and `ListDir` filter out subdirectory entries the caller cannot access (the client sees only an `inaccessible` marker). Without a subtree's hash, its contents cannot be requested.
+- **The cache layers' model:** a 256-bit hash is a capability. L2 only checks the token is valid, without path authorization. For **sensitive prefixes** (paths marked `sensitive=true` in the policy), the blobs' keys carry an ACL domain tag, and L2 always sends those objects to L3 for authorization and never caches them.
+- **Redaction:** a flag on `objects_index`, after which every read returns `REDACTED` with ids and history unchanged; the `janitor` deletes the bytes from S3 after a grace period. The idea comes from the reference implementation.
+- **Audit:** every write, ref change and admin operation goes into `ref_log` and out to NATS as an audit event.
 
 ---
 
-## 10. 高可用与容量
+## 10. High availability and capacity
 
-| 组件 | 部署 | 故障影响 |
+| Component | Deployment | Impact of a failure |
 |---|---|---|
-| server | 每个 AZ 不少于 2 个，HPA 按 CPU 和在途请求数扩缩 | 无（无状态） |
-| cache | 每区域 N 个，扩缩容时 rendezvous 只迁移 1/N 的数据 | 只损失命中率 |
-| deriver / janitor | 不少于 2 个，按租约分片 | 派生数据暂时滞后，lazy 计算兜底 |
-| LandCoordinator | 运行在 server 内部，按租约分配 | 约 5 秒内 leader 切换，期间 land 延迟升高 |
-| 元数据库：Standard 档 | PostgreSQL + Patroni（1 主 2 备，同步复制） | 主库故障后几十秒内自动切换，期间写入不可用，读不受影响 |
-| 元数据库：Distributed 档 | YugabyteDB 跨 3 AZ，RF=3 或 5 | 损失少数副本时无感 |
-| 元数据库：Lite 档 | SQLite 单文件 | 不提供高可用；靠定期备份（`VACUUM INTO` 或 Litestream 一类工具） |
-| S3 | 托管服务，开启跨区复制 | — |
-| NATS | 3 节点 JetStream | 只影响事件推送，客户端会降级为轮询 ref |
+| server | At least 2 per AZ, scaled by HPA on CPU and requests in flight | None (stateless) |
+| cache | N per region; scaling moves only 1/N of the data with rendezvous hashing | Only hit rate |
+| deriver / janitor | At least 2, sharded by lease | Derived data lags for a while, with lazy computation as the fallback |
+| LandCoordinator | Inside the server, assigned by lease | The leader changes within about 5 seconds, with higher land latency meanwhile |
+| Metadata, Standard tier | PostgreSQL + Patroni (1 primary, 2 standbys, synchronous replication) | Automatic failover within tens of seconds after a primary failure; writes unavailable meanwhile, reads unaffected |
+| Metadata, Distributed tier | YugabyteDB across 3 AZs, RF=3 or 5 | Losing a minority of replicas goes unnoticed |
+| Metadata, Lite tier | One SQLite file | No high availability; periodic backups (`VACUUM INTO` or a tool like Litestream) |
+| S3 | A managed service with cross-region replication | — |
+| NATS | 3-node JetStream | Only event pushes; clients fall back to polling refs |
 
-**多区域**：写请求集中到主区域（ref CAS 需要强一致）。读请求走本区域的 L2，再回源到最近的 L3。L3 读不可变数据时走就近副本（YugabyteDB 用 follower read，PostgreSQL 读区域只读副本）；只有读 ref 时才走主库或 leader。多区域部署需要 Distributed 档。
+**Several regions:** writes go to the primary region (ref CAS needs strong consistency). Reads go to the local L2, then the nearest L3. L3 reads immutable data from the nearest replica (follower reads with YugabyteDB, regional read replicas with PostgreSQL); only ref reads go to the primary or leader. Several regions need the Distributed tier.
 
-**粗略容量估算**（3,000 万 checkout/天，10 万合入/天）：
-- L2：峰值约 30 万对象/秒，约 4 到 8 个大内存加 NVMe 节点。
-- L3：承接约 1% 的回源，约 3 到 6 个节点。
-- 元数据库：写入压力主要来自 changeset 和派生数据，约每秒 1 到 3 千行。单个 PostgreSQL 主库可以承受，这一规模用 Standard 档即可；需要多 AZ 写入或更高规模时，换 5 节点的 YugabyteDB。
-
----
-
-## 11. 可观测性与运维
-
-- **追踪**：trace 从客户端（SDK 自动注入 `traceparent`）贯穿 L2、L3、元数据库和 S3。
-- **核心 SLI**：每层命中率、`GetObjects`/`GetTrees` 的 p50/p99/p999、land 端到端延迟、批大小分布、CAS 失败率、派生滞后（`cs_log` 头部 seq 减去已派生 seq）、各服务的 QPS 和错误率。
-- **SLO 示例**：`ResolveRef` p99 小于 20 毫秒；L2 命中时 `GetObjects` p99 小于 10 毫秒；land p99 小于 500 毫秒（无冲突时）。
-- **运维命令**：`scion admin fsck`（校验对象完整性和引用闭包）、`scion admin rederive --kind blame --version 2`、`scion admin lease ls`、`scion admin drain <node>`。
+**Rough capacity** (30 million checkouts and 100,000 lands a day):
+- L2: about 300,000 objects per second at peak, on about 4 to 8 nodes with large memory and NVMe.
+- L3: about 1% of reads come through, on about 3 to 6 nodes.
+- Metadata: writes come mostly from changesets and derived data, about 1,000 to 3,000 rows per second. One PostgreSQL primary handles that, so the Standard tier suffices at this scale; for writes across several AZs or larger scale, a 5-node YugabyteDB.
 
 ---
 
-## 12. 测试与一致性保障
+## 11. Observability and operations
 
-| 层级 | 内容 |
+- **Tracing:** a trace runs from the client (the SDK injects `traceparent`) through L2, L3, the metadata database and S3.
+- **Core SLIs:** hit rate per layer, p50/p99/p999 of `GetObjects`/`GetTrees`, end-to-end land latency, the batch size distribution, the CAS failure rate, derivation lag (the head seq of `cs_log` minus the derived seq), QPS and error rate per service.
+- **Example SLOs:** `ResolveRef` p99 under 20 ms; `GetObjects` p99 under 10 ms on an L2 hit; land p99 under 500 ms (without conflicts).
+- **Operations commands:** `scion admin fsck` (object integrity and reference closure), `scion admin rederive --kind blame --version 2`, `scion admin lease ls`, `scion admin drain <node>`.
+
+---
+
+## 12. Tests and conformance
+
+| Level | Contents |
 |---|---|
-| 单元 / 性质测试 | 规范编码往返和拒绝非法输入（proptest）、TreeBuilder 与「全量重建」结果一致、diff3 对照 |
-| 差分测试 | 导入真实 Git 仓库后，对比 Scion 和 git 的 log、blame、diff、merge-base 输出 |
-| 并发正确性 | land 的线性一致性检查（lincheck），覆盖并发 land、租约抢占和 leader 被杀的场景 |
-| 故障注入 | 在 `land.after_rebase`、`after_commit`、S3 写入后崩溃等埋点注入故障（借鉴参考实现） |
-| **协议一致性** | `scion-conformance` 黑盒套件：传入任意服务端地址就能运行；测试场景用 YAML 描述，由 `scion-client` 执行，场景文件与语言无关 |
-| 压测 | 持续施压的 landing 压测（泊松到达）；用 ghz 压 `GetObjects`；目标见 §0 |
-| 混沌 | 杀 L2、PG 主备切换（Patroni）、YugabyteDB leader 迁移、AZ 断网、S3 延迟注入 |
+| Unit / property tests | Canonical encoding round trips and rejection of invalid input (proptest), TreeBuilder against full rebuilds, diff3 against a reference |
+| Differential tests | After importing real git repositories, Scion's log, blame, diff and merge-base against git's |
+| Concurrency correctness | Linearizability checks of land (lincheck), covering concurrent lands, lease takeovers and killed leaders |
+| Fault injection | Crashes at `land.after_rebase`, `after_commit`, after S3 writes and other points (after the reference implementation) |
+| **Protocol conformance** | The `scion-conformance` black-box suite: runs against any server address; scenarios in YAML, run by `scion-client`, language-neutral |
+| Load tests | Sustained landing load (Poisson arrivals); ghz against `GetObjects`; targets in §0 |
+| Chaos | Killing L2, PG failovers (Patroni), YugabyteDB leader moves, AZ partitions, S3 latency injection |
 
-### 12.1 函数级测试要求（强制，服务端和客户端通用）
+### 12.1 Function-level test requirements (mandatory, server and client alike)
 
-每个函数都要有测试，这是合并的硬性门槛，代码评审和 CI 都按这一节检查。
+Every function has tests. This is a hard gate for merging, checked in review and in CI by this section.
 
-**覆盖范围**
-1. **每个含逻辑的函数**（不论 `pub` 还是私有）都要有单元测试，放在同文件的 `#[cfg(test)] mod tests` 中。只有纯转发、纯字段访问、`derive` 生成的代码可以豁免。
-2. 每个函数的测试至少覆盖三类情况：**正常路径**、**边界条件**（空输入、零、最大值、单元素、恰好等于限额）、**每一个错误分支**。错误类型的每个变体至少有一个测试能触发它。
-3. **公开 API**（crate 对外导出的类型和函数）除单元测试外，还要有 doc test 或 `tests/` 下的集成测试，展示正确用法。
-4. **编解码、排序、哈希等确定性逻辑**必须加性质测试（`proptest`）：往返一致、非法输入必被拒绝、输出唯一。
-5. **修 bug 必须先加能复现它的回归测试**，测试名或注释里写明问题编号。
-6. 涉及并发的函数（锁、租约、批处理、singleflight）要有并发测试：`tokio::test(flavor = "multi_thread")` 加多任务竞争；底层同步原语用 `loom`。
+**Coverage**
+1. **Every function with logic** (`pub` or private) has unit tests in the same file's `#[cfg(test)] mod tests`. Only pure forwarding, plain field access and `derive`-generated code are exempt.
+2. Each function's tests cover at least three kinds of case: **the normal path**, **edge cases** (empty input, zero, the maximum, a single element, exactly at a limit) and **every error branch**. Each variant of an error type is triggered by at least one test.
+3. **Public APIs** (types and functions a crate exports) also have doc tests or integration tests under `tests/` that show correct usage.
+4. **Deterministic logic such as encoding, sorting and hashing** has property tests (`proptest`): round trips agree, invalid input is always rejected, outputs are unique.
+5. **A bug fix starts with a regression test that reproduces it**, naming the issue in the test name or a comment.
+6. Concurrent functions (locks, leases, batching, singleflight) have concurrency tests: `tokio::test(flavor = "multi_thread")` with competing tasks; `loom` for low-level synchronization primitives.
 
-**写法约定**
-- 测试命名：`<函数名>_<场景>_<预期>`，如 `decode_tree_unsorted_entries_rejected`。
-- 测试必须确定、可重复：不依赖网络、真实时间和执行顺序；时间和随机数通过注入的 `Clock`、种子控制。需要外部服务（PG、S3）的测试放在 `tests/` 下，用 `#[ignore]` 或 feature 隔离，在 CI 的集成阶段统一跑。
-- 只断言行为，不断言实现细节；错误用 `matches!` 断言具体变体，不比较错误文案。
-- 单个单元测试应在 100 毫秒内完成。
+**Conventions**
+- Test names: `<function>_<case>_<expected>`, such as `decode_tree_unsorted_entries_rejected`.
+- Tests are deterministic and repeatable: no network, real time or execution order; time and randomness through an injected `Clock` and seeds. Tests needing external services (PG, S3) live under `tests/`, behind `#[ignore]` or a feature, and run in CI's integration stage.
+- Assert behavior, not implementation details; assert errors by variant with `matches!`, not by message text.
+- A unit test finishes within 100 ms.
 
-**CI 门槛**（`cargo llvm-cov` 统计）
-| 范围 | 行覆盖率 | 分支覆盖率 |
+**CI gates** (measured by `cargo llvm-cov`)
+| Scope | Line coverage | Branch coverage |
 |---|---|---|
-| 核心 crate：`scion-object`、`scion-store*`、`scion-tree`、`scion-merge`、`scion-land`、`scion-wc` | ≥ 90% | ≥ 80% |
-| 其余 crate | ≥ 80% | — |
-| 每个 PR 新增或修改的代码（diff coverage） | ≥ 90% | — |
+| Core crates: `scion-object`, `scion-store*`, `scion-tree`, `scion-merge`, `scion-land`, `scion-wc` | ≥ 90% | ≥ 80% |
+| Other crates | ≥ 80% | — |
+| Code added or changed by each PR (diff coverage) | ≥ 90% | — |
 
-低于门槛时 CI 失败。确实无法测试的代码（例如 `main` 中的进程启动胶水）用 `#[cfg_attr(coverage_nightly, coverage(off))]` 显式标注，并在评审中说明理由。
+CI fails below a gate. Code that really cannot be tested (process startup glue in `main`, say) is marked explicitly with `#[cfg_attr(coverage_nightly, coverage(off))]`, with the reason given in review.
 
 ---
 
-## 13. 客户端接入示意（Rust SDK）
+## 13. A client sketch (Rust SDK)
 
 ```rust
 let c = scion_client::Client::builder()
@@ -577,158 +579,169 @@ let c = scion_client::Client::builder()
 
 let head = c.resolve_ref("main").await?;
 let cs = c.changeset(&head)
-    .put("svc/a.rs", new_bytes)          // 小文件内联，大文件自动先上传
+    .put("svc/a.rs", new_bytes)          // small files inline, large ones uploaded first
     .message("fix").create().await?;
-match c.land("main", &cs).await {        // request_id 自动生成，可安全重试
+match c.land("main", &cs).await {        // request_id generated; safe to retry
     Ok(r) => println!("landed {}", r.tip),
-    Err(e) if e.is_merge_conflict() => { /* e.conflicts(): 三方 blob id */ }
+    Err(e) if e.is_merge_conflict() => { /* e.conflicts(): the three blob ids */ }
     Err(e) => return Err(e.into()),
 }
 ```
-SDK、工作副本、daemon 和 CLI 的完整设计见 [`rust-client-architecture.md`](./rust-client-architecture.md)。
+The SDK, working copy, daemon and CLI are designed in full in [`rust-client-architecture.md`](./rust-client-architecture.md).
 
 ---
 
-## 14. 里程碑
+## 14. Milestones
 
-| 里程碑 | 周期 | 内容 | 验收 |
+| Milestone | Duration | Contents | Acceptance |
 |---|---|---|---|
-| **M0 协议与骨架** | 2 周 | proto v1 + buf CI、`scion-object`、golden 测试向量、内存版 store、单二进制骨架、`GetServerInfo`、覆盖率门槛接入 CI | 编码向量测试通过；`scion-client` 能连上并完成能力协商；满足 §12.1 |
-| **M1 最小闭环** | 4 周 | sqlx（SQLite + PostgreSQL）+ object_store（本地文件系统 + S3 兼容存储，CI 用 SeaweedFS）、Lite 模式、Upload/CreateChangeset/TreeBuilder、直接 CAS 的 Land、ReadFile/ListDir/GetTrees、git 导入 | `scn` 完成 clone(sparse)/commit/land；差分测试通过 |
+| **M0 Protocol and skeleton** | 2 weeks | proto v1 + buf CI, `scion-object`, golden test vectors, in-memory store, the single-binary skeleton, `GetServerInfo`, coverage gates in CI | Encoding vector tests pass; `scion-client` connects and negotiates capabilities; §12.1 met |
+| **M1 Minimal loop** | 4 weeks | sqlx (SQLite + PostgreSQL) + object_store (local file system + S3-compatible storage, SeaweedFS in CI), Lite mode, Upload/CreateChangeset/TreeBuilder, Land by direct CAS, ReadFile/ListDir/GetTrees, git import | `scn` does clone (sparse)/commit/land; differential tests pass |
 
-> **M1 实现说明**（2026-10-16）：
-> - **git 导入放在客户端**（`client/gitimport`，命令 `scn import git <path> --repo NAME`），只通过公开协议写入，与普通用户走同一条校验路径；服务端不需要额外的写入通道。结果确定：`change_id` 由 git sha 推导，git sha 存入扩展字段 `git.sha1`，重复导入得到相同的提交 id；增量导入沿第一父提交链逐个快进。差分测试逐个提交比对 git 与 Scion 的文件列表、mode、内容和元数据。大仓库的批量导入（starhub 迁移，§16）后续改为服务端直写。
-> - **合入只支持快进**；工作副本的 `scn sync` 在客户端做文件级 rebase，冲突以退出码 3 报告。M3 的服务端 rebase 上线后，`Land` 直接处理落后的提交。
+> **M1 implementation notes** (2026-10-16):
+> - **git import lives in the client** (`client/gitimport`, the command `scn import git <path> --repo NAME`), writing only through the public protocol, along the same validation path as any user; the server needs no extra write channel. The result is deterministic: `change_id` derives from the git SHA, the git SHA goes into the extension field `git.sha1`, and repeated imports give the same commit ids; incremental imports fast-forward commit by commit along the first-parent chain. Differential tests compare git and Scion commit by commit: file lists, modes, contents and metadata. Bulk imports of large repositories (the starhub migration, §16) will write on the server directly later.
+> - **Lands only fast-forward;** the working copy's `scn sync` rebases at file level on the client, reporting conflicts with exit code 3. Once M3's server-side rebase ships, `Land` handles commits that fell behind.
 
-> **M2 实现说明**（2026-10-16）：
-> - **PathHistory 索引**：创建提交时记录 delta 中的每个路径（`path_changes` 表），按路径过滤的 log 与 blame 从索引取候选提交，不逐个解码提交对象。
-> - **第一父提交链跳表**：提交记录带 `fp_depth` 与 `fp_jump`（Myers skew-binary 单指针跳表），O(log n) 找到链上任意深度的祖先；`is_ancestor` 先走这条快速路径，blame 用它判断候选是否在链上。
-> - **提交记录缓存**：记录不可变，服务端用 `CachedMeta` 在进程内缓存并在启动时后台预热（10 万条约 0.5 秒）；遍历历史时按代数批量预取，缓存未命中也不会逐条查库。
-> - **blame 缓存**：派生数据只存最终版本和每 32 个版本一个检查点，再次 blame 只算增量；沿第一父提交链追溯，经由合并进来的改动归到合并提交。
-> - **blame 缓存查询批量化**：最新版本单独查一次（重复查询的常见情况），其余版本每 64 个一次 `get_derived_many`，避免远端数据库上逐版本往返。
-> - **GitSha 索引**：导入的提交带扩展字段 `git.sha1`，创建提交时写入派生数据 `git-sha1`；`ResolveRevision` 依次按提交 id、ref、git sha 解析，`GetDerived` 可查询 git sha 与代数。
-> - **查询 RPC**：Log、IsAncestor、MergeBase、Diff（服务端流，每批 500 个条目）、Blame、ResolveRevision、Stat、GetDerived，均在 `GetServerInfo` 中以特性声明。
-> - **从 M1 升级**：M1 只在 `first_parent` 列记录父提交。迁移 0008 把它拷入 `parents`，并把这些仓库的跳表标记为未知。随后运行 `scion admin reindex [--repo NAME]`（在启动服务端之前运行；服务端会缓存提交记录），它以提交对象为准修正谱系（全部父提交、包括合并提交的其余父提交，以及跳表，错误的值会被覆盖），并补建 PathHistory 与 GitSha。可重复执行。
-> - **基准**（`server/query/tests/bench.rs`，10 万提交、对象在内存）：SQLite 与 PostgreSQL 元数据下，log、diff、ancestry、merge-base、blame 的 p99 均低于 20 ms（PostgreSQL：冷 blame p99 13.6 ms，log --path p99 15.6 ms）。对象放在 S3 时 blame / diff 的读对象开销由 M4 的缓存层解决。
-> - **推迟到后续里程碑**：通用 Deriver 框架与独立的 deriver 进程（M3/M4）；PathIndex。blame 只沿第一父提交链追溯，按路径过滤的 log 不跟踪重命名。
-| **M2 派生与查询** | 3 周 | 派生框架、Gen/SkipList/PathHistory/Blame、Log/Blame/Diff/MergeBase、deriver 进程 | 在 10 万提交的仓库上，查询 p99 小于 100 毫秒 |
-| **M3 高并发** | 3 周 | LandCoordinator 批处理和租约、幂等表、限流与过载丢弃、lincheck | 单 ref 每秒 200 次以上 land；leader 被杀时没有重复或丢失的合入 |
+> **M2 implementation notes** (2026-10-16):
+> - **The PathHistory index:** creating a commit records every path in its delta (the `path_changes` table), so log and blame filtered by path take candidate commits from the index instead of decoding commit objects one by one.
+> - **A first-parent skip list:** commit records carry `fp_depth` and `fp_jump` (a Myers skew-binary single-pointer skip list), finding an ancestor at any depth of the chain in O(log n); `is_ancestor` takes this fast path first, and blame uses it to tell whether a candidate is on the chain.
+> - **The commit record cache:** records are immutable, so the server caches them in process with `CachedMeta` and warms it in the background at start (about 0.5 s for 100,000); history walks prefetch by generation in batches, so even cache misses do not query one row at a time.
+> - **The blame cache:** derived data holds only the final version and a checkpoint every 32 versions, so blaming again computes only the increment; it follows the first-parent chain, and changes brought in by merges count for the merge commit.
+> - **Batched blame cache lookups:** the latest version is looked up alone (the common case of repeated queries), the others 64 at a time with `get_derived_many`, avoiding a round trip per version to a remote database.
+> - **The GitSha index:** imported commits carry the extension field `git.sha1`, written to the derived data `git-sha1` when the commit is created; `ResolveRevision` tries commit ids, refs and git SHAs in turn, and `GetDerived` returns git SHAs and generations.
+> - **Query RPCs:** Log, IsAncestor, MergeBase, Diff (server-streamed, 500 entries per batch), Blame, ResolveRevision, Stat and GetDerived, each declared as a feature in `GetServerInfo`.
+> - **Upgrading from M1:** M1 recorded only the `first_parent` column. Migration 0008 copies it into `parents` and marks those repositories' skip lists unknown. Then `scion admin reindex [--repo NAME]` (before starting the server, which caches commit records) corrects lineage from the commit objects (all parents, merges' other parents included, and skip lists, overwriting wrong values) and backfills PathHistory and GitSha. It can be run again.
+> - **Benchmarks** (`server/query/tests/bench.rs`, 100,000 commits, objects in memory): with SQLite and PostgreSQL metadata, the p99 of log, diff, ancestry, merge-base and blame are all under 20 ms (PostgreSQL: cold blame p99 13.6 ms, log --path p99 15.6 ms). With objects on S3, the object reads of blame and diff are left to M4's cache layers.
+> - **Left for later milestones:** the generic Deriver framework and a separate deriver process (M3/M4); PathIndex. Blame follows only the first-parent chain, and log filtered by path does not follow renames.
 
-> **M3 实现说明**（2026-10-17）：
-> - **服务端 rebase**（`server/merge`）：只比较 delta 涉及的路径在 base 与 onto 中的条目，未变化的直接应用，代价与仓库大小和中间提交数无关；双方都改的文件按行 diff3（diffy），可执行位按三方规则合并；二进制、符号链接、超过 8 MiB、修改/删除、双方新增、文件/目录冲突都报 MERGE_CONFLICT，详情放在 ErrorInfo metadata（`path.N`、`kind.N`、`base.N`、`ours.N`、`theirs.N`）。比 §6.3 的「path_history 求交集」更直接，结果相同。
-> - **Land 默认 rebase**：从提交沿第一父往回到 ref 历史中的提交为止是待合入的栈，快进或逐个 rebase；`fast_forward_only` 保留只快进的语义（git 导入使用）。rebase 后的提交保留作者、说明与 change id，去掉 `git.sha1`。
-> - **幂等与去重**：`land_commit` 在一个事务里更新 ref、写 `landed`（同一 ref 上每个 change id 只合入一次）和 `idempotency`（同一 request id 返回第一次成功的结果，参数不同则 INVALID_ARGUMENT，保留 24 小时）。只记录成功的结果：失败的请求什么都没写，重试会重新执行。`GetLandStatus` 按 request id 查询。SDK 在可重试错误下用同一个 request id 重试。
-> - **LandCoordinator**（`server/land`）：每个 ref 一个任务，最多 64 个请求或 5 ms 一批，按顺序 rebase，冲突的请求单独失败；批内的 rebase 结果先放在内存（写后缓冲），后续请求直接在上面继续，整批最后批量写入（对象并发写，`index_paths_many` / `put_changesets` 多行插入），一次 `land_commit` 提交。
-> - **集群**：`scion server --advertise-url URL` 开启。每个 ref 的任务持有租约（`leases` 表，TTL 5 秒，2 秒续约），其它节点收到 `NotLeader` 后通过 gRPC 转发（`x-scion-forwarded`，不再二次转发）。正常退出时释放租约，其它节点立即接管；进程被杀时等租约到期。ref 版本号是 fencing token，两个节点短暂同时认为自己是 leader 也不会写坏 ref。
-> - **过载保护**：全局在途请求上限（超过立即拒绝，RESOURCE_EXHAUSTED / RATE_LIMITED，带 `retry_after_ms`），按仓库的写入令牌桶（`--repo-write-rate`）。
-> - **验收**：`server/land/tests/bench.rs`（2000 个请求、200 个并发客户端、同一个 ref、对象在内存）：PostgreSQL 885 次/秒（p99 379 ms），SQLite 1921 次/秒（p99 173 ms）。`server/land/tests/lincheck.rs` 检查不重复、不丢失、不凭空出现和实时顺序，覆盖单节点并发冲突、两节点转发、合入进行中杀掉 leader（SQLite 元数据，客户端用同一个 request id 重试）。
-> - **推迟**：冷 ref 不启用 leader 的自动判定（目前所有 ref 都走批处理任务，空闲退出）；按租户限流与 deadline 传递在 M5 与认证一起做。
-| **M4 缓存层** | 3 周 | `scion cache`(foyer + rendezvous + singleflight + 对冲)、WatchRefs、预热 | L2 命中率不低于 99%；单节点 20 万对象读/秒以上 |
-> **M4 实现说明**（2026-10-17）：
-> - **WatchRefs**（`RefService.WatchRefs`）：先发快照，之后每次前进发送新状态；只保证送达每个 ref 的最新状态，断开后带上 `known_versions` 重新订阅即可续上。本节点合入后立即推送；集群中其它节点的合入由按仓库的轮询发现（只轮询有订阅者的仓库，`--ref-poll-interval`，默认 1 秒），未使用 NATS。停机时主动结束订阅流，避免优雅停机被长连接挡住。
-> - **`scion cache`**（`server/cache`）：foyer 混合缓存（内存层淘汰写入磁盘层），rendezvous 哈希分片（BLAKE3 打分，节点之间只转发一跳，负责节点不可达时自己回源），single-flight 放在新的共用 crate `common/flight`（领取与完成分开，一批未命中合成一次回源请求）。上游池：p95 对冲、按上游熔断（连续 5 次失败冷却 5 秒）、业务错误不换上游、回源结果逐个校验哈希。预热订阅上游的 WatchRefs，只沿变化的子树下钻。**按仓库的可见性与 L3 一致**（评审指出命中与 single-flight 原先只看对象 id）：字节按 id 去重，single-flight 按 (仓库, id) 合并，应答前确认 id 在请求的仓库可见，回源成功的 (仓库, id) 记入可见集，命中而未知的批量 `HasObjects` 确认，不可见返回与 L3 相同的 OBJECT_MISSING。daemon 同样处理。
-> - **L3 读路径**（§7.3）：`CachedBlobs` 包在 BlobStore 外，小对象（≤1 MiB）进按字节计权的 moka 缓存，同一对象的并发读只读一次后端，后端并发上限 256。`--read-endpoint URL@REGION` 在 ServerInfo 中推荐缓存。
-> - **`scn daemon`**（`client/daemon`）：Unix socket（0600）。`GetObjects` 由本地 CAS（磁盘文件 + 内存层，读取校验哈希，按修改时间回收）应答，未命中按调用者身份经 SDK 回源（会使用服务端推荐的区域缓存）；`RefService` 转发并在 `ResolveRef` 时登记预取；其余 RPC 在 HTTP/2 层原样转发（axum fallback），daemon 不需要理解它们。SDK 经 daemon 时每个请求带 `x-scion-upstream`，一个 daemon 可服务多个服务端。`scn` 默认经 daemon，按需拉起，失败时直连，`SCION_NO_DAEMON=1` 关闭。
-> - **SDK**：`get_objects` 批量读取（工作副本的检出与同步改用它，检出时 8 批并发下载、后台线程写文件）；按区域选择只读端点，连接时不可达则直连服务端。
-> - **修复**：WriteService 的请求大小上限原先等于上传分块（约 1.1 MB），10 万个改动的 `CreateChangeset` 会被拒绝；现在按 `max_changes_per_changeset` 留足空间（每条 256 字节，最多 256 MiB）。
-> - **验收**：`server/cache/tests/bench.rs`（Apple M5、对象在内存、客户端与缓存同机）：200 个客户端冷启动检出同一组 2 万个对象，命中率 99.5%（理论上限），每个对象只回源一次；热缓存单节点每秒 153 万个对象（gRPC，每批 64 个），每次 1 个对象时每秒 16.4 万次请求。`client/daemon/tests/bench.rs`：10 万个文件经热 daemon 检出 5.3 秒，与本机直接创建这些文件的 5.4 秒相同（客户端目标 5 秒受本机文件系统限制，多线程创建文件反而更慢）。
-> - **推迟**：缓存层的敏感前缀隔离与 L2 的 token 校验随 M5 的 ACL 一起做；daemon 的 `/metrics` 与 systemd / launchd 托管放到 M5；`GetTrees` 递归 RPC 未实现（预热与检出用按层批量的 `GetObjects`）。
-> **M5a 认证与鉴权实现说明**（2026-10-17）：M5 拆成多个 PR，这是第一个。
-> - **只用标准协议**：自签访问令牌（ES256 JWT，15 分钟）；不透明令牌（PAT / 刷新令牌，只存 SHA-256）；外部 JWT（JWKS 或 HS256 共享密钥，claims 映射可配）；RFC 7662 内省；RFC 8628 device flow；OPA 兼容的鉴权回调。starhub-server（HS256、`current_user`、rebac）只是一份配置，见 `docs/guide/auth.md`。
-> - **ACL**：TOML 规则按主体、仓库通配、动作（read < write < land < admin）、ref、路径前缀授予，存在元数据库中，各节点 30 秒内重新加载。按 id 读对象需要整个仓库的读权限（§9 中 GetTrees 过滤目录条目的做法推迟，`GetTrees` 尚未实现）；`ListDir` / `Diff` 为只限部分路径的读者过滤条目；创建提交逐个检查改动路径；合入检查目标 ref。
-> - **缓存层**：与 §9「L2 只验签」不同，L2 和 daemon 不解析令牌，用调用者的令牌向 L3 `CheckAccess(repo, read)`，结果按（令牌, 仓库）缓存 60 秒。这样对 PAT、外部令牌和鉴权回调都适用，吊销最多延迟 60 秒。daemon 在服务端不可达时，对 24 小时内确认过的身份放行本地读取。敏感前缀不缓存（§9）尚未实现。
-> - **客户端**：SDK `Auth::Exchange` 换取访问令牌并提前 2 分钟续期；`scn login`（device flow 或 `--token`）、`whoami`、`logout`，凭据存 macOS 钥匙串或 0600 文件。
+| Milestone | Duration | Contents | Acceptance |
+|---|---|---|---|
+| **M2 Derivation and queries** | 3 weeks | The derivation framework, Gen/SkipList/PathHistory/Blame, Log/Blame/Diff/MergeBase, the deriver process | Query p99 under 100 ms on a repository of 100,000 commits |
+| **M3 High concurrency** | 3 weeks | LandCoordinator batching and leases, the idempotency table, rate limits and load shedding, lincheck | 200+ lands per second on one ref; no duplicated or lost lands when the leader is killed |
 
-> **M5b redaction 与运维命令实现说明**（2026-10-18）：
-> - **数据模型**：没有在 `objects_index` 上加列，而是新表 `redactions`，按 (仓库, 对象) 一条记录（原因、操作人、时间、是否有效、安排的删除时间、删除时间）。撤销只把记录标为无效，不删除。每次修改分配一个全局递增的 `seq`，取自单行计数表 `redaction_seq`：写入事务先更新这一行，行锁让写入按 seq 顺序提交，按 seq 增量同步不会漏掉晚提交的小序号。不用 SEQUENCE，因为序列值的分配顺序与提交顺序无关。
-> - **只能 redact blob**：目录树和提交对象是历史结构，redact 它们会让检出和查询失效。
-> - **读路径**：`GetObjects` 在确认可见之后批量查一次 redaction，任何一个对象被 redact 就整个请求返回 `REDACTED`，与 OBJECT_MISSING 一样要么完整成功、要么一开始就报错。`ReadFile`、`Blame` 和合入时的三方合并经由 `RedactedBlobs` 读取，逐个检查 blob。rebase 需要合并 redact 过的版本时合入失败，内容不会进入新提交。
-> - **缓存层**：新 RPC `ObjectService.ListRedactedObjects(repo, after_seq)`，需要仓库中任意读权限。L2 和 daemon 按仓库保存 redact 过的对象，最多每 10 秒用调用者的令牌增量同步一次。命中 redaction 时返回与 L3 相同的 REDACTED，并删除本地字节（字节跨仓库共享，其它仓库的读取会重新回源）。同步失败时拒绝这次读取（`UNAVAILABLE`，令牌被拒等业务错误原样返回），不交出本地副本，否则上游不可用期间「最多 10 秒」的上限不成立；只有旧服务端的 `UNIMPLEMENTED` 按没有 redaction 处理。
-> - **purge**：`Purge` 安排在宽限期（`--purge-grace`，默认 24 小时）后删除，期间可以撤销。janitor 每轮执行到期的删除，只有对象索引中有该对象的每个仓库都已 redact 才删除字节，否则保持待删除并记录日志。判断“哪些仓库有这个对象”用 `object_repos`：按仓库逐个用主键探测，不为 `objects_index` 增加按 id 的二级索引（写入热路径上不值得多维护一个）。`BlobStore` 新增 `delete`。
-> - **运维命令**：`scion admin redact / unredact / purge / redactions`，直接读写存储；`AdminService` 提供同名的远程接口，权限为所涉及仓库的 admin，`all_repos` 和不限仓库的列表需要系统管理。`scion admin fsck` 校验 ref → 提交 → 目录树 → 文件的引用闭包、对象索引（含大小）与对象存储，`--verify` 读出并校验哈希。`scion admin lease ls` 列出租约。
-> - **限制**：检出包含被 redact 文件的版本会失败（没有占位文件）；blame 追溯到被 redact 的版本时返回 REDACTED；purge 之后重新上传的相同内容不会自动删除。`rederive` 和 `drain` 推迟。
-> **M5c 可观测性与限流实现说明**（2026-10-18）：
-> - **新 crate `scion-obs`**（服务端最底层，store 以上都可以用）：
->   - 指标用 `prometheus-client`。进程内一份注册表，各层直接更新；区域缓存已有的统计在抓取时读取，不改成指标类型。`/metrics` 在独立端口（`--metrics-listen`），不经认证与限流；
->   - 追踪用 `tracing-opentelemetry` 加 OTLP gRPC 导出，按标准环境变量配置。
-> - **中间件顺序**（从外到内）：追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务，与 §5.3 一致。
->   - 过载丢弃放在认证之前：过载时不再花 CPU 验签；
->   - 按租户限流要用认证出的身份，所以在认证之后。
-> - **指标的标签**：指标层在认证之外，路径由调用方任意给出。只给协议中的方法建时间序列，方法列表由 `scion-proto` 的 build.rs 从 proto 生成（`METHODS`）；其它路径归入 `unknown`。
-> - **指标的状态码**：可能在响应头里（只有 trailers 的错误响应），也可能在流结束时的 trailers 里，所以包装响应体，结束时才记录。流式 RPC 的延迟因此是整个流的时长。
-> - **按租户限流**：没有使用 `governor`，沿用已有的令牌桶。
->   - 租户：认证过的主体；匿名请求按来源 IP。
->   - 令牌桶和在途名额放在 moka 中，空闲 10 分钟淘汰、最多 100 万个 key：按 IP 计数时不会无限增长；空闲期间令牌早已补满，淘汰不改变限流结果。
->   - 集群内转发的请求不再计（与按仓库的写入限流一致）。`x-scion-forwarded` 是普通 metadata，调用方也能带上，所以只有值等于集群共享密钥（`--cluster-secret`，常数时间比较）时才算本集群转发的；没有配置密钥时一律计数。按仓库的写入限流同样改为这个判断。带了这个头的请求仍然不再转发（避免环路），伪造只会让调用方自己的请求失败。
-> - **deadline**：
->   - 取客户端 `grpc-timeout` 与 `--max-request-timeout`（默认 60 秒）中较小的一个，超时返回 DEADLINE_EXCEEDED；
->   - 截止时间放进请求 extensions。转发给 leader 的合入和区域缓存的回源用剩余时间设置 `grpc-timeout`；区域缓存回源还会注入 `traceparent`；
->   - tonic 自身也按 `grpc-timeout` 计时并先触发（返回 CANCELLED），所以服务端上限之外，本层主要负责传递和计数。
-> - **推迟**：
->   - SDK 和 `scn` 自动注入 `traceparent`；
->   - daemon 的 `/metrics`：客户端 crate 不能依赖服务端的 `scion-obs`；
->   - 派生滞后指标：还没有 deriver；
->   - 元数据库与 S3 调用的子 span。
+> **M3 implementation notes** (2026-10-17):
+> - **Server-side rebase** (`server/merge`): compares only the delta's paths in base and onto, applying unchanged ones directly, at a cost independent of the repository's size and of the commits in between; files changed on both sides get a line-level diff3 (diffy), and the executable bit merges by three-way rules; binary files, symbolic links, files over 8 MiB, modify/delete, add/add and file/directory conflicts are MERGE_CONFLICT, with details in the ErrorInfo metadata (`path.N`, `kind.N`, `base.N`, `ours.N`, `theirs.N`). More direct than §6.3's "intersect path_history", with the same results.
+> - **Land rebases by default:** the stack to land runs from the commit back along first parents to a commit in the ref's history, fast-forwarded or rebased one by one; `fast_forward_only` keeps the fast-forward-only semantics (used by the git import). Rebased commits keep author, message and change id, and drop `git.sha1`.
+> - **Idempotency and deduplication:** `land_commit` updates the ref, writes `landed` (each change id lands once per ref) and `idempotency` (the same request id returns its first success, different parameters are INVALID_ARGUMENT, kept 24 hours) in one transaction. Only successes are recorded: a failed request wrote nothing, and its retry runs again. `GetLandStatus` looks up by request id. The SDK retries retryable errors with the same request id.
+> - **LandCoordinator** (`server/land`): one task per ref, batches of at most 64 requests or 5 ms, rebased in order, conflicting requests failing alone; a batch's rebase results stay in memory first (a write-behind buffer) for later requests to build on, and the whole batch is written at the end in bulk (objects written concurrently, multi-row inserts with `index_paths_many` / `put_changesets`) and committed with one `land_commit`.
+> - **Clusters:** turned on with `scion server --advertise-url URL`. Each ref's task holds a lease (the `leases` table, TTL 5 seconds, renewed every 2), and other nodes that get `NotLeader` forward over gRPC (`x-scion-forwarded`, never forwarded again). A normal exit releases leases so others take over at once; a killed process's leases expire. The ref version is the fencing token, so two nodes briefly both believing they lead cannot corrupt the ref.
+> - **Overload protection:** a global cap on requests in flight (refused at once beyond it, RESOURCE_EXHAUSTED / RATE_LIMITED with `retry_after_ms`), and a per-repository write token bucket (`--repo-write-rate`).
+> - **Acceptance:** `server/land/tests/bench.rs` (2,000 requests, 200 concurrent clients, one ref, objects in memory): PostgreSQL 885/s (p99 379 ms), SQLite 1,921/s (p99 173 ms). `server/land/tests/lincheck.rs` checks no duplicates, no losses, nothing from thin air and real-time order, covering concurrent conflicts on one node, forwarding between two nodes and killing the leader during a land (SQLite metadata, clients retrying with the same request id).
+> - **Left for later:** automatically keeping cold refs off leaders (every ref goes through a batching task for now, which exits when idle); per-tenant rate limits and deadline propagation in M5, with authentication.
 
-> **仓库与分支管理实现说明**（2026-10-18）：这是接入 starhub 的最小闭环第一步，插在 M5c 和 M5d 之间。
-> - **`RepoService`**：Create / Get / List / Update / Delete / Restore / Fork。配额推迟。
->   - 权限：创建、修改、删除、恢复需要该仓库名上的 admin；fork 需要来源的 read 加目标的 admin；ListRepos 逐个检查 read，只返回能读的仓库。
-> - **软删除**：`repos` 表加 `deleted_at_ms`，按名字查仓库只找未删除的。宽限期（`--repo-delete-grace`，默认 24 小时，下限 2 小时）后 janitor 分批清除。
->   - 清除方式：按每张表的主键每次删一批（`(pk) IN (SELECT pk … LIMIT n)`，SQLite、PostgreSQL 通用，不依赖 ctid），最后删 `repos` 行，名字才释放。
->   - 宽限期下限的原因：各层缓存按仓库名索引（提交记录缓存、L2 与 daemon 的可见集和 redaction 状态），都加了 1 小时的 TTL。名字释放前它们一定已过期，所以不需要跨节点失效。
->   - `object_repos` 不计入已删除的仓库。
-> - **fork**：一个事务内用 `INSERT … SELECT` 复制对象索引、提交、派生数据、路径历史和 ref；有效的 redaction 用 `ROW_NUMBER()` 分配新的 seq。不复制合入记录和请求结果。超大仓库的异步 fork 推迟。
-> - **ref 写操作**：`CreateRef` / `UpdateRef`（可以非快进，即强制回退）/ `DeleteRef`，都是单个 ref 的 CAS，需要该 ref 的 land 权限。默认分支不能删除。
->   - 删除后重新创建的 ref 版本从 1 开始；WatchRefs 不推送删除。
-> - **部署**：`Dockerfile`（多阶段构建，BuildKit 缓存，非 root 运行，基础镜像可换成镜像站）；`deploy/compose`（PostgreSQL + SeaweedFS + server，可选 cache profile）。
+| Milestone | Duration | Contents | Acceptance |
+|---|---|---|---|
+| **M4 Cache layers** | 3 weeks | `scion cache` (foyer + rendezvous + singleflight + hedging), WatchRefs, warming | L2 hit rate at least 99%; 200,000+ object reads per second per node |
 
-> **ref 变化事件实现说明**（2026-10-18）：starhub 接入 S1 的事件部分。
-> - **事件表**：`ref_events` 在 `land_commit` / `delete_ref` / `fork_repo` 的同一事务里写入。seq 取自单行计数器 `ref_event_seq`，与 `redaction_seq` 相同：行锁让 seq 顺序等于提交顺序，按 seq 增量读取不会漏掉晚提交的小序号。
->   - 代价：所有 ref 写入在这一行上串行。合入是按批提交的，PostgreSQL 基准与 main 没有可测出的差异（同一台机器上 762–847 对 763–788 次/秒）。
->   - 事件记录仓库名而不是 repo_id，仓库清除后在保留期内仍可读。
->   - 变化前的提交取自 `ref_log` 的上一版本，删除时取 `DELETE … RETURNING`。
-> - **拉取**：`EventService.ListRefEvents(after_seq)`。`ref_event_bounds` 返回（最早保留的 seq，计数器的值），即使事件已全部清理也能判断消费方落后的部分是否已丢失（`truncated`）。
-> - **推送**：webhook（HMAC-SHA256，GitHub 格式）与 NATS JetStream（`Nats-Msg-Id` 去重，等待确认）。
->   - 每个目标一个租约（`events/<目标>`），进度存在 settings 中，按 seq 顺序、至少送达一次，失败时退避重试。
->   - 新目标从服务端开始监听前的位置开始，不重放历史。
->   - 内容中的提交用 `scion_query::new_commits` 计算（从 new 可达、从 old 不可达），路径级改动取自提交的 delta。
->   - 与原设计的差别：subject 不含仓库名（仓库名可以包含 `.`）。
-> - **推迟**：仓库级事件（创建、删除、fork 本身）、webhook 按仓库或按事件类型过滤、多个 webhook。
+> **M4 implementation notes** (2026-10-17):
+> - **WatchRefs** (`RefService.WatchRefs`): a snapshot first, then the new state at each move; only the latest state of each ref is guaranteed, and resubscribing with `known_versions` resumes after a disconnect. Lands on this node are pushed at once; lands on other nodes of a cluster are found by per-repository polling (only repositories with subscribers, every `--ref-poll-interval`, 1 second by default), without NATS. Subscription streams are ended on shutdown, so long connections do not hold up a graceful stop.
+> - **`scion cache`** (`server/cache`): a foyer hybrid cache (memory evictions go to disk), rendezvous sharding (BLAKE3 scores, one hop between nodes, fetching upstream itself when the owner is unreachable), and single-flight in the new shared crate `common/flight` (claiming and completing separated, a batch of misses merged into one upstream request). The upstream pool: p95 hedging, per-upstream circuit breaking (5 failures in a row cool down for 5 seconds), application errors not switching upstreams, every fetched object's hash checked. Warming subscribes to upstream WatchRefs and descends only into changed subtrees. **Per-repository visibility matches L3** (review pointed out that hits and single-flight looked only at object ids): bytes are deduplicated by id, single-flight merges by (repository, id), the id is confirmed visible in the request's repository before answering, successful fetches record (repository, id) in a visible set, hits of unknown visibility are confirmed in a batched `HasObjects`, and invisible ids return the same OBJECT_MISSING as L3. The daemon does the same.
+> - **The L3 read path** (§7.3): `CachedBlobs` wraps the BlobStore; small objects (≤1 MiB) go into a moka cache weighted by bytes, concurrent reads of one object read the backend once, and backend concurrency is capped at 256. `--read-endpoint URL@REGION` recommends caches in ServerInfo.
+> - **`scn daemon`** (`client/daemon`): a Unix socket (0600). `GetObjects` is answered from a local CAS (disk files + a memory tier, hashes checked on read, evicted by modification time), and misses are fetched as the caller through the SDK (which uses the regional cache the server recommends); `RefService` is forwarded, registering prefetches on `ResolveRef`; other RPCs are forwarded as they are at the HTTP/2 level (an axum fallback), so the daemon needs no knowledge of them. Through the daemon, the SDK sends `x-scion-upstream` with each request, so one daemon serves several servers. `scn` goes through the daemon by default, starting it on demand and connecting directly when that fails; `SCION_NO_DAEMON=1` turns it off.
+> - **SDK:** batched `get_objects` (used by the working copy's checkouts and syncs, with 8 batches downloading concurrently and files written on background threads during checkouts); read endpoints chosen by region, connecting directly to the server when unreachable.
+> - **Fix:** WriteService's request size limit used to equal the upload chunk (about 1.1 MB), rejecting a `CreateChangeset` of 100,000 changes; it now leaves room by `max_changes_per_changeset` (256 bytes each, at most 256 MiB).
+> - **Acceptance:** `server/cache/tests/bench.rs` (Apple M5, objects in memory, clients and cache on one machine): 200 clients checking out the same 20,000 objects from cold, a 99.5% hit rate (the theoretical maximum), each object fetched upstream once; 1.53 million objects per second from one warm node (gRPC, batches of 64), and 164,000 requests per second of 1 object each. `client/daemon/tests/bench.rs`: 100,000 files checked out through a warm daemon in 5.3 s, the same as creating those files locally (5.4 s; the client target of 5 s is bounded by the local file system, and creating files on several threads is slower).
+> - **Left for later:** isolating sensitive prefixes in cache layers and L2 token checks, with M5's ACLs; the daemon's `/metrics` and systemd / launchd hosting in M5; the recursive `GetTrees` RPC is not implemented (warming and checkouts use level-by-level batched `GetObjects`).
 
-> **合入前检查实现说明**（2026-10-18）：starhub 接入 S1 的推送前检查。
-> - **检查时机**：`Land`、`CreateRef`、`UpdateRef` 在授权和限流之后、进入合入队列之前，同步调用外部 webhook。
->   - 检查的是客户端提交的版本（服务端 rebase 不改变每个提交的 delta），所以放在协调器之外，不拖慢批处理。
->   - 本集群转发来的合入（带正确的 `--cluster-secret`）不再检查。
-> - **检查的范围**：`new_commits(base, tip)`，base 为 ref 当前提交；新建的 ref 以默认分支为基准。没有新提交时不调用。
-> - **结果**：2xx 允许（可以用 `{"allowed": false}` 拒绝）；4xx（408、429 除外）拒绝；其它情况视为不可用，默认拒绝（fail-closed）。
->   - 配置了检查却无法创建 HTTP 客户端时一律拒绝，不会悄悄跳过检查。
->   - 拒绝返回新的 `PRE_LAND_REJECTED`。
+> **M5a authentication and authorization notes** (2026-10-17): M5 is split into several PRs, and this is the first.
+> - **Standard protocols only:** self-issued access tokens (ES256 JWT, 15 minutes); opaque tokens (PATs and refresh tokens, only their SHA-256 stored); external JWTs (JWKS or an HS256 shared secret, with configurable claim mapping); RFC 7662 introspection; the RFC 8628 device flow; an OPA-compatible authorization callback. starhub-server (HS256, `current_user`, rebac) is just a configuration; see `docs/guide/auth.md`.
+> - **ACL:** TOML rules grant by subject, repository wildcard, action (read < write < land < admin), ref and path prefix, kept in the metadata database and reloaded by every node within 30 seconds. Reading objects by id needs read on the whole repository (§9's filtering of directory entries in GetTrees is deferred, as `GetTrees` is not implemented); `ListDir` / `Diff` filter entries for readers limited to some paths; creating a commit checks each changed path; landing checks the target ref.
+> - **Cache layers:** unlike §9's "L2 only verifies signatures", L2 and the daemon do not parse tokens: they call `CheckAccess(repo, read)` on L3 with the caller's token and cache the result per (token, repository) for 60 seconds. This works for PATs, external tokens and the authorization callback alike, with revocations at most 60 seconds late. When the server is unreachable, the daemon lets identities confirmed within 24 hours read locally. Keeping sensitive prefixes out of caches (§9) is not implemented yet.
+> - **Client:** the SDK's `Auth::Exchange` exchanges for access tokens and renews 2 minutes early; `scn login` (device flow or `--token`), `whoami` and `logout`, with credentials in the macOS Keychain or a 0600 file.
 
-| **M5 生产化** | 4 周 | YugabyteDB 档与 `migrate-meta` 工具、ACL/OIDC/JWT、redaction、OTel、Helm、混沌测试、多区域 follower read、`conformance` 发布 | 全部 SLO 达标；单 AZ 故障演练通过 |
+> **M5b redaction and operations notes** (2026-10-18):
+> - **Data model:** no column on `objects_index`, but a new table, `redactions`, with a row per (repository, object) (reason, operator, time, whether active, scheduled deletion time, deletion time). Undoing only marks the row inactive. Each change gets a globally increasing `seq` from the single-row counter table `redaction_seq`: writing transactions update that row first, and its row lock commits writes in seq order, so syncing incrementally by seq never misses a small seq committed late. Not a SEQUENCE, since sequence values are allocated in an order unrelated to commit order.
+> - **Only blobs can be redacted:** trees and commit objects are the structure of history, and redacting them would break checkouts and queries.
+> - **The read path:** `GetObjects` checks redactions in one batch after visibility, and returns `REDACTED` for the whole request if any object is redacted, succeeding fully or failing up front as with OBJECT_MISSING. `ReadFile`, `Blame` and the three-way merges of lands read through `RedactedBlobs`, checking blob by blob. When a rebase needs to merge a redacted version, the land fails and the content never enters a new commit.
+> - **Cache layers:** a new RPC, `ObjectService.ListRedactedObjects(repo, after_seq)`, needing any read in the repository. L2 and the daemon keep the redacted objects per repository, syncing incrementally at most every 10 seconds with the caller's token. A redacted hit returns the same REDACTED as L3 and deletes the local bytes (bytes are shared across repositories, so other repositories' reads fetch upstream again). When a sync fails, the read is refused (`UNAVAILABLE`; application errors such as a rejected token are passed on) rather than served from the local copy, since otherwise the "at most 10 seconds" bound would not hold while upstream is unavailable; only an old server's `UNIMPLEMENTED` counts as no redactions.
+> - **Purges:** `Purge` schedules a deletion after a grace period (`--purge-grace`, 24 hours by default), undoable meanwhile. Each janitor round runs due deletions, deleting bytes only when every repository whose object index has the object has redacted it, and otherwise keeping it pending and logging. "Which repositories have this object" is `object_repos`: a primary-key probe per repository, rather than a secondary index by id on `objects_index` (not worth maintaining on the write hot path). `BlobStore` gains `delete`.
+> - **Operations commands:** `scion admin redact / unredact / purge / redactions`, reading and writing the stores directly; `AdminService` offers the same remotely, needing admin on the repositories involved, with `all_repos` and unscoped listings needing system administration. `scion admin fsck` checks the reference closure ref → commit → tree → file, the object index (sizes included) and object storage, and `--verify` reads and hashes. `scion admin lease ls` lists leases.
+> - **Limits:** checking out a revision with a redacted file fails (no placeholder file); blame returns REDACTED when it reaches a redacted version; the same content uploaded again after a purge is not deleted automatically. `rederive` and `drain` are deferred.
+
+> **M5c observability and rate limiting notes** (2026-10-18):
+> - **A new crate, `scion-obs`** (the lowest server layer, usable from store up):
+>   - metrics with `prometheus-client`: one registry per process, updated by each layer directly; the regional cache's existing statistics are read at scrape time rather than turned into metric types. `/metrics` is on its own port (`--metrics-listen`), outside authentication and rate limits;
+>   - tracing with `tracing-opentelemetry` and OTLP gRPC export, configured by the standard environment variables.
+> - **Middleware order** (outside in): tracing → metrics → global load shedding → authentication → per-tenant rate limits → deadlines → services, as in §5.3.
+>   - Load shedding comes before authentication, so overload spends no CPU on signatures.
+>   - Per-tenant limits need the authenticated identity, so they come after authentication.
+> - **Metric labels:** the metrics layer is outside authentication, and paths are whatever callers send, so only the protocol's methods get time series; the method list (`METHODS`) is generated from the protos by `scion-proto`'s build.rs, and other paths count as `unknown`.
+> - **Metric status codes:** may be in the response headers (trailers-only error responses) or in the trailers at the end of a stream, so the response body is wrapped and recorded when it ends. Streaming RPCs' latency is therefore the whole stream's.
+> - **Per-tenant rate limits:** not `governor`, but the existing token buckets.
+>   - Tenants: the authenticated principal; anonymous requests by source IP.
+>   - Token buckets and in-flight slots live in moka, evicted after 10 idle minutes, at most a million keys: counting by IP cannot grow without bound, and idle buckets are full anyway, so eviction does not change the outcome.
+>   - Requests forwarded within the cluster are not counted again (as with per-repository write limits). `x-scion-forwarded` is ordinary metadata that callers could send too, so a request counts as forwarded only when the value equals the cluster's shared secret (`--cluster-secret`, compared in constant time); without a secret configured, everything counts. Per-repository write limits use the same check now. Requests with the header are still never forwarded again (avoiding loops), so forging it only fails the caller's own requests.
+> - **Deadlines:**
+>   - the smaller of the client's `grpc-timeout` and `--max-request-timeout` (60 seconds by default), returning DEADLINE_EXCEEDED beyond it;
+>   - the deadline goes into the request extensions. Lands forwarded to the leader and the regional cache's upstream requests set `grpc-timeout` from the time left; the regional cache's upstream requests also inject `traceparent`;
+>   - tonic itself times `grpc-timeout` and fires first (returning CANCELLED), so beyond the server's cap this layer mostly propagates and counts.
+> - **Left for later:**
+>   - the SDK and `scn` injecting `traceparent`;
+>   - the daemon's `/metrics`: client crates cannot depend on the server's `scion-obs`;
+>   - a derivation lag metric: there is no deriver yet;
+>   - child spans for metadata database and S3 calls.
+
+> **Repository and branch management notes** (2026-10-18): the first step of the minimal loop for starhub, between M5c and M5d.
+> - **`RepoService`:** Create / Get / List / Update / Delete / Restore / Fork. Quotas are deferred.
+>   - Permissions: admin on the repository's name to create, change, delete and restore; read on the source and admin on the target to fork; ListRepos checks read repository by repository and returns only readable ones.
+> - **Soft deletion:** `repos` gains `deleted_at_ms`, and lookups by name find only repositories not deleted. After the grace period (`--repo-delete-grace`, 24 hours by default, at least 2), the janitor purges in batches.
+>   - How: a batch at a time by each table's primary key (`(pk) IN (SELECT pk … LIMIT n)`, for SQLite and PostgreSQL alike, without ctid), deleting the `repos` row last, which frees the name.
+>   - Why the grace period has a minimum: caches at every layer are keyed by repository name (the commit record cache, the visible sets and redaction state of L2 and the daemon), all with a 1-hour TTL. They have expired before the name is freed, so no cross-node invalidation is needed.
+>   - `object_repos` leaves deleted repositories out.
+> - **Forks:** one transaction copies the object index, commits, derived data, path history and refs with `INSERT … SELECT`; active redactions get new seqs through `ROW_NUMBER()`. Land records and request results are not copied. Asynchronous forks of very large repositories are deferred.
+> - **Ref writes:** `CreateRef` / `UpdateRef` (non-fast-forward allowed, that is, a forced move back) / `DeleteRef`, each a CAS of one ref, needing land on that ref. The default branch cannot be deleted.
+>   - A ref recreated after deletion starts at version 1 again; WatchRefs does not push deletions.
+> - **Deployment:** a `Dockerfile` (multi-stage build, BuildKit caches, running as non-root, base images replaceable by mirrors) and `deploy/compose` (PostgreSQL + SeaweedFS + server, with an optional cache profile).
+
+> **Ref event notes** (2026-10-18): the event part of starhub's S1.
+> - **The event table:** `ref_events` is written in the same transaction as `land_commit` / `delete_ref` / `fork_repo`. Its seq comes from the single-row counter `ref_event_seq`, as with `redaction_seq`: the row lock makes seq order the commit order, so reading incrementally by seq never misses a small seq committed late.
+>   - The cost: every ref write serializes on that row. Lands commit in batches, and the PostgreSQL benchmark shows no measurable difference from main (762–847 against 763–788 per second on one machine).
+>   - Events record the repository name rather than repo_id, so they stay readable for the retention period after a purge.
+>   - The commit before a change comes from the previous version in `ref_log`, or from `DELETE … RETURNING` for deletions.
+> - **Pulling:** `EventService.ListRefEvents(after_seq)`. `ref_event_bounds` returns (the earliest seq kept, the counter's value), so even with every event cleaned up it can tell whether part of what a consumer missed is gone (`truncated`).
+> - **Pushing:** webhooks (HMAC-SHA256 in GitHub's format) and NATS JetStream (`Nats-Msg-Id` deduplication, waiting for acknowledgment).
+>   - A lease per target (`events/<target>`), progress kept in settings, in seq order, at least once, retried with backoff on failure.
+>   - A new target starts from where the server was before it began listening, without replaying history.
+>   - The commits in an event come from `scion_query::new_commits` (reachable from new and not from old), and path-level changes from the commits' deltas.
+>   - Unlike the original design, subjects do not contain the repository name (which may contain `.`).
+> - **Left for later:** repository-level events (creation, deletion, forks themselves), webhook filters by repository or event type, several webhooks.
+
+> **Pre-land check notes** (2026-10-18): the pre-push checks of starhub's S1.
+> - **When:** `Land`, `CreateRef` and `UpdateRef` call the external webhook synchronously, after authorization and rate limits and before entering the land queue.
+>   - What is checked is the version the client submitted (a server-side rebase does not change each commit's delta), so the check sits outside the coordinator and does not slow batching.
+>   - Lands forwarded within the cluster (with the right `--cluster-secret`) are not checked again.
+> - **What:** `new_commits(base, tip)`, with base the ref's current commit; a new ref compares with the default branch. Without new commits, nothing is called.
+> - **Outcomes:** 2xx allows (`{"allowed": false}` denies); 4xx (but 408 and 429) denies; anything else counts as unavailable and denies by default (fail-closed).
+>   - When a check is configured but its HTTP client cannot be created, everything is denied rather than silently skipping the check.
+>   - Denials return the new `PRE_LAND_REJECTED`.
+
+| Milestone | Duration | Contents | Acceptance |
+|---|---|---|---|
+| **M5 Production** | 4 weeks | The YugabyteDB tier and the `migrate-meta` tool, ACL/OIDC/JWT, redaction, OTel, Helm, chaos tests, multi-region follower reads, publishing `conformance` | Every SLO met; a single-AZ failure drill passes |
 
 ---
 
-## 15. 待决策项
+## 15. Open decisions
 
-1. ~~元数据库~~：已确定为三档，SQLite / PostgreSQL / YugabyteDB，共用一套 sqlx 代码，不使用 CockroachDB（2026-10-16，见 §4.4）。
-2. ~~规范编码~~：已确定为自定义 varint 格式，配齐 golden 测试向量，规范见 `SPEC.md`（2026-10-16，见 §4.2）。
-3. ~~是否复用参考实现的代码~~：只借鉴思路（规范组织方式、故障注入埋点、redaction 等），不拷贝代码，全部自行实现（2026-10-16）。
-4. ~~客户端语言~~：已确定为 Rust，只提供默认客户端，不做 Go 版本（2026-10-16）。
+1. ~~Metadata database~~: decided, three tiers, SQLite / PostgreSQL / YugabyteDB, sharing one sqlx codebase, without CockroachDB (2026-10-16, see §4.4).
+2. ~~Canonical encoding~~: decided, a custom varint format with golden test vectors, specified in `SPEC.md` (2026-10-16, see §4.2).
+3. ~~Reusing the reference implementation's code~~: ideas only (how the spec is organized, fault injection points, redaction and so on), no copied code, everything written here (2026-10-16).
+4. ~~Client language~~: decided, Rust, with only the default client and no Go version (2026-10-16).
 
 ---
 
-## 16. 外部系统集成用的扩展点
+## 16. Extension points for external systems
 
-为了接入 starhub-server 并与 Gitaly 并行运行，需要新增以下**通用**能力（独立部署时同样可用），完整设计见 [`starhub-integration.md`](./starhub-integration.md) §5：
+To connect starhub-server and run alongside Gitaly, these **general** capabilities are added (usable by standalone deployments too); the full design is in §5 of [`starhub-integration.md`](./starhub-integration.md):
 
-- `RepoAdminService`：Create/Delete/Get/Update/Fork/List，面向大量小仓库，每个仓库的常驻开销都要按需懒加载。
-- 外部身份（可信 issuer 的 JWKS），可选外部鉴权回调（带 TTL 缓存）。
-- pre-land webhook：同步调用，可配置超时和故障时的处理（fail-open 或 fail-closed）。
-- `scion.<repo>.ref.updated` 事件（包含路径级 delta），发到 NATS，或通过 webhook 推送。
-- 派生数据：`GitSha`、`LastCommitPerEntry`、`LfsPointerIndex`、`TreeStats`、`Sha256`。
-  > **GitSha 实现说明**（2026-10-18）：所有提交都有 git 兼容 sha。导入的提交用扩展字段 `git.sha1`；其余提交按需逐层计算 blob/tree/commit（commit 对象多一行 `scion-id` 头保证单射），结果缓存在派生数据 `git-commit`、`git-sha1`（反向）、`git-tree`、`git-blob` 中，未变化的子树直接命中。`GetGitShas` 批量映射，事件与 pre-land 请求带 `old_git_sha`/`new_git_sha`/`git_sha`。S3 的 git-gateway 复用同一套对象格式。详见 [`docs/guide/git-sha.md`](../guide/git-sha.md)。
-  > **Archive 实现说明**（2026-10-18）：`QueryService.Archive` 按目录树深度优先写 tar / tar.gz / zip（zip 用不需要 Seek 的流式写入），每满 `max_chunk_bytes` 发送一块，内存与单个文件相当；条目时间取提交时间，redact 的文件写占位说明。权限要求子树全部可读。详见 [`docs/guide/archive.md`](../guide/archive.md)。
-  > **LastCommitPerEntry / TreeStats 实现说明**（2026-10-18）：`ListLastCommits` 沿第一父提交链（与 Blame 同语义），按（提交, 目录）缓存；第一父提交有缓存时按本提交的 delta 增量更新，否则用 PathHistory 索引逐条目找链上最近的候选，索引不可用时扫描 delta（上限 2000 个提交）。`GetTreeStats` 按目录树 id 缓存文件数、子目录数与字节数。详见 [`docs/guide/browse.md`](../guide/browse.md)。
-- `QueryService.Archive`、`ImportService`（从 git 增量导入）。
-- `scion git-gateway` 角色：实现 Gitaly 的 SmartHTTP/SSH 服务子集，让 git CLI 也能访问 Scion 仓库。
-- 对象存储：与 starhub 共用 MinIO 时，使用独立的 bucket 或 `prefix`（见 §4.6）。
+- `RepoAdminService`: Create/Delete/Get/Update/Fork/List, for many small repositories, with every per-repository resident cost loaded lazily.
+- External identities (JWKS of trusted issuers), and an optional external authorization callback (with a TTL cache).
+- The pre-land webhook: called synchronously, with a configurable timeout and failure handling (fail-open or fail-closed).
+- `scion.<repo>.ref.updated` events (with path-level deltas), on NATS or pushed as webhooks.
+- Derived data: `GitSha`, `LastCommitPerEntry`, `LfsPointerIndex`, `TreeStats`, `Sha256`.
+  > **GitSha notes** (2026-10-18): every commit has a git-compatible SHA. Imported commits use the extension field `git.sha1`; others compute blob/tree/commit level by level on demand (the commit object carries an extra `scion-id` header so the mapping is injective), cached in the derived data `git-commit`, `git-sha1` (the reverse), `git-tree` and `git-blob`, with unchanged subtrees hitting the cache. `GetGitShas` maps in batches, and events and pre-land requests carry `old_git_sha`/`new_git_sha`/`git_sha`. S3's git gateway reuses the same object formats. See [`docs/guide/git-sha.md`](../guide/git-sha.md).
+  > **Archive notes** (2026-10-18): `QueryService.Archive` writes tar / tar.gz / zip depth first through the tree (zip with a streaming writer that needs no Seek), sending a chunk each time `max_chunk_bytes` fills, with memory about one file's size; entries have the commit's time, and redacted files get a placeholder note. It needs read access to the whole subtree. See [`docs/guide/archive.md`](../guide/archive.md).
+  > **LastCommitPerEntry / TreeStats notes** (2026-10-18): `ListLastCommits` follows the first-parent chain (with Blame's semantics), cached per (commit, directory); with the first parent cached, it updates incrementally from this commit's delta, otherwise finds each entry's nearest candidate on the chain through the PathHistory index, scanning deltas (up to 2,000 commits) when the index is unavailable. `GetTreeStats` caches file counts, subdirectory counts and bytes by tree id. See [`docs/guide/browse.md`](../guide/browse.md).
+- `QueryService.Archive`, `ImportService` (incremental imports from git).
+- The `scion git-gateway` role: a subset of Gitaly's SmartHTTP/SSH services, so the git CLI can reach Scion repositories too.
+- Object storage: when sharing MinIO with starhub, a separate bucket or `prefix` (see §4.6).

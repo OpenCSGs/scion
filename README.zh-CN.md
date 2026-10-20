@@ -120,7 +120,7 @@ docker run -d --name scion -p 7080:7080 \
 
 - **使用：** [部署](docs/guide/deploy.zh-CN.md) · [命令导览](docs/guide/cli.zh-CN.md) · [从 git 迁移](docs/guide/coming-from-git.zh-CN.md) · [从 git 导入](docs/guide/git-import.zh-CN.md) · [稀疏检出](docs/guide/sparse-checkout.zh-CN.md) · [仓库与分支](docs/guide/repos.zh-CN.md) · [打包下载](docs/guide/archive.zh-CN.md) · [文件列表页](docs/guide/browse.zh-CN.md) · [git SHA](docs/guide/git-sha.zh-CN.md)
 - **运维：** [对象存储](docs/guide/object-storage.zh-CN.md) · [多节点与合入](docs/guide/cluster.zh-CN.md) · [缓存](docs/guide/cache.zh-CN.md) · [认证与鉴权](docs/guide/auth.zh-CN.md) · [redaction 与 fsck](docs/guide/redaction.zh-CN.md) · [ref 事件](docs/guide/events.zh-CN.md) · [指标与追踪](docs/guide/observability.zh-CN.md)
-- **设计：** [服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md) · 对象格式 [`SPEC.md`](SPEC.zh-CN.md) · 协议 [`proto/scion/v1/`](proto/scion/v1/)
+- **设计：** [服务端](docs/design/rust-server-architecture.zh-CN.md) · [客户端](docs/design/rust-client-architecture.zh-CN.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.zh-CN.md) · 对象格式 [`SPEC.md`](SPEC.zh-CN.md) · 协议 [`proto/scion/v1/`](proto/scion/v1/)
 
 ## 进度
 

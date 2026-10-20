@@ -1,6 +1,6 @@
 //! 工作区文件系统操作。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -309,11 +309,19 @@ fn check_parents(root: &Path, rel: &str) -> Result<()> {
     Ok(())
 }
 
-/// Creates the directories of `rel` one by one, refusing to go through a symbolic link.
-fn create_dirs(root: &Path, rel: &str) -> Result<()> {
+/// Creates the directories of `rel` one by one, refusing to go through a symbolic link. `done`
+/// holds the directories already created or checked, which are skipped.
+fn create_dirs<'a>(root: &Path, rel: &'a str, done: &mut HashSet<&'a str>) -> Result<()> {
     let mut dir = root.to_path_buf();
+    let mut end = 0;
     for part in rel.split('/') {
         dir.push(part);
+        end += part.len();
+        let prefix = &rel[..end];
+        end += 1;
+        if !done.insert(prefix) {
+            continue;
+        }
         match std::fs::create_dir(&dir) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -358,7 +366,7 @@ pub(crate) fn write_file(root: &Path, rel: &str, mode: Mode, data: &[u8]) -> Res
     check_rel(rel)?;
     let path = path_of(root, rel);
     if let Some((dirs, _)) = rel.rsplit_once('/') {
-        create_dirs(root, dirs)?;
+        create_dirs(root, dirs, &mut HashSet::new())?;
     }
     if let Ok(meta) = std::fs::symlink_metadata(&path) {
         if meta.is_dir() {
@@ -421,8 +429,9 @@ pub(crate) fn create_parents<'a>(root: &Path, rels: impl IntoIterator<Item = &'a
     }
     dirs.sort_unstable();
     dirs.dedup();
+    let mut done = HashSet::new();
     for d in dirs {
-        create_dirs(root, d)?;
+        create_dirs(root, d, &mut done)?;
     }
     Ok(())
 }
@@ -545,6 +554,14 @@ mod tests {
                 Err(Error::UnsafePath { .. })
             ));
             assert!(matches!(remove_file(r, "link/victim"), Err(Error::UnsafePath { .. })));
+            // Directories checked once per batch: a link below a shared prefix is still caught
+            std::fs::create_dir_all(r.join("deep/ok")).expect("deep");
+            std::os::unix::fs::symlink(outside.path(), r.join("deep/x")).expect("symlink");
+            assert!(matches!(
+                create_parents(r, ["deep/ok/a/f", "deep/ok/b/f", "deep/x/c/f"]),
+                Err(Error::UnsafePath { .. })
+            ));
+            assert!(r.join("deep/ok/b").is_dir() && !outside.path().join("c").exists());
             assert_eq!(std::fs::read(outside.path().join("victim")).expect("read"), b"keep");
             assert!(!outside.path().join("new").exists());
         }

@@ -1,74 +1,76 @@
-# Scion 对象模型与规范编码（v1）
+# Scion object model and canonical encoding (v1)
 
-本文是 Scion 对象格式的**唯一权威定义**。任何语言的实现只要遵循本文，并通过 `testdata/vectors/` 下的全部 golden 测试向量，就能与官方实现计算出完全相同的对象 ID。
+English | [简体中文](SPEC.zh-CN.md)
 
-- 普通客户端只需要用到 §1 的 ObjectId 和 §1.2 的「下载后校验」，不必实现完整编解码。
-- 规范编码是**唯一**的：同一个逻辑对象只有一种合法字节序列；解码器必须拒绝任何其它写法（§6）。
+This document is the **only authoritative definition** of Scion's object format. An implementation in any language that follows it and passes every golden test vector under `testdata/vectors/` computes exactly the same object ids as the official implementation.
+
+- Ordinary clients need only the ObjectId of §1 and the check after download of §1.2, not the full encoding and decoding.
+- The canonical encoding is **unique**: a logical object has exactly one valid byte sequence, and decoders must reject any other (§6).
 
 ---
 
 ## 1. ObjectId
 
-二进制形式固定 34 字节：
+The binary form is always 34 bytes:
 
 ```
-algo (u8) | kind (u8) | digest (32 字节)
+algo (u8) | kind (u8) | digest (32 bytes)
 ```
 
-| algo | 名称 | digest 计算 |
+| algo | Name | Digest |
 |---|---|---|
-| `0x01` | BLAKE3-256 | BLAKE3 默认模式，输出 32 字节 |
+| `0x01` | BLAKE3-256 | BLAKE3's default mode, 32 bytes of output |
 
-| kind | 名称 | 文本前缀 | digest 输入 |
+| kind | Name | Text prefix | Digest input |
 |---|---|---|---|
-| `0x01` | Blob | `b` | 文件原始字节（不含任何头部） |
-| `0x02` | Tree | `t` | Tree 的规范编码（§4） |
-| `0x03` | Changeset | `c` | Changeset 的规范编码（§5） |
-| `0x05` | ChunkList | `l` | ChunkList 的规范编码（§7），仅服务端存储内部使用 |
+| `0x01` | Blob | `b` | The file's raw bytes (no header of any kind) |
+| `0x02` | Tree | `t` | The tree's canonical encoding (§4) |
+| `0x03` | Changeset | `c` | The changeset's canonical encoding (§5) |
+| `0x05` | ChunkList | `l` | The ChunkList's canonical encoding (§7); used only inside server storage |
 
-其它取值保留，解码时必须拒绝。
+Other values are reserved, and decoders must reject them.
 
-### 1.1 文本形式
+### 1.1 Text form
 
 ```
-<前缀字母><algo 十进制><64 位小写十六进制 digest>
+<prefix letter><algo in decimal><64 lowercase hex digits of the digest>
 ```
 
-例：空文件的 Blob ID 为 `b1af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262`。
+For example, the Blob id of the empty file is `b1af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262`.
 
-解析时必须拒绝：大写十六进制、长度不对、未知前缀或 algo。
+Parsers must reject uppercase hex, wrong lengths and unknown prefixes or algos.
 
-### 1.2 下载后校验
+### 1.2 Checking after download
 
-对任意 kind，都满足 `digest = BLAKE3(对象字节)`，其中「对象字节」对 Blob 是文件内容，对其它 kind 是规范编码。客户端收到对象后**必须**按此校验，不一致即视为损坏，不得信任任何缓存层。
+For every kind, `digest = BLAKE3(object bytes)`, where the object bytes are the file's content for a Blob and the canonical encoding for the other kinds. Clients **must** check this on every object they receive; a mismatch means corruption, and no cache layer is to be trusted.
 
 ---
 
-## 2. 基本类型
+## 2. Basic types
 
-| 记号 | 编码 |
+| Notation | Encoding |
 |---|---|
-| `u8` | 1 字节 |
-| `uvarint` | 无符号 LEB128，最多 10 字节，值域 u64 |
-| `svarint` | 有符号整数先做 ZigZag（`(n << 1) ^ (n >> 63)`），再按 `uvarint` 编码 |
-| `bytes` | `uvarint` 长度 + 原始字节 |
-| `string` | 同 `bytes`，内容必须是合法 UTF-8 |
-| `id` | 34 字节 ObjectId 二进制形式，无长度前缀 |
-| `list<T>` | `uvarint` 元素个数 + 依次排列的元素 |
+| `u8` | 1 byte |
+| `uvarint` | Unsigned LEB128, at most 10 bytes, values in u64 |
+| `svarint` | A signed integer ZigZag-encoded (`(n << 1) ^ (n >> 63)`), then as a `uvarint` |
+| `bytes` | A `uvarint` length and the raw bytes |
+| `string` | As `bytes`, and the content must be valid UTF-8 |
+| `id` | The 34-byte binary ObjectId, without a length prefix |
+| `list<T>` | A `uvarint` count, then the elements one after another |
 
-**varint 必须是最短编码**：除了值 0 编码为单字节 `0x00`，最后一个字节不能是 `0x00`（例如 `0x80 0x00` 非法）。超过 10 字节，或第 10 字节大于 `0x01`（溢出 u64）都非法。
+**Varints must be minimal:** apart from 0, encoded as the single byte `0x00`, the last byte cannot be `0x00` (`0x80 0x00` is invalid, for example). More than 10 bytes, or a 10th byte above `0x01` (overflowing u64), are invalid.
 
 ---
 
-## 3. 对象头
+## 3. Object header
 
-Tree、Changeset、ChunkList 的编码都以 2 字节头部开始：
+The encodings of Tree, Changeset and ChunkList start with a 2-byte header:
 
 ```
 kind (u8) | format_version (u8)
 ```
 
-v1 中 `format_version` 固定为 `0x01`。头部的 kind 必须与解码时期望的 kind 一致。
+In v1, `format_version` is always `0x01`. The header's kind must be the kind the decoder expects.
 
 ---
 
@@ -85,17 +87,17 @@ Entry:
   size        uvarint
 ```
 
-| mode | 含义 | id 的 kind | size |
+| mode | Meaning | Kind of id | size |
 |---|---|---|---|
-| `0x01` | 普通文件 | Blob | 文件字节数 |
-| `0x02` | 可执行文件 | Blob | 文件字节数 |
-| `0x03` | 符号链接（内容是链接目标） | Blob | 目标字节数 |
-| `0x04` | 子目录 | Tree | 必须为 0 |
+| `0x01` | Regular file | Blob | The file's size in bytes |
+| `0x02` | Executable file | Blob | The file's size in bytes |
+| `0x03` | Symbolic link (the content is the target) | Blob | The target's size in bytes |
+| `0x04` | Subdirectory | Tree | Must be 0 |
 
-约束：
-- 条目按 `name` 的**字节序严格升序**排列，不允许重名。
-- `name` 必须满足 §8 的文件名规则。
-- 空 Tree（0 个条目）合法，用于表示空仓库的根目录。
+Constraints:
+- Entries are in **strictly ascending byte order** of `name`, with no duplicate names.
+- `name` must follow the file name rules of §8.
+- An empty tree (0 entries) is valid; it is the root of an empty repository.
 
 ---
 
@@ -103,75 +105,75 @@ Entry:
 
 ```
 header        = 0x03 0x01
-parents       list<id>            # 有序，第一个是 first parent；kind 必须是 Changeset
+parents       list<id>            # ordered, the first is the first parent; kind must be Changeset
 author        Signature
 committer     Signature
 message       string
-change_id     16 字节（无长度前缀）
+change_id     16 bytes (no length prefix)
 delta         list<FileChange>
 extensions    list<Extension>
 
 Signature:
   name        string
   email       string
-  time_ms     svarint             # Unix 毫秒
-  tz_offset   svarint             # 相对 UTC 的分钟数，范围 [-1440, 1440]
+  time_ms     svarint             # Unix milliseconds
+  tz_offset   svarint             # minutes from UTC, in [-1440, 1440]
 
 FileChange:
   path        string
   op          u8
-  若 op = 0x01（Put）:
-    mode      u8                  # 只允许 0x01 / 0x02 / 0x03，不允许 0x04
-    id        id                  # kind 必须是 Blob
+  if op = 0x01 (Put):
+    mode      u8                  # only 0x01 / 0x02 / 0x03, never 0x04
+    id        id                  # kind must be Blob
     size      uvarint
-  若 op = 0x02（Delete）:
-    （无后续字段）
+  if op = 0x02 (Delete):
+    (no further fields)
 
 Extension:
-  key         string              # 非空
+  key         string              # not empty
   value       bytes
 ```
 
-约束：
-- `parents` 中不允许重复 ID。0 个 parent 表示根提交。
-- `delta` 按 `path` 的字节序严格升序排列，不允许重复路径；`path` 必须满足 §8 的路径规则。
-- `delta` 只描述**相对 first parent 的改动**。目录是隐式的：Put 一个文件会自动创建其上级目录，目录变空时自动消失。「同一个 delta 里路径冲突」（例如同时 Put `a` 和 `a/b`）属于语义错误，由建树阶段报告，不在编码层检查。
-- `extensions` 按 `key` 的字节序严格升序排列，不允许重复。未知 key 必须原样保留。
-- 保留的 extension key：`git.sha1`，值为 20 字节的 git 提交 sha，由 git 导入写入。服务端据此建立 git sha → 提交 id 的映射，所有接受版本号的接口都可以使用 40 位小写十六进制的 git sha。
-- Changeset 的 ID **不包含** root tree。root tree 是派生数据，见服务端设计文档 §4.3。
+Constraints:
+- `parents` has no duplicate ids. No parents means a root commit.
+- `delta` is in strictly ascending byte order of `path`, with no duplicate paths; `path` must follow the path rules of §8.
+- `delta` describes only **the changes against the first parent**. Directories are implicit: putting a file creates its parent directories, and a directory that becomes empty disappears. Conflicting paths in one delta (putting both `a` and `a/b`, say) are a semantic error reported when trees are built, not checked by the encoding.
+- `extensions` are in strictly ascending byte order of `key`, with no duplicates. Unknown keys must be kept as they are.
+- Reserved extension key: `git.sha1`, whose value is the 20-byte git commit SHA, written by the git importer. The server maps git SHAs to commit ids with it, so every API that takes a revision accepts a 40-digit lowercase hex git SHA.
+- A changeset's id does **not include** the root tree. The root tree is derived data; see §4.3 of the server design document.
 
 ---
 
-## 6. 解码器必须拒绝的输入
+## 6. Inputs decoders must reject
 
-以下任一情况，解码失败，并返回对应的错误码（错误码用于 golden 向量，各语言实现应映射到等价的错误）：
+In any of these cases, decoding fails with the matching error code (the codes are used by the golden vectors; implementations in other languages map them to equivalent errors):
 
-| 错误码 | 情况 |
+| Error code | Case |
 |---|---|
-| `unexpected_eof` | 输入在字段中途结束 |
-| `trailing_bytes` | 对象解码完成后仍有剩余字节 |
-| `varint_overflow` | varint 超过 10 字节或超出 u64 |
-| `varint_non_minimal` | varint 不是最短编码 |
-| `length_out_of_range` | `bytes` 长度超过剩余输入 |
-| `wrong_kind` | 头部 kind 与期望不符 |
-| `unsupported_version` | `format_version` 不是 1 |
-| `unknown_algo` / `unknown_kind` | ObjectId 中的 algo / kind 未定义 |
-| `unknown_mode` / `unknown_op` | Tree 条目或 FileChange 的 mode / op 未定义；FileChange 中出现 mode `0x04` 也报 `unknown_mode` |
-| `invalid_utf8` | `string` 不是合法 UTF-8 |
-| `invalid_name` / `invalid_path` | 违反 §8 |
-| `not_sorted` | 条目、delta 或 extensions 未严格升序（含重复） |
-| `id_kind_mismatch` | id 的 kind 与 mode 或字段要求不符 |
-| `nonzero_tree_size` | 子目录条目的 size 不为 0 |
-| `duplicate_parent` | parents 中有重复 |
-| `invalid_tz_offset` | 时区偏移超出范围 |
-| `invalid_extension_key` | extension key 为空 |
-| `invalid_chunk_list` | ChunkList 违反 §7 的约束 |
+| `unexpected_eof` | The input ends in the middle of a field |
+| `trailing_bytes` | Bytes remain after the object is decoded |
+| `varint_overflow` | A varint is longer than 10 bytes or overflows u64 |
+| `varint_non_minimal` | A varint is not minimal |
+| `length_out_of_range` | A `bytes` length exceeds the remaining input |
+| `wrong_kind` | The header's kind is not the expected one |
+| `unsupported_version` | `format_version` is not 1 |
+| `unknown_algo` / `unknown_kind` | An ObjectId's algo / kind is not defined |
+| `unknown_mode` / `unknown_op` | A tree entry's or FileChange's mode / op is not defined; mode `0x04` in a FileChange is `unknown_mode` too |
+| `invalid_utf8` | A `string` is not valid UTF-8 |
+| `invalid_name` / `invalid_path` | §8 is violated |
+| `not_sorted` | Entries, delta or extensions are not strictly ascending (duplicates included) |
+| `id_kind_mismatch` | An id's kind does not match its mode or field |
+| `nonzero_tree_size` | A subdirectory entry's size is not 0 |
+| `duplicate_parent` | parents has duplicates |
+| `invalid_tz_offset` | A time zone offset is out of range |
+| `invalid_extension_key` | An extension key is empty |
+| `invalid_chunk_list` | A ChunkList violates the constraints of §7 |
 
 ---
 
-## 7. ChunkList（服务端内部）
+## 7. ChunkList (server-internal)
 
-大于 8 MiB 的文件在服务端按 FastCDC 分块存储，ChunkList 记录分块清单。文件在 Tree 和 Changeset 中**始终使用整个文件的 Blob ID**，ChunkList 只是存储细节，客户端看不到。
+Files over 8 MiB are stored on the server in FastCDC chunks, and a ChunkList lists the chunks. Trees and changesets **always use the whole file's Blob id**; the ChunkList is a storage detail that clients never see.
 
 ```
 header        = 0x05 0x01
@@ -179,32 +181,32 @@ total_size    uvarint
 chunks        list<Chunk>
 
 Chunk:
-  id          id                  # kind 必须是 Blob
-  size        uvarint             # 必须大于 0
+  id          id                  # kind must be Blob
+  size        uvarint             # must be above 0
 ```
 
-约束：至少 1 个分块；所有分块 size 之和等于 `total_size`。
+Constraints: at least one chunk, and the chunks' sizes add up to `total_size`.
 
 ---
 
-## 8. 文件名与路径规则
+## 8. File name and path rules
 
-**文件名**（Tree 条目的 `name`、路径中的每一段）：
-- 非空，不超过 255 字节；
-- 不能是 `.` 或 `..`；
-- 不能包含 `/`（0x2F）或 NUL（0x00）。
+**File names** (a tree entry's `name`, and each component of a path):
+- not empty, at most 255 bytes;
+- not `.` or `..`;
+- without `/` (0x2F) or NUL (0x00).
 
-**路径**（FileChange 的 `path`）：
-- 由一个或多个合法文件名用 `/` 连接而成，不超过 4096 字节；
-- 不能以 `/` 开头或结尾，不能有连续的 `/`。
+**Paths** (a FileChange's `path`):
+- one or more valid file names joined by `/`, at most 4,096 bytes;
+- not starting or ending with `/`, and without consecutive `/`.
 
-大小写、Unicode 规范化都**不做**处理：字节不同就是不同的名字。
+Case and Unicode normalization are **not** handled: different bytes are different names.
 
 ---
 
-## 9. Golden 测试向量
+## 9. Golden test vectors
 
-位于 `testdata/vectors/`，JSON 格式：
+In `testdata/vectors/`, as JSON:
 
 ```jsonc
 {
@@ -212,9 +214,9 @@ Chunk:
     {
       "name": "tree_single_file",
       "kind": "tree",                // blob | tree | changeset | chunk_list
-      "input": { ... },             // 结构化输入，字段名同本文
-      "encoding": "0201...",        // 规范编码（小写十六进制）；blob 为原始内容
-      "id": "t1..."                 // 期望的 ObjectId 文本形式
+      "input": { ... },             // structured input, with the field names of this document
+      "encoding": "0201...",        // canonical encoding (lowercase hex); the raw content for a blob
+      "id": "t1..."                 // the expected ObjectId in text form
     }
   ],
   "invalid": [
@@ -223,13 +225,13 @@ Chunk:
 }
 ```
 
-结构化输入中：ID 用文本形式，`change_id` 和 extension 的 `value` 用小写十六进制，blob 的内容用十六进制字段 `data_hex`。
+In the structured input, ids are in text form, `change_id` and extension `value`s are lowercase hex, and a blob's content is the hex field `data_hex`.
 
-一个实现合格的标准：对每个 `valid` 向量，编码结果与 `encoding` 逐字节相同、ID 相同、解码后得到相同结构；对每个 `invalid` 向量，解码失败且错误码一致。
+An implementation passes when, for every `valid` vector, its encoding is byte-for-byte `encoding`, the id matches and decoding gives back the same structure; and, for every `invalid` vector, decoding fails with the same error code.
 
 ---
 
-## 10. 版本演进
+## 10. Evolution
 
-- 新增字段一律通过 `extensions` 承载，不改变 v1 的字节布局。
-- 确需改变布局时，提升 `format_version`。新版本的对象拥有不同的字节，因此拥有不同的 ID；解码器按版本号分别处理，旧版本对象永远可读。
+- New fields always go in `extensions`, without changing v1's byte layout.
+- When the layout really must change, `format_version` goes up. Objects of a new version have different bytes and so different ids; decoders handle each version on its own, and objects of old versions stay readable forever.

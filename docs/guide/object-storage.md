@@ -42,7 +42,7 @@ scion admin repack --meta postgres://… --blobs s3://scion-objects   # --dry-ru
 - **Effect** on starhub-server (6,338 commits, PostgreSQL + MinIO): 67,847 objects in 1 pack of 51 MB, 43,291 of them deltas, in 19 s. MinIO goes from 283 MB to 111 MB (the rest is three committed binaries over 8 MB, which stay loose); git's pack for the same history is 82 MB.
 - **Removing what it superseded**: packs none of whose objects live there any more, once older than `--prune-after` (default 1 hour, so that packs being written are not touched), and loose objects that are also packed.
 - **Reads** fetch large packs in 1 MiB blocks and keep 128 MiB of them, so a commit's objects and the versions of a delta chain mostly come from memory.
-- **Metadata**: the repack rewrites every pack location. On PostgreSQL it vacuums the table afterwards, so the space is reused by later writes, but the table stays at its larger size (9 MB more for starhub-server).
+- **Metadata**: the repack rewrites every pack location. On PostgreSQL it then compacts the metadata. It rewrites the pack locations table in place with `VACUUM FULL` when the table is under 256 MB, which locks it for about a second at most and is skipped if the lock is not granted within 200 ms; larger tables are only vacuumed, so later writes reuse their space. It also rebuilds the indexes over object ids and paths with `REINDEX CONCURRENTLY`, which does not block reads or writes. For starhub-server this takes the database from 68 MB to 54 MB.
 - **Redaction**: purging an object that others are stored against first rewrites those others whole.
 
 ## 连接参数

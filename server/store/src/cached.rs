@@ -280,8 +280,8 @@ impl MetaStore for CachedMeta {
         self.inner.delete_packs(packs).await
     }
 
-    async fn compact_pack_index(&self) -> Result<()> {
-        self.inner.compact_pack_index().await
+    async fn compact_after_repack(&self) -> Result<()> {
+        self.inner.compact_after_repack().await
     }
 
     async fn list_leases(&self) -> Result<Vec<(String, Lease)>> {

@@ -23,8 +23,89 @@ use crate::common::{
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/postgres");
 
+/// Largest pack location table [`MetaStore::compact_after_repack`] rewrites in place: the rewrite
+/// locks the table, for about a second at this size.
+const COMPACT_IN_PLACE_MAX: i64 = 256 << 20;
+
 pub struct PgMetaStore {
     pool: PgPool,
+}
+
+impl PgMetaStore {
+    /// [`MetaStore::compact_after_repack`], rewriting the pack locations up to `in_place_max` bytes.
+    async fn compact(&self, in_place_max: i64) -> Result<()> {
+        let mut conn = self.pool.acquire().await.map_err(|e| backend("acquire", e))?;
+        // A repack rewrites nearly every pack location, which leaves half the table as free space
+        // that plain VACUUM can only reuse. VACUUM FULL returns it but locks the table while it
+        // copies the rows (about a second per million), so only small tables are rewritten, and
+        // only when the lock comes quickly: waiting for it would hold up every read behind it.
+        let size: i64 = sqlx::query_scalar("SELECT pg_relation_size('pack_locations')")
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(|e| backend("pack locations size", e))?;
+        let mut rewritten = false;
+        if size <= in_place_max {
+            sqlx::query("SET lock_timeout = '200ms'")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("set lock timeout", e))?;
+            let full = sqlx::query("VACUUM (FULL, ANALYZE) pack_locations")
+                .execute(&mut *conn)
+                .await;
+            sqlx::query("RESET lock_timeout")
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("reset lock timeout", e))?;
+            match full {
+                Ok(_) => rewritten = true,
+                Err(e) => {
+                    tracing::warn!(error = %e, "pack locations not rewritten; their free space is reused instead")
+                }
+            }
+        } else {
+            tracing::warn!(
+                bytes = size,
+                "pack locations too large to rewrite in place; their free space is reused instead"
+            );
+        }
+        let vacuum = if rewritten {
+            "VACUUM (ANALYZE) packs"
+        } else {
+            "VACUUM (ANALYZE) pack_locations, packs"
+        };
+        sqlx::query(vacuum)
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| backend("vacuum pack locations", e))?;
+        // Indexes over random ids fill their pages about half; rebuilding them packs them full
+        // without blocking reads or writes. An interrupted rebuild leaves an invalid copy behind.
+        let leftovers: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname::text FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid \
+             WHERE NOT i.indisvalid AND c.relnamespace = current_schema()::regnamespace \
+             AND c.relname LIKE '%\\_ccnew%'",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| backend("find invalid indexes", e))?;
+        for name in leftovers {
+            sqlx::query(&format!("DROP INDEX CONCURRENTLY IF EXISTS \"{name}\""))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("drop invalid index", e))?;
+        }
+        let tables: &[&str] = if rewritten {
+            &["objects_index", "path_changes"]
+        } else {
+            &["objects_index", "path_changes", "pack_locations"]
+        };
+        for table in tables {
+            sqlx::query(&format!("REINDEX TABLE CONCURRENTLY {table}"))
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| backend("reindex", e))?;
+        }
+        Ok(())
+    }
 }
 
 impl PgMetaStore {
@@ -997,12 +1078,8 @@ impl MetaStore for PgMetaStore {
         Ok(())
     }
 
-    async fn compact_pack_index(&self) -> Result<()> {
-        sqlx::query("VACUUM (ANALYZE) pack_locations, packs")
-            .execute(&self.pool)
-            .await
-            .map_err(|e| backend("vacuum pack locations", e))?;
-        Ok(())
+    async fn compact_after_repack(&self) -> Result<()> {
+        self.compact(COMPACT_IN_PLACE_MAX).await
     }
 
     async fn delete_pack_locations(&self, ids: &[ObjectId]) -> Result<()> {
@@ -1435,6 +1512,54 @@ mod tests {
                 }
             }
         };
+    }
+
+    /// After a repack rewrote every location, compaction returns the space the old ones took,
+    /// rewriting the table in place when it is small and only vacuuming it otherwise.
+    #[tokio::test]
+    async fn compact_after_repack_returns_replaced_locations() {
+        let s = pg_or_skip!();
+        let objs = |at: u64| -> Vec<PackedObject> {
+            (0..5_000u32)
+                .map(|i| PackedObject {
+                    id: ObjectId::of_blob(&i.to_le_bytes()),
+                    offset: at + u64::from(i),
+                    len: 1,
+                    base: None,
+                })
+                .collect()
+        };
+        let size = async || -> i64 {
+            sqlx::query_scalar("SELECT pg_total_relation_size('pack_locations')")
+                .fetch_one(&s.pool)
+                .await
+                .expect("size")
+        };
+        s.put_pack_locations(&[1; 32], &objs(10)).await.expect("import");
+        s.put_pack_locations(&[2; 32], &objs(20)).await.expect("repack");
+        let before = size().await;
+        // Too large to rewrite: vacuumed and reindexed only
+        s.compact(0).await.expect("compact large");
+        // An interrupted index rebuild leaves an invalid index, which compaction drops
+        for q in ["CREATE TABLE dup (v INT)", "INSERT INTO dup VALUES (1), (1)"] {
+            sqlx::query(q).execute(&s.pool).await.expect(q);
+        }
+        sqlx::query("CREATE UNIQUE INDEX CONCURRENTLY dup_ccnew ON dup (v)")
+            .execute(&s.pool)
+            .await
+            .expect_err("duplicates");
+        s.compact_after_repack().await.expect("compact");
+        let after = size().await;
+        assert!(after * 10 < before * 7, "{after} of {before} bytes");
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_class WHERE relname = 'dup_ccnew'")
+            .fetch_one(&s.pool)
+            .await
+            .expect("count");
+        assert_eq!(left, 0);
+        let ids: Vec<ObjectId> = objs(0).iter().map(|o| o.id).collect();
+        let got = s.pack_locations(&ids).await.expect("lookup");
+        assert_eq!(got.len(), ids.len());
+        assert!(got.values().all(|l| l.pack == [2; 32] && l.offset >= 20));
     }
 
     /// 从 M1 升级：parents 为空、只有 first_parent 的旧行被修复，跳表被标记为未知；

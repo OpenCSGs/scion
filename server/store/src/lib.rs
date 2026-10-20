@@ -356,8 +356,9 @@ pub trait MetaStore: Send + Sync + 'static {
         Ok(())
     }
 
-    /// Reclaims the space of replaced pack locations (after a repack has rewritten most of them).
-    async fn compact_pack_index(&self) -> Result<()> {
+    /// Reclaims the space a repack left behind: the pack locations it replaced (most of them),
+    /// and the slack in indexes over random ids. Must not hold up reads or writes for long.
+    async fn compact_after_repack(&self) -> Result<()> {
         Ok(())
     }
 

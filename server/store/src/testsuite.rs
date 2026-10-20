@@ -246,7 +246,7 @@ pub async fn pack_locations<S: MetaStore + ?Sized>(s: &S) {
         .collect();
     s.delete_packs(&[p1, [7; 32]]).await.expect("forget packs");
     s.delete_packs(&[]).await.expect("forget no packs");
-    s.compact_pack_index().await.expect("compact");
+    s.compact_after_repack().await.expect("compact");
     s.put_pack_locations(&p2, &many).await.expect("large batch");
     let ids: Vec<ObjectId> = many.iter().map(|o| o.id).collect();
     assert_eq!(s.pack_locations(&ids).await.expect("large lookup").len(), many.len());

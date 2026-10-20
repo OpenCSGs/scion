@@ -1003,7 +1003,7 @@ impl MetaStore for SqliteMetaStore {
         Ok(())
     }
 
-    async fn compact_pack_index(&self) -> Result<()> {
+    async fn compact_after_repack(&self) -> Result<()> {
         // SQLite reuses freed pages for new rows; shrinking the file would need a full VACUUM
         Ok(())
     }

@@ -114,12 +114,12 @@ docker run -d --name scion -p 7080:7080 \
   opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
 ```
 
-多个节点放在负载均衡后面，共用一个数据库和一个 bucket（见[多节点](docs/guide/cluster.zh-CN.md)）；区域缓存用同一个镜像运行 `scion cache`（见[缓存](docs/guide/cache.md)）。想在一台机器上试用全部组件，可以用 [`deploy/compose`](deploy/compose/docker-compose.yml)：它会启动 PostgreSQL、SeaweedFS 和不带认证的服务端。服务端监听在回环地址以外时，没有 `--auth-required` 就拒绝启动，除非显式加上 `--allow-anonymous`。端口、健康检查、OIDC 登录以及 starhub-server 等外部身份提供方，见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.md)。
+多个节点放在负载均衡后面，共用一个数据库和一个 bucket（见[多节点](docs/guide/cluster.zh-CN.md)）；区域缓存用同一个镜像运行 `scion cache`（见[缓存](docs/guide/cache.zh-CN.md)）。想在一台机器上试用全部组件，可以用 [`deploy/compose`](deploy/compose/docker-compose.yml)：它会启动 PostgreSQL、SeaweedFS 和不带认证的服务端。服务端监听在回环地址以外时，没有 `--auth-required` 就拒绝启动，除非显式加上 `--allow-anonymous`。端口、健康检查、OIDC 登录以及 starhub-server 等外部身份提供方，见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
 
 ## 文档
 
-- **使用：** [部署](docs/guide/deploy.zh-CN.md) · [命令导览](docs/guide/cli.md) · [从 git 迁移](docs/guide/coming-from-git.md) · [从 git 导入](docs/guide/git-import.md) · [稀疏检出](docs/guide/sparse-checkout.zh-CN.md) · [仓库与分支](docs/guide/repos.zh-CN.md) · [打包下载](docs/guide/archive.zh-CN.md) · [文件列表页](docs/guide/browse.zh-CN.md) · [git SHA](docs/guide/git-sha.zh-CN.md)
-- **运维：** [对象存储](docs/guide/object-storage.zh-CN.md) · [多节点与合入](docs/guide/cluster.zh-CN.md) · [缓存](docs/guide/cache.md) · [认证与鉴权](docs/guide/auth.md) · [redaction 与 fsck](docs/guide/redaction.zh-CN.md) · [ref 事件](docs/guide/events.md) · [指标与追踪](docs/guide/observability.zh-CN.md)
+- **使用：** [部署](docs/guide/deploy.zh-CN.md) · [命令导览](docs/guide/cli.md) · [从 git 迁移](docs/guide/coming-from-git.md) · [从 git 导入](docs/guide/git-import.zh-CN.md) · [稀疏检出](docs/guide/sparse-checkout.zh-CN.md) · [仓库与分支](docs/guide/repos.zh-CN.md) · [打包下载](docs/guide/archive.zh-CN.md) · [文件列表页](docs/guide/browse.zh-CN.md) · [git SHA](docs/guide/git-sha.zh-CN.md)
+- **运维：** [对象存储](docs/guide/object-storage.zh-CN.md) · [多节点与合入](docs/guide/cluster.zh-CN.md) · [缓存](docs/guide/cache.zh-CN.md) · [认证与鉴权](docs/guide/auth.zh-CN.md) · [redaction 与 fsck](docs/guide/redaction.zh-CN.md) · [ref 事件](docs/guide/events.zh-CN.md) · [指标与追踪](docs/guide/observability.zh-CN.md)
 - **设计：** [服务端](docs/design/rust-server-architecture.md) · [客户端](docs/design/rust-client-architecture.md) · [接入 starhub / CSGLite](docs/design/starhub-integration.md) · 对象格式 [`SPEC.md`](SPEC.md) · 协议 [`proto/scion/v1/`](proto/scion/v1/)
 
 ## 进度

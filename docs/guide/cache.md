@@ -1,18 +1,20 @@
-# 缓存：区域缓存与本机 daemon
+# Caching: the regional cache and the local daemon
 
-Scion 的读取分三层，三层提供完全相同的 `ObjectService`：
+English | [简体中文](cache.zh-CN.md)
+
+Scion reads go through three layers, and all three serve exactly the same `ObjectService`:
 
 ```
-scn / SDK ──► scn daemon（L1，每台机器）──► scion cache（L2，每个区域）──► scion server（L3，权威）
+scn / SDK ──► scn daemon (L1, per machine) ──► scion cache (L2, per region) ──► scion server (L3, authoritative)
 ```
 
-对象按内容寻址、不可变，每一层都可以永久缓存，不需要失效；ref 永远不缓存。缓存层没有持久状态：挂掉只损失命中率。
+Objects are content-addressed and immutable, so every layer can cache them forever without invalidation; refs are never cached. Cache layers keep no durable state: losing one costs only hit rate.
 
-本文说明怎样部署区域缓存、客户端怎样选择读取路径，以及 daemon 的行为。
+This guide covers deploying a regional cache, how clients pick their read path and how the daemon behaves.
 
-## 区域缓存 `scion cache`
+## The regional cache, `scion cache`
 
-### 启动
+### Starting it
 
 ```sh
 scion cache --listen 0.0.0.0:7090 \
@@ -21,106 +23,106 @@ scion cache --listen 0.0.0.0:7090 \
   --warm mono:main
 ```
 
-然后让服务端把它推荐给客户端：
+Then have the server recommend it to clients:
 
 ```sh
 scion server ... --read-endpoint http://cache.cn-beijing.internal:7090@cn-beijing
 ```
 
-客户端连接服务端后从 `ServerInfo.read_endpoints` 里选一个缓存读取对象：优先区域匹配的（SDK 的 `ReadEndpoints::Region`），否则取第一个。连接时缓存不可达，就直接从服务端读取。写入、合入、ref 和查询始终发给服务端。
+After connecting to the server, a client picks a cache from `ServerInfo.read_endpoints` to read objects from: one in its region if there is one (the SDK's `ReadEndpoints::Region`), otherwise the first. If the cache cannot be reached when connecting, the client reads from the server. Writes, lands, refs and queries always go to the server.
 
-### 参数
+### Options
 
-| 参数 | 环境变量 | 默认 | 说明 |
+| Option | Environment variable | Default | What |
 |---|---|---|---|
-| `--upstream URL` | `SCION_CACHE_UPSTREAMS` | 必填 | 上游服务端，可重复指定（同一集群的多个节点，互为副本） |
-| `--memory SIZE` | `SCION_CACHE_MEMORY` | 1GiB | 内存层容量 |
-| `--disk-dir DIR` | `SCION_CACHE_DISK_DIR` | 不启用 | 磁盘层目录，建议放在 NVMe 上；内存层淘汰的对象写入这里 |
-| `--disk-size SIZE` | `SCION_CACHE_DISK_SIZE` | 64GiB | 磁盘层容量 |
-| `--max-object SIZE` | | 8MiB | 超过这个大小的对象照常转发但不缓存（最大 16MiB） |
-| `--advertise-url URL` / `--peer URL` | `SCION_CACHE_ADVERTISE_URL` / `SCION_CACHE_PEERS` | 单节点 | 多节点分片，见下文 |
-| `--warm REPO[:REF,…]` | `SCION_CACHE_WARM` | 不预热 | 预热的仓库与 ref，可重复指定 |
-| `--warm-blob-max SIZE` | | 0 | 预热时连同不超过这个大小的文件一起预取；0 只预取目录树 |
-| `--no-hedge` | | 开启对冲 | 关闭对冲 |
+| `--upstream URL` | `SCION_CACHE_UPSTREAMS` | required | Upstream servers; repeatable (nodes of one cluster, replicas of each other) |
+| `--memory SIZE` | `SCION_CACHE_MEMORY` | 1GiB | Size of the memory tier |
+| `--disk-dir DIR` | `SCION_CACHE_DISK_DIR` | off | Directory of the disk tier, preferably on NVMe; objects evicted from memory go here |
+| `--disk-size SIZE` | `SCION_CACHE_DISK_SIZE` | 64GiB | Size of the disk tier |
+| `--max-object SIZE` | | 8MiB | Larger objects are forwarded as usual but not cached (at most 16MiB) |
+| `--advertise-url URL` / `--peer URL` | `SCION_CACHE_ADVERTISE_URL` / `SCION_CACHE_PEERS` | single node | Sharding across nodes; see below |
+| `--warm REPO[:REF,…]` | `SCION_CACHE_WARM` | no warming | Repositories and refs to warm; repeatable |
+| `--warm-blob-max SIZE` | | 0 | Also prefetch files up to this size when warming; 0 prefetches trees only |
+| `--no-hedge` | | hedging on | Turn hedging off |
 
-### 读取路径
+### The read path
 
-1. 本地命中（内存层，其次磁盘层）直接返回。
-2. 未命中：同一对象的并发请求只回源一次（single-flight），一个请求里的多个未命中合成一次回源请求。
-3. 多节点时先交给负责这个对象的节点，见下一节。
-4. 回源到上游服务端：
-   - **对冲**：请求超过最近 p95 延迟仍未返回时，向另一个上游再发一份，取先返回的结果。
-   - **熔断**：连续失败 5 次的上游冷却 5 秒，期间不再向它发请求。
-   - **故障转移**：不可用、超时、数据损坏时换下一个上游重试；对象不存在这类业务错误原样返回。
-   - **校验**：回源得到的每个对象都校验哈希。
+1. Local hits (memory first, then disk) return at once.
+2. Misses: concurrent requests for one object fetch it once (single-flight), and the misses of one request are fetched in one upstream request.
+3. With several nodes, the object's owner node is asked first; see the next section.
+4. Fetching from the upstream servers:
+   - **Hedging:** when a request has not returned after the recent p95 latency, the same request goes to another upstream, and the first answer wins.
+   - **Circuit breaking:** an upstream that failed 5 times in a row cools down for 5 seconds without requests.
+   - **Failover:** when an upstream is unavailable, times out or returns corrupt data, the next one is tried; application errors such as a missing object are passed on as they are.
+   - **Verification:** every fetched object's hash is checked.
 
-### 多节点分片
+### Sharding across nodes
 
-一个区域部署多个缓存节点时，每个节点声明自己的地址和其它节点：
+With several cache nodes in a region, each declares its own address and the others':
 
 ```sh
-# 节点 1
+# Node 1
 scion cache --upstream http://l3:7080 --advertise-url http://10.0.1.1:7090 \
   --peer http://10.0.1.2:7090 --peer http://10.0.1.3:7090
 ```
 
-对象按 rendezvous 哈希分配给节点。节点收到不归自己负责的对象时，先转给负责的节点（只转一跳），那个节点再决定是否回源。因此整个区域对同一个对象只回源一次。增减节点时只有约 1/N 的对象改变归属。负责的节点不可达时自己回源。
+Objects are assigned to nodes by rendezvous hashing. A node asked for an object it does not own passes the request to the owner (one hop only), which decides whether to fetch it upstream, so the whole region fetches each object once. Adding or removing a node moves about 1/N of the objects. When the owner is unreachable, a node fetches upstream itself.
 
-客户端连接任何一个节点都可以，前面放负载均衡即可。
+Clients can connect to any node, so a load balancer in front is enough.
 
-### 预热
+### Warming
 
-`--warm mono:main` 订阅服务端的 WatchRefs：
+`--warm mono:main` subscribes to the server's WatchRefs:
 
-- 订阅时先预取 ref 当前的整棵目录树（受数量上限限制）。
-- 之后 ref 每次前进，只沿变化的路径预取新的目录树，子树 id 没变的目录整个跳过，代价与改动大小成正比。
+- On subscribing, it prefetches the ref's whole current tree (within a limit on the number of objects).
+- After that, each time the ref moves, it prefetches only the new trees along the changed paths, skipping directories whose subtree id did not change, at a cost proportional to the change.
 
-服务端在本节点合入后立即推送；集群中其它节点的合入通过轮询元数据库发现，间隔由服务端的 `--ref-poll-interval` 控制（默认 1 秒）。
+The server pushes lands on its own node at once; lands on other nodes of a cluster are found by polling the metadata database, every `--ref-poll-interval` of the server (1 second by default).
 
-### 安全模型
+### Security model
 
-缓存不持有凭证：调用者的 `authorization` 原样转给上游。
+The cache holds no credentials: the caller's `authorization` goes upstream as it is.
 
-可见性与服务端一致：对象只对索引中有它的仓库可见。
-- 字节按对象 id 缓存，不同仓库的相同内容只存一份。
-- 应答前确认对象在本次请求的仓库里可见：回源成功的 (仓库, 对象) 记入可见集；本地命中而可见性未知的，先向服务端批量 `HasObjects` 确认。
-- 不可见时返回与服务端相同的 `OBJECT_MISSING`。
-- 同一对象的并发未命中按 (仓库, 对象) 合并，一个仓库的回源结果不会交给另一个仓库的请求。
+Visibility is the server's: an object is visible only in repositories whose index has it.
+- Bytes are cached by object id, so the same content in different repositories is stored once.
+- Before answering, the cache confirms the object is visible in the request's repository: a successful fetch records (repository, object) in a visible set, and local hits of unknown visibility are first confirmed with the server in a batched `HasObjects`.
+- Invisible objects return the same `OBJECT_MISSING` as the server.
+- Concurrent misses of one object are merged per (repository, object), so one repository's fetch never answers another repository's request.
 
-按用户的权限检查（ACL）与敏感路径隔离在 M5 实现。
+Per-user permissions are checked with the server as well (`CheckAccess`); see [caches and the daemon](auth.md#caches-and-the-daemon) in the authentication guide.
 
-## 本机 daemon `scn daemon`
+## The local daemon, `scn daemon`
 
-`scn` 默认经本机 daemon 连接服务端。daemon 没在运行时，第一次需要连接的命令会在后台拉起它。拉起失败时直接连服务端。
+`scn` connects to the server through a local daemon by default. When no daemon is running, the first command that needs a connection starts one in the background, and connects directly if that fails.
 
-- **对象读取**：daemon 先查本机缓存（磁盘加内存，读取时校验哈希）。未命中时按调用者的身份回源（经服务端推荐的区域缓存），同一仓库对同一对象的并发未命中只回源一次。与区域缓存一样，只把对象交给能看到它的仓库。
-- **其它请求**：在 HTTP/2 层原样转发给服务端，daemon 不需要理解它们。
-- **预取**：工作副本解析过的 ref（`ResolveRef`）之后每次前进，daemon 在后台取进变化的目录树和不超过 256 KiB 的文件，之后 `scn sync` 直接命中。订阅空闲 30 分钟后取消。
-- **多个服务端**：一个 daemon 可以同时服务多个服务端，每个请求带着真正的服务端地址。
-- **凭证**：daemon 不持有凭证，每个请求带着调用者自己的 token。
-- **退出**：空闲 30 分钟后自动退出。
+- **Object reads:** the daemon checks its local cache first (disk plus memory, hashes checked on read). Misses are fetched as the caller (through the regional cache the server recommends), and concurrent misses of one object in one repository are fetched once. As with the regional cache, an object goes only to repositories that can see it.
+- **Other requests:** forwarded to the server as they are at the HTTP/2 level, so the daemon needs no knowledge of them.
+- **Prefetching:** each time a ref the working copy resolved (`ResolveRef`) moves, the daemon fetches the changed trees and files up to 256 KiB in the background, so a later `scn sync` hits. A subscription idle for 30 minutes is dropped.
+- **Several servers:** one daemon can serve several servers at once; each request carries its real server address.
+- **Credentials:** the daemon holds none; each request carries the caller's own token.
+- **Exit:** after 30 idle minutes.
 
-| 命令 / 环境变量 | 说明 |
+| Command / environment variable | What |
 |---|---|
-| `scn daemon run [--max-disk BYTES] [--idle-timeout SECS]` | 前台运行（`--idle-timeout 0` 不自动退出） |
-| `scn daemon status` / `scn daemon stop` | 查看 / 停止 |
-| `scn doctor` | `objects:` 一行显示对象经由 daemon、区域缓存还是服务端读取 |
-| `SCION_NO_DAEMON=1` | 不使用 daemon，直接连接（CI 容器里通常这么设置） |
-| `SCION_DAEMON_SOCKET` / `SCION_DAEMON_CACHE_DIR` | 自定义 socket 与缓存目录 |
+| `scn daemon run [--max-disk BYTES] [--idle-timeout SECS]` | Run in the foreground (`--idle-timeout 0` never exits on its own) |
+| `scn daemon status` / `scn daemon stop` | Show / stop |
+| `scn doctor` | The `objects:` line says whether objects come through the daemon, the regional cache or the server |
+| `SCION_NO_DAEMON=1` | Connect directly, without the daemon (usual in CI containers) |
+| `SCION_DAEMON_SOCKET` / `SCION_DAEMON_CACHE_DIR` | Another socket and cache directory |
 
-默认位置：
+Default locations:
 
-| 平台 | socket | 对象缓存 |
+| Platform | Socket | Object cache |
 |---|---|---|
-| Linux | `$XDG_RUNTIME_DIR/scion/daemon.sock` | `$XDG_CACHE_HOME/scion/objects`（默认 `~/.cache/scion/objects`） |
+| Linux | `$XDG_RUNTIME_DIR/scion/daemon.sock` | `$XDG_CACHE_HOME/scion/objects` (`~/.cache/scion/objects` by default) |
 | macOS | `~/Library/Caches/scion/daemon.sock` | `~/Library/Caches/scion/objects` |
 
-socket 只有当前用户能连接（权限 0600）。磁盘缓存默认上限 20 GiB，超过时按最近使用时间回收。daemon 目前只支持 Unix（Linux、macOS）。
+Only the current user can connect to the socket (mode 0600). The disk cache holds 20 GiB by default and evicts the least recently used objects beyond that. The daemon supports only Unix (Linux and macOS) for now.
 
-## 性能参考
+## Performance
 
-见 README 的「性能」一节。数据来自 `server/cache/tests/bench.rs` 与 `client/daemon/tests/bench.rs`：
+See the [component benchmarks](../performance.md), from `server/cache/tests/bench.rs` and `client/daemon/tests/bench.rs`:
 
-- 200 个客户端冷启动检出同一组对象，命中率 99.5%，每个对象只从服务端取一次。
-- 热缓存单节点每秒 153 万个对象（gRPC，每批 64 个）。
-- 经 daemon 热检出 10 万个文件，耗时与直接创建这些文件相同。
+- 200 clients checking out the same objects from cold: a 99.5% hit rate, each object fetched from the server once.
+- 1.53 million objects per second from one warm cache node (gRPC, batches of 64).
+- A warm checkout of 100,000 files through the daemon takes as long as creating those files.

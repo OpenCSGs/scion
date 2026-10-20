@@ -10,7 +10,7 @@ Scion 的提交 id 是 64 位十六进制（`c1…`）。很多外部系统默�
 |---|---|
 | `QueryService.GetGitShas(repo, changeset_ids)` | 批量映射，一次最多 1000 个，结果与请求一一对应 |
 | `QueryService.GetDerived(kind = GIT_SHA1)` | 单个版本（ref 名、提交 id 或 git sha） |
-| 事件推送与合入前检查 | `old_git_sha`、`new_git_sha`，以及每个提交的 `git_sha`（见 [ref 变化事件](events.md)） |
+| 事件推送与合入前检查 | `old_git_sha`、`new_git_sha`，以及每个提交的 `git_sha`（见 [ref 变化事件](events.zh-CN.md)） |
 | SDK | `Client::git_shas(&ids)`、`Client::git_sha(revision)` |
 
 反过来，所有接受版本号的接口（`ResolveRevision`、`Log`、`Diff`、`ReadFile` 等）都可以直接传 40 位 git sha。

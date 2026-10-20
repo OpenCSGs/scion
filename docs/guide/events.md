@@ -1,29 +1,31 @@
-# ref 变化事件
+# Ref events
 
-每次 ref 变化（创建、前进、强制移动、删除，包括合入和 fork）都会产生一条事件。事件与 ref 的修改在**同一个事务**里写入元数据库，带一个全局递增的序号 `seq`，序号顺序与提交顺序一致。消费方记下处理到的 `seq`，下次从它之后读取，不会漏掉变化。
+English | [简体中文](events.zh-CN.md)
 
-有两种消费方式：
+Every ref change (created, moved forward, force-moved or deleted, lands and forks included) produces an event. The event is written to the metadata database in **the same transaction** as the ref change, with a globally increasing sequence number `seq` whose order is the order of the commits. A consumer records the last `seq` it handled and reads after it next time, missing no change.
 
-| 方式 | 适合 | 说明 |
+There are two ways to consume them:
+
+| How | Suits | What |
 |---|---|---|
-| 拉取：`EventService.ListRefEvents` | 自己管理进度的服务 | 按 `seq` 分页读取，可以按仓库过滤 |
-| 推送：webhook / NATS JetStream | 已有消息系统的部署（例如 starhub） | 服务端按 `seq` 顺序推送，至少送达一次 |
+| Pull: `EventService.ListRefEvents` | Services that track their own progress | Pages by `seq`, optionally filtered by repository |
+| Push: webhook / NATS JetStream | Deployments with a messaging system already (such as starhub) | The server pushes in `seq` order, at least once |
 
-事件保留 `--event-retention`（默认 7 天），由 janitor 清理。
+Events are kept for `--event-retention` (7 days by default) and cleaned up by the janitor.
 
-## 拉取
+## Pulling
 
 ```
 ListRefEvents(after_seq, limit, repo) → { events, next_seq, truncated }
 ```
 
-- **权限**：指定 `repo` 时需要该仓库的 `read`；不指定时（全部仓库）需要系统管理员。
-- **同名仓库**：仓库清除后，事件按保留期继续保存。名字被重新使用时，按仓库拉取只返回新仓库创建之后的事件；不带 `repo` 的管理员拉取仍能看到旧仓库的历史。被跳过的旧事件同样计入 `next_seq`。
-- **事件内容**：每条包含 `seq`、`repo`、`ref`、变化前后的提交（`old_changeset_id` 为空表示新建，`new_changeset_id` 为空表示删除）、变化后的版本和时间。
-- **`truncated` 为 true**：`after_seq` 之后的部分事件已经超过保留期被清理，消费方需要用 `ListRefs` 重新同步全部 ref。
-- **SDK**：`Client::list_ref_events(after_seq, limit, repo)`。
+- **Permissions:** with `repo`, read on that repository; without it (all repositories), system administration.
+- **Reused names:** after a repository is purged, its events are kept for the retention period. When its name is reused, pulling by repository returns only events after the new repository was created; an administrator's pull without `repo` still sees the old one's history. Skipped old events count in `next_seq` too.
+- **Contents:** each event has `seq`, `repo`, `ref`, the commits before and after (an empty `old_changeset_id` means created, an empty `new_changeset_id` deleted), the version after and the time.
+- **`truncated` is true:** some events after `after_seq` were already cleaned up after the retention period, so the consumer must resync every ref with `ListRefs`.
+- **SDK:** `Client::list_ref_events(after_seq, limit, repo)`.
 
-## 推送
+## Pushing
 
 ```sh
 scion server ... \
@@ -32,15 +34,15 @@ scion server ... \
   --event-nats nats://nats:4222 --event-nats-subject scion
 ```
 
-两个目标可以同时配置，各自独立记录进度。
+Both targets can be configured at once, each with its own progress.
 
-- **起点**：第一次配置某个目标时，从当时的位置开始推送，不重放历史事件。
-- **集群**：每个目标由持有租约（`events/webhook`、`events/nats`）的一个节点负责，节点故障时其它节点在 15 秒内接手。
-- **进度**：保存在元数据库中，节点重启或切换都不会丢失。
-- **失败**：按 `seq` 顺序重试（间隔从 1 秒退避到 60 秒），不跳过事件。所以同一事件可能送达多次，消费方按 `seq` 去重。
-- **积压超过保留期**：落后的事件被清理后无法再推送，服务端日志记录一条 error。
+- **Starting point:** a newly configured target gets events from that point on; history is not replayed.
+- **Clusters:** each target is handled by the node holding its lease (`events/webhook`, `events/nats`); when that node fails, another takes over within 15 seconds.
+- **Progress:** kept in the metadata database, so restarts and failovers lose none.
+- **Failures:** retried in `seq` order (backing off from 1 to 60 seconds) without skipping events, so an event may arrive more than once; consumers deduplicate by `seq`.
+- **A backlog older than the retention period:** events cleaned up before they were pushed cannot be pushed any more, and the server logs an error.
 
-### 内容
+### Contents
 
 ```json
 {
@@ -69,47 +71,47 @@ scion server ... \
 }
 ```
 
-- **`type`**：`ref.created`、`ref.updated` 或 `ref.deleted`。
-- **`old_git_sha`、`new_git_sha`、`git_sha`**：对应提交的 git 兼容 sha（40 位十六进制，见 [git 兼容的提交 sha](git-sha.md)）；算不出来（文件内容已被清除）时为 `null`。
-- **`commits`**：本次变化引入的提交，即从 `new` 可达、从 `old` 不可达的提交，从新到旧。
-  - 最多 100 个，超过时 `commits_truncated` 为 true；
-  - 删除时为空；
-  - 强制回退到旧提交时也为空。
-- **`changes`**：每个提交相对第一个父提交的改动路径，`op` 为 `put` 或 `delete`。
-  - 最多 1000 条，超过时 `changes_truncated` 为 true；
-  - 只有路径和大小，不包含文件内容。
-- **历史已不可读**（例如仓库已被清除）时，仍然推送事件本身，`commits` 为空，`commits_truncated` 为 true。
+- **`type`:** `ref.created`, `ref.updated` or `ref.deleted`.
+- **`old_git_sha`, `new_git_sha`, `git_sha`:** the git-compatible SHAs of those commits (40 hex digits; see [git-compatible commit SHAs](git-sha.md)), or `null` when they cannot be computed (file contents purged).
+- **`commits`:** the commits the change brings in, reachable from `new` and not from `old`, newest first.
+  - At most 100; beyond that, `commits_truncated` is true.
+  - Empty for a deletion.
+  - Empty for a force-move back to an older commit too.
+- **`changes`:** each commit's changed paths against its first parent, with `op` `put` or `delete`.
+  - At most 1,000; beyond that, `changes_truncated` is true.
+  - Paths and sizes only, never file contents.
+- **When history can no longer be read** (the repository was purged, say), the event itself is still pushed, with empty `commits` and `commits_truncated` true.
 
-### webhook
+### Webhook
 
-`POST` JSON，请求头：
+A JSON `POST` with these headers:
 
-| 头 | 内容 |
+| Header | Contents |
 |---|---|
-| `X-Scion-Event` | 事件类型 |
-| `X-Scion-Delivery` | `seq`（用于去重） |
-| `X-Scion-Signature-256` | `sha256=<hex>`：以 `--event-webhook-secret` 为密钥、对请求体计算的 HMAC-SHA256，格式与 GitHub 相同。验证时对原始请求体计算并做常数时间比较 |
+| `X-Scion-Event` | The event type |
+| `X-Scion-Delivery` | `seq` (for deduplication) |
+| `X-Scion-Signature-256` | `sha256=<hex>`: the HMAC-SHA256 of the body keyed with `--event-webhook-secret`, in GitHub's format. To verify, compute it over the raw body and compare in constant time |
 
-响应 2xx 视为送达，其它状态码和超时（10 秒）都会重试。
+A 2xx response means delivered; any other status, or a timeout (10 seconds), is retried.
 
 ### NATS JetStream
 
-- **subject**：`<前缀>.ref.created`、`<前缀>.ref.updated`、`<前缀>.ref.deleted`，前缀默认 `scion`。
-- **stream**：需要事先创建一个覆盖 `<前缀>.ref.>` 的 stream。仓库名放在消息内容里，不放进 subject，因为仓库名可以包含 `.`。
-- **去重**：每条消息带 `Nats-Msg-Id: scion-<seq>`，在 stream 的去重窗口内重复发布会被 JetStream 丢弃。
-- **送达确认**：收到 JetStream 的确认才算送达。
+- **Subjects:** `<prefix>.ref.created`, `<prefix>.ref.updated` and `<prefix>.ref.deleted`, with the prefix `scion` by default.
+- **Stream:** create a stream covering `<prefix>.ref.>` beforehand. Repository names are in the message, not the subject, since they may contain `.`.
+- **Deduplication:** each message carries `Nats-Msg-Id: scion-<seq>`, so JetStream drops a repeated publish within the stream's deduplication window.
+- **Delivery:** an event counts as delivered once JetStream acknowledges it.
 
-## 指标
+## Metrics
 
-| 指标 | 说明 |
+| Metric | What |
 |---|---|
-| `scion_events_delivered_total{sink}` | 成功推送的事件数 |
-| `scion_event_delivery_failures_total{sink}` | 失败的推送尝试（之后会重试） |
-| `scion_event_lag{sink}` | 尚未推送的事件数 |
+| `scion_events_delivered_total{sink}` | Events pushed successfully |
+| `scion_event_delivery_failures_total{sink}` | Failed push attempts (retried later) |
+| `scion_event_lag{sink}` | Events not pushed yet |
 
-## 合入前检查
+## Pre-land checks
 
-合入（`scn land`、`LandService.Land`）、创建分支和移动分支（`CreateRef` / `UpdateRef`）之前，服务端可以把要引入的改动交给外部服务检查，例如内容审查、文件类型或大小限制。
+Before a land (`scn land`, `LandService.Land`), a branch creation or a branch move (`CreateRef` / `UpdateRef`), the server can hand the changes coming in to an external service to check: content review, or limits on file types or sizes, for example.
 
 ```sh
 scion server ... \
@@ -118,9 +120,9 @@ scion server ... \
   [--pre-land-timeout 5s] [--pre-land-fail-open]
 ```
 
-### 请求
+### Request
 
-`POST` JSON，请求头 `X-Scion-Event: pre-land`，配置了密钥时带 `X-Scion-Signature-256`（与事件推送相同的 HMAC 格式）。
+A JSON `POST` with the header `X-Scion-Event: pre-land`, and `X-Scion-Signature-256` when a secret is configured (the same HMAC format as event pushes).
 
 ```json
 {
@@ -137,23 +139,23 @@ scion server ... \
 }
 ```
 
-- **`old` 与 `new`**：`old` 为 ref 当前的提交（ref 不存在时为空），`new` 为客户端提交的版本。`old_git_sha` 与 `new_git_sha` 是它们的 git 兼容 sha。
-- **`commits`**：要引入的提交，格式与事件推送相同（路径级改动，不含文件内容）。
-  - 范围：从 `new` 可达、从 `old` 不可达的提交；
-  - 新建分支时以默认分支为基准，默认分支上已有的内容合入时已经检查过；
-  - 没有新提交时（重复合入、回退、指向已有内容）不调用检查服务。
+- **`old` and `new`:** `old` is the ref's current commit (empty when the ref does not exist), `new` the version the client submitted; `old_git_sha` and `new_git_sha` are their git-compatible SHAs.
+- **`commits`:** the commits coming in, in the format of event pushes (path-level changes, no file contents).
+  - Their range: reachable from `new` and not from `old`.
+  - A new branch is compared with the default branch, whose contents were checked when they landed.
+  - Without new commits (a repeated land, a move back, a move to existing content), the check service is not called.
 
-合入会在服务端 rebase，检查的是客户端提交的版本。rebase 不改变每个提交的改动。
+Lands rebase on the server, and the check sees the version the client submitted; a rebase does not change what each commit changes.
 
-### 响应
+### Response
 
-| 响应 | 结果 |
+| Response | Outcome |
 |---|---|
-| 2xx | 允许；响应体为 `{"allowed": false, "message": "…"}` 时拒绝 |
-| 2xx，但请求被截断 | 拒绝，提示客户端拆小后重试。截断指提交超过 100 个，或某个提交的路径超过 1000 条，请求中 `commits_truncated` 或 `changes_truncated` 为 true。只有响应明确为 `{"allowed": true, "accept_truncated": true}` 时才放行，表示检查服务接受只看到部分内容的结果 |
-| 4xx（408、429 除外） | 拒绝，响应体作为原因 |
-| 其它状态、超时、连接失败 | 检查服务不可用：默认拒绝（`UNAVAILABLE`，客户端可以重试），设置 `--pre-land-fail-open` 时放行 |
+| 2xx | Allowed; denied when the body is `{"allowed": false, "message": "…"}` |
+| 2xx for a truncated request | Denied, asking the client to split the change and retry. Truncated means over 100 commits, or over 1,000 paths in one commit, with `commits_truncated` or `changes_truncated` true in the request. Only an explicit `{"allowed": true, "accept_truncated": true}` lets it through, meaning the check service accepts having seen only part of it |
+| 4xx (but 408 and 429) | Denied, with the body as the reason |
+| Any other status, a timeout, a connection failure | The check service is unavailable: denied by default (`UNAVAILABLE`, which clients can retry), allowed with `--pre-land-fail-open` |
 
-- **拒绝时**：客户端收到 `FAILED_PRECONDITION` / `PRE_LAND_REJECTED`，`metadata.message` 为原因，`scn` 会显示它。
-- **集群**：转发给 leader 的合入在第一个节点检查。配置了 `--cluster-secret` 时，leader 不再重复检查。
-- **指标**：`scion_pre_land_checks_total{outcome="allowed|denied|error"}`。
+- **When denied:** the client gets `FAILED_PRECONDITION` / `PRE_LAND_REJECTED` with the reason in `metadata.message`, which `scn` shows.
+- **Clusters:** a land forwarded to the leader is checked on the first node; with `--cluster-secret` configured, the leader does not check it again.
+- **Metric:** `scion_pre_land_checks_total{outcome="allowed|denied|error"}`.

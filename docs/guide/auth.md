@@ -1,37 +1,39 @@
-# 认证与鉴权
+# Authentication and access control
 
-Scion 默认不要求认证（适合本机和 Lite 模式）。生产环境用 `--auth-required` 开启。服务端监听在回环地址（127.0.0.1、::1）以外时必须开启认证，否则拒绝启动；确实要匿名提供服务时显式加 `--allow-anonymous`（`SCION_ALLOW_ANONYMOUS=true`）。Docker 镜像默认开启认证，见 [deploy.md](deploy.md)。认证与鉴权只用标准协议（JWT / JWKS、RFC 7662 令牌内省、RFC 8628 device flow、OPA 风格的鉴权回调），不包含针对某个系统的代码。接入 starhub-server、Keycloak、Casdoor 或 OPA 都只需要配置。
+English | [简体中文](auth.zh-CN.md)
 
-## 开启认证
+By default Scion does not require authentication, which suits a local machine and Lite mode. Turn it on in production with `--auth-required`. A server listening beyond loopback (127.0.0.1, ::1) must have it on or refuses to start; to serve anonymously anyway, pass `--allow-anonymous` (`SCION_ALLOW_ANONYMOUS=true`). The Docker image requires authentication by default; see [deploy.md](deploy.md). Authentication and authorization use only standard protocols (JWT and JWKS, RFC 7662 token introspection, the RFC 8628 device flow and an OPA-style authorization callback), with no code for any particular system: connecting starhub-server, Keycloak, Casdoor or OPA is configuration only.
+
+## Turning on authentication
 
 ```sh
-scion admin jwt-keygen > /etc/scion/jwt.pem          # 签发访问令牌用的 ES256 私钥，集群各节点共用
+scion admin jwt-keygen > /etc/scion/jwt.pem          # ES256 key that signs access tokens, shared by a cluster's nodes
 scion server --auth-required --jwt-key /etc/scion/jwt.pem --auth-config /etc/scion/auth.toml ...
 ```
 
-| 参数 | 环境变量 | 说明 |
+| Option | Environment variable | What |
 |---|---|---|
-| `--auth-required` | `SCION_AUTH_REQUIRED` | 要求认证。没有有效令牌的请求只能访问策略允许 `anonymous` 的仓库 |
-| `--jwt-key FILE` | `SCION_JWT_KEY_FILE` | 签发访问令牌的私钥。没有它也能用 PAT 和外部令牌，但不能换取访问令牌、不能用浏览器登录 |
-| `--auth-config FILE` | `SCION_AUTH_CONFIG` | `auth.toml`：外部签发方、令牌内省、鉴权回调、OIDC |
+| `--auth-required` | `SCION_AUTH_REQUIRED` | Require authentication. Requests without a valid token can reach only repositories the policy opens to `anonymous` |
+| `--jwt-key FILE` | `SCION_JWT_KEY_FILE` | The key that signs access tokens. Without it, PATs and external tokens still work, but tokens cannot be exchanged for access tokens and browser login is unavailable |
+| `--auth-config FILE` | `SCION_AUTH_CONFIG` | `auth.toml`: external issuers, token introspection, the authorization callback, OIDC |
 
-配置有误（例如密钥读不到、环境变量没设）时服务端拒绝启动。
+The server refuses to start when the configuration is wrong (an unreadable key, an unset environment variable and so on).
 
-## 令牌
+## Tokens
 
-请求在 metadata `authorization: Bearer <token>` 中带令牌。服务端接受以下几种：
+Requests carry a token in the metadata `authorization: Bearer <token>`. The server accepts:
 
-| 令牌 | 形式 | 校验 |
+| Token | Form | Checked against |
 |---|---|---|
-| 访问令牌 | ES256 JWT，默认 15 分钟 | 服务端自己的公钥 |
-| PAT / service token | `scn_pat_…`，可设有效期 | 元数据库只存 SHA-256，可随时吊销 |
-| 刷新令牌 | `scn_refresh_…`，30 天 | 只能用来换取访问令牌（`scn login` 得到） |
-| 外部 JWT | 受信任签发方的 JWT | JWKS（RS*/PS*/ES*）或 HS256 共享密钥 |
-| 外部不透明令牌 | 任意 | RFC 7662 内省接口 |
+| Access token | ES256 JWT, 15 minutes by default | The server's own public key |
+| PAT / service token | `scn_pat_…`, with an optional expiry | Only its SHA-256 is stored in the metadata database; revocable at any time |
+| Refresh token | `scn_refresh_…`, 30 days | Exchangeable for access tokens only (from `scn login`) |
+| External JWT | A JWT from a trusted issuer | JWKS (RS*/PS*/ES*) or an HS256 shared secret |
+| External opaque token | Anything | An RFC 7662 introspection endpoint |
 
-客户端通常用长期凭据（PAT、刷新令牌、外部 JWT）调用 `AuthService.ExchangeToken` 换取访问令牌，并在过期前 2 分钟自动重新换取（SDK 的 `Auth::Exchange`，`scn` 默认如此）。服务端没有签名密钥时，客户端直接发送原凭据。
+Clients usually exchange a long-lived credential (a PAT, a refresh token, an external JWT) for an access token through `AuthService.ExchangeToken`, and exchange again 2 minutes before it expires (the SDK's `Auth::Exchange`, and `scn` by default). When the server has no signing key, clients send the credential itself.
 
-管理令牌：
+Managing tokens:
 
 ```sh
 scion admin token create --subject ci-bot --group ci --ttl 90d --description "release pipeline"
@@ -39,34 +41,34 @@ scion admin token list [--subject ci-bot]
 scion admin token revoke <id>
 ```
 
-这些命令直接读写元数据库，存储参数与 `scion server` 相同，例如 `--meta postgres://…` 或 `--lite --data-dir DIR`。也可以通过 `AdminService` 远程管理。
+These commands read and write the metadata database directly, with the same storage options as `scion server`, such as `--meta postgres://…` or `--lite --data-dir DIR`. `AdminService` manages tokens remotely too.
 
-## 访问控制策略
+## Access control policy
 
-策略是一组「允许」规则，存在元数据库里，所有节点在 30 秒内生效：
+A policy is a list of "allow" rules kept in the metadata database; every node applies a new one within 30 seconds:
 
 ```sh
-scion admin policy set acl.toml     # 校验后保存
+scion admin policy set acl.toml     # validate and save
 scion admin policy show
 ```
 
 ```toml
 [[rule]]
-subjects = ["group:eng"]              # user:NAME、group:NAME、"*"（任何已认证身份）、"anonymous"
-repos    = ["mono", "models/*"]       # 仓库名，* 匹配任意字符（包括 /）
-actions  = ["land"]                   # read < write < land < admin，高的包含低的
+subjects = ["group:eng"]              # user:NAME, group:NAME, "*" (anyone authenticated), "anonymous"
+repos    = ["mono", "models/*"]       # repository names; * matches anything, / included
+actions  = ["land"]                   # read < write < land < admin; each includes the ones before
 
 [[rule]]
 subjects = ["user:release-bot"]
 repos    = ["mono"]
 actions  = ["land"]
-refs     = ["release/*"]              # 只约束合入的目标 ref
+refs     = ["release/*"]              # limits only the refs landed on
 
 [[rule]]
 subjects = ["group:contractors"]
 repos    = ["mono"]
 actions  = ["write"]
-paths    = ["src/ui", "docs"]         # 目录前缀；不写表示整个仓库
+paths    = ["src/ui", "docs"]         # directory prefixes; without it, the whole repository
 
 [[rule]]
 subjects = ["anonymous", "*"]
@@ -76,80 +78,80 @@ actions  = ["read"]
 [[rule]]
 subjects = ["group:admins"]
 repos    = ["*"]
-actions  = ["admin"]                  # repos 含 "*" 的 admin 规则授予系统管理（策略、令牌）
+actions  = ["admin"]                  # admin on repos "*" grants system administration (policy, tokens)
 ```
 
-各接口需要的权限：
+What each API needs:
 
-| 操作 | 需要 |
+| Operation | Needs |
 |---|---|
-| 按 id 读对象（`GetObjects`、检出） | 整个仓库的 read（带 `paths` 的规则不够：按 id 读对象无法判断路径） |
-| 读文件、Stat、Blame、按路径的 Log / Diff | 该路径的 read |
-| 列目录 | 仓库中任意 read；只显示可读的条目和通向可读路径的上级目录 |
-| 不限路径的 Diff | 只返回可读路径的改动 |
-| 读 ref、Log、祖先判断、ResolveRevision | 仓库中任意 read |
-| 上传对象、`HasObjects` | 仓库中任意 write（或整个仓库的 read） |
-| 创建提交 | 每个改动路径的 write |
-| 合入 | 目标 ref 的 land |
-| 管理接口 | 系统管理 |
+| Reading objects by id (`GetObjects`, checkouts) | read on the whole repository (rules with `paths` are not enough: an object read by id has no path to check) |
+| Reading a file, Stat, Blame, Log or Diff by path | read on that path |
+| Listing a directory | any read in the repository; only readable entries, and the parents leading to readable paths, are shown |
+| Diff without a path | only changes to readable paths are returned |
+| Reading refs, Log, ancestry, ResolveRevision | any read in the repository |
+| Uploading objects, `HasObjects` | any write in the repository (or read on the whole repository) |
+| Creating a commit | write on every changed path |
+| Landing | land on the target ref |
+| Admin APIs | system administration |
 
-没有设置策略、也没有配置鉴权回调时，已认证的身份可以读写和合入所有仓库；系统管理始终需要策略明确授予。第一份策略用 `scion admin policy set` 直接写入元数据库。
+With no policy and no authorization callback configured, authenticated identities can read, write and land in every repository; system administration always needs a policy that grants it. Write the first policy straight into the metadata database with `scion admin policy set`.
 
-- **空策略**：显式保存的空策略（没有任何规则）拒绝一切，不等于「没有设置策略」。
-- **策略加载失败**：例如元数据库不可用，或库里的策略无法解析。
-  - 启动时加载失败，`scion server --auth-required` 拒绝启动。
-  - 嵌入使用 `scion-api` 时，服务端在加载成功前对所有请求返回 `UNAVAILABLE`，每秒重试。
-  - 运行中重新加载失败，保留上一份策略。
+- **An empty policy:** an explicitly saved policy with no rules denies everything; it is not the same as no policy.
+- **When the policy fails to load** (the metadata database is unavailable, or the stored policy does not parse):
+  - at start, `scion server --auth-required` refuses to start;
+  - embedded through `scion-api`, the server answers every request with `UNAVAILABLE` until a load succeeds, retrying every second;
+  - when a reload fails while running, the previous policy stays in effect.
 
 ## auth.toml
 
 ```toml
-[token]                                # 服务端签发的访问令牌
-issuer = "https://scion.example.com"   # JWT 的 iss，默认 "scion"
+[token]                                # access tokens the server issues
+issuer = "https://scion.example.com"   # the JWT's iss, "scion" by default
 ttl = "15m"
 
-[[issuer]]                             # 受信任的外部签发方，可以有多个
+[[issuer]]                             # trusted external issuers; there can be several
 issuer = "https://sso.example.com/realms/dev"
 jwks_url = "https://sso.example.com/realms/dev/protocol/openid-connect/certs"
-audience = "scion"                     # 可选
-subject_claim = "preferred_username"   # 默认 sub
-groups_claim = "groups"                # 可选，字符串数组或逗号分隔
-repos_claim = "repos"                  # 可选：{"models/a": "write"} 形式的仓库授权
+audience = "scion"                     # optional
+subject_claim = "preferred_username"   # sub by default
+groups_claim = "groups"                # optional; an array of strings or comma-separated
+repos_claim = "repos"                  # optional: repository grants such as {"models/a": "write"}
 
-[introspection]                        # RFC 7662：外部签发的不透明令牌
+[introspection]                        # RFC 7662: opaque tokens from an external issuer
 url = "https://sso.example.com/oauth2/introspect"
 client_id = "scion"
-client_secret_env = "SCION_INTROSPECT_SECRET"   # HTTP Basic；也可以用 bearer_env
+client_secret_env = "SCION_INTROSPECT_SECRET"   # HTTP Basic; or bearer_env
 cache_ttl = "60s"
 
-[authz_webhook]                        # 外部鉴权（OPA 兼容）
+[authz_webhook]                        # external authorization (OPA-compatible)
 url = "http://opa:8181/v1/data/scion/allow"
 cache_ttl = "30s"
 timeout = "2s"
-on_error = "closed"                    # 回调不可用时：closed 拒绝（默认），open 只按 ACL 判断
+on_error = "closed"                    # when the callback is unavailable: closed denies (default), open uses only the ACL
 
-[oidc]                                 # scn login（浏览器登录）
+[oidc]                                 # scn login (browser login)
 issuer = "https://sso.example.com/realms/dev"
 client_id = "scn"
 subject_claim = "preferred_username"
 groups_claim = "groups"
 ```
 
-密钥一律可以用 `*_env`（环境变量）或 `*_file`（文件）给出，不必写在配置文件里。
+Every secret can be given as `*_env` (an environment variable) or `*_file` (a file) instead of in the configuration file.
 
-### 外部鉴权回调
+### The external authorization callback
 
-服务端在 ACL 和令牌自带的授权都不允许时调用回调。请求与响应格式与 OPA 的 REST 数据接口相同：
+The server calls the callback when neither the ACL nor the token's own grants allow a request. Requests and responses follow OPA's REST data API:
 
 ```json
 POST /v1/data/scion/allow
 {"input": {"subject": "alice", "groups": ["eng"], "authenticated": true,
            "repo": "models/ns/qwen", "action": "write", "ref": null, "path": "README.md"}}
 
-{"result": true}                 // 或 {"result": {"allow": true}}；其它（包括没有 result）为拒绝
+{"result": true}                 // or {"result": {"allow": true}}; anything else (no result included) denies
 ```
 
-允许的结果缓存 `cache_ttl`，拒绝的结果缓存 5 秒。直接用 OPA 时，一条最简单的策略：
+Allows are cached for `cache_ttl`, denials for 5 seconds. With OPA itself, a minimal policy:
 
 ```rego
 package scion
@@ -158,14 +160,14 @@ allow if input.action == "read"; startswith(input.repo, "public/")
 allow if "eng" in input.groups
 ```
 
-## 接入 starhub-server
+## Connecting starhub-server
 
-starhub-server 的实际情况：
-- JWT 用 HS256 共享密钥签发（`STARHUB_JWT_SIGNING_KEY`），`iss` 是 `OpenCSG`，用户名在 `current_user` claim。
-- 另有不透明的 access token，由 user 服务校验。
-- 权限在 starhub 自己的数据库里按 rebac 计算，区分公开和私有仓库。
+What starhub-server does:
+- It signs JWTs with an HS256 shared secret (`STARHUB_JWT_SIGNING_KEY`); `iss` is `OpenCSG`, and the user name is in the `current_user` claim.
+- It also has opaque access tokens, checked by its user service.
+- It computes permissions with rebac in its own database, telling public and private repositories apart.
 
-对应的配置：
+The matching configuration:
 
 ```toml
 [[issuer]]
@@ -173,41 +175,41 @@ issuer = "OpenCSG"
 hs256_secret_env = "STARHUB_JWT_SIGNING_KEY"
 subject_claim = "current_user"
 
-[introspection]                        # starhub 的 access token
+[introspection]                        # starhub's access tokens
 url = "http://starhub-server:8080/api/v1/internal/scion/introspect"
 bearer_env = "STARHUB_API_TOKEN"
 subject_claim = "username"
 
-[authz_webhook]                        # 权限由 starhub 的 rebac 决定（含公开仓库的匿名读）
+[authz_webhook]                        # permissions come from starhub's rebac (anonymous reads of public repositories included)
 url = "http://starhub-server:8080/api/v1/internal/scion/authz"
 bearer_env = "STARHUB_API_TOKEN"
 cache_ttl = "30s"
 ```
 
-starhub 侧需要提供两个内部接口，都只是对现有逻辑的薄包装：
-- **`introspect`**：按 RFC 7662 接收 `token=…`，内部调用 `VerifyByAccessToken`，返回 `{"active": true, "username": "…"}`。
-- **`authz`**：按上面的回调格式接收请求，把 Scion 的仓库名（例如 `models/ns/name`）映射回 starhub 的仓库，再调用 `CheckUserRepoPermission`（read / write / admin）。
-  - `land` 映射为 write，或者按需要再加一层保护分支规则。
-  - `anonymous` 只对公开仓库的 read 返回允许。
+starhub needs two internal endpoints, both thin wrappers over its existing logic:
+- **`introspect`:** takes `token=…` as in RFC 7662, calls `VerifyByAccessToken` and returns `{"active": true, "username": "…"}`.
+- **`authz`:** takes requests in the callback format above, maps Scion's repository name (such as `models/ns/name`) back to the starhub repository and calls `CheckUserRepoPermission` (read, write or admin).
+  - `land` maps to write, or to write plus protected-branch rules if needed.
+  - `anonymous` is allowed only to read public repositories.
 
-`scn login` 可以走 starhub 使用的 Casdoor OIDC（`[oidc]`），也可以用 `scn login --token <starhub access token>`。
+`scn login` can go through the Casdoor OIDC that starhub uses (`[oidc]`), or use `scn login --token <starhub access token>`.
 
-## 缓存与 daemon
+## Caches and the daemon
 
-区域缓存（`scion cache`）和本机 daemon 不解析令牌。
-- **读权限**：返回对象前（包括本地命中），用调用者自己的令牌向服务端调用 `CheckAccess(repo, read)`，结果按（令牌, 仓库）缓存 60 秒。吊销令牌或修改策略后，缓存层最多 60 秒内生效。
-- **daemon 离线**：服务端不可达（而不是拒绝）时，24 小时内确认过的身份仍通过读权限检查；但读取前还要确认 redaction（[redaction.md](redaction.md)），距上次成功同步超过 10 秒的仓库返回 `UNAVAILABLE`，所以离线时基本不能读本机缓存。
-- **预热**：区域缓存在服务端要求认证时用 `--warm-token`（`SCION_CACHE_WARM_TOKEN`）指定预热用的身份。
+The regional cache (`scion cache`) and the local daemon do not parse tokens.
+- **Read permission:** before returning objects (local hits included), they call `CheckAccess(repo, read)` on the server with the caller's own token, and cache the result per token and repository for 60 seconds. A revoked token or a changed policy takes effect in cache layers within 60 seconds.
+- **The daemon offline:** when the server is unreachable (rather than refusing), identities confirmed within 24 hours still pass the read check. Reads also need redactions to be current, though ([redaction.md](redaction.md)): repositories last synced more than 10 seconds ago return `UNAVAILABLE`, so offline the local cache can mostly not be read.
+- **Warming:** when the server requires authentication, the regional cache warms up as the identity given by `--warm-token` (`SCION_CACHE_WARM_TOKEN`).
 
-## 客户端
+## The client
 
 ```sh
-scn login                 # 在浏览器中登录（服务端配置了 [oidc]）
-scn login --token TOKEN   # 用 PAT 或外部令牌；--with-token 从标准输入读取
+scn login                 # log in in the browser (the server has [oidc] configured)
+scn login --token TOKEN   # a PAT or external token; --with-token reads it from standard input
 scn whoami
 scn logout
 ```
 
-- **凭据存放**：按服务端地址保存。macOS 存进钥匙串，其它平台存进 `~/.config/scion/credentials.json`（权限 0600）。`SCION_CREDENTIALS_FILE` 可以指定文件。
-- **CI**：设置 `SCION_TOKEN`（PAT 或外部令牌），优先于保存的凭据。
-- **TLS**: `https://` servers are checked against the Mozilla root certificates built into `scn`. `SCION_TLS_CA_FILE=PATH` adds a private CA (PEM); `SCION_TLS_ROOTS=native` also trusts the operating system's store, which on macOS can add many seconds to every connection.
+- **Where credentials go:** per server address; in the Keychain on macOS, and in `~/.config/scion/credentials.json` (mode 0600) elsewhere. `SCION_CREDENTIALS_FILE` names another file.
+- **CI:** set `SCION_TOKEN` (a PAT or an external token), which takes precedence over saved credentials.
+- **TLS:** `https://` servers are checked against the Mozilla root certificates built into `scn`. `SCION_TLS_CA_FILE=PATH` adds a private CA (PEM); `SCION_TLS_ROOTS=native` also trusts the operating system's store, which on macOS can add many seconds to every connection.

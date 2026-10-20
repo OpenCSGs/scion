@@ -77,7 +77,7 @@ curl -s localhost:9464/metrics | head
 ### 生产环境需要修改的地方
 
 - **密钥**：数据库密码（`SCION_DB_PASSWORD`）和 S3 密钥（`deploy/dev/s3.json`）只能用于开发。
-- **认证**：开启 `--auth-required`，并配置签名密钥或外部签发方，见 [auth.md](auth.md)。
+- **认证**：开启 `--auth-required`，并配置签名密钥或外部签发方，见 [auth.md](auth.zh-CN.md)。
 - **对象存储**：改用正式的 S3 或 MinIO 服务，见 [object-storage.md](object-storage.zh-CN.md)。
 - **多节点**：设置 `--advertise-url` 和 `--cluster-secret`，见 [cluster.md](cluster.zh-CN.md)。
 

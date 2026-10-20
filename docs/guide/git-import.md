@@ -1,38 +1,40 @@
-# 从 git 导入
+# Importing from git
 
-把已有的 git 仓库连同全部历史导入 Scion。导入后，每个 git 提交对应一个 Scion 提交，作者、提交者、时间、时区和提交说明都原样保留。
+English | [简体中文](git-import.zh-CN.md)
 
-- [前提](#前提)
-- [快速开始](#快速开始)
-- [命令参考](#命令参考)
-- [导入了什么](#导入了什么)
-- [增量导入](#增量导入)
-- [验证导入结果](#验证导入结果)
-- [限制](#限制)
-- [常见问题](#常见问题)
+Import an existing git repository into Scion with all its history. Each git commit becomes one Scion commit, with author, committer, times, time zones and messages kept as they are.
 
-## 前提
+- [Before you start](#before-you-start)
+- [Quick start](#quick-start)
+- [Command reference](#command-reference)
+- [What is imported](#what-is-imported)
+- [Incremental imports](#incremental-imports)
+- [Checking the result](#checking-the-result)
+- [Limits](#limits)
+- [Troubleshooting](#troubleshooting)
 
-1. **本机装有 git**。导入器通过 git 命令行读取仓库（`rev-list`、`diff-tree`、`cat-file`），任何较新的 git 版本都可以。
-2. **服务端上已有目标仓库**。启动服务端时用 `--repo` 创建，重复指定不会报错：
+## Before you start
+
+1. **git on this machine.** The importer reads the repository through the git command line (`rev-list`, `diff-tree`, `cat-file`); any recent git works.
+2. **The target repository on the server.** Create it with `scn repo create mono`, or with `--repo` when starting the server (repeating it is not an error):
 
    ```sh
    scion server --lite --data-dir ./.scion-data --repo mono
    ```
 
-3. **装好 `scn`**：`cargo install --path client/cli`。
-4. **服务端开启认证时，需要目标仓库的 `admin` 权限**。导入的提交带有原始 git sha（扩展字段 `git.sha1`），服务端把它当作这个提交的 sha，只有仓库 admin 才能写入这个字段，普通写者会收到 `PERMISSION_DENIED`。否则任何写者都可以让任意 git sha 指向自己的提交。
+3. **`scn` installed:** `cargo install --path client/cli`.
+4. **`admin` on the target repository when the server requires authentication.** Imported commits carry their original git SHA (the extension field `git.sha1`), which the server takes as the commit's SHA, so only repository admins may write it; other writers get `PERMISSION_DENIED`. Otherwise any writer could point any git SHA at their own commit.
 
-导入只通过公开协议写入，和普通用户提交走同一条服务端校验，所以可以导入到任何 Scion 服务端（本机的 Lite 模式，或接入 PostgreSQL 与 S3 的集群）。
+The import writes only through the public protocol, with the same server-side checks as any user's commit, so it works against any Scion server (Lite mode on this machine, or a cluster on PostgreSQL and S3).
 
-## 快速开始
+## Quick start
 
 ```sh
 scn import git ~/src/my-repo --repo mono
 # imported 1287 commits into mono (main at c1a3f09b2c41)
 ```
 
-然后就可以克隆和查看：
+Then clone and look around:
 
 ```sh
 scn clone mono && cd mono
@@ -40,107 +42,107 @@ scn ls main:
 scn cat main:README.md
 ```
 
-## 命令参考
+## Command reference
 
 ```text
 scn import git <PATH> --repo <NAME> [--git-ref <REF>] [--ref <REF>] [--endpoint <URL>] [--json]
 ```
 
-| 参数 | 默认值 | 说明 |
+| Option | Default | What |
 |---|---|---|
-| `<PATH>` | — | git 仓库目录（工作目录或裸仓库均可） |
-| `--repo` | — | 目标 Scion 仓库，必填；也可用环境变量 `SCION_REPO` |
-| `--git-ref` | `main` | 要导入的 git 引用：分支、标签或提交 sha |
-| `--ref` | `main` | 导入后更新的 Scion ref |
-| `--endpoint` | `http://127.0.0.1:7080` | 服务端地址；也可用环境变量 `SCION_ENDPOINT` |
-| `--json` | — | 输出 JSON，schema 为 `scion.cli.import/v1` |
+| `<PATH>` | — | The git repository (a working tree or a bare repository) |
+| `--repo` | — | The target Scion repository, required; or the environment variable `SCION_REPO` |
+| `--git-ref` | `main` | The git reference to import: a branch, a tag or a commit SHA |
+| `--ref` | `main` | The Scion ref to update after the import |
+| `--endpoint` | `http://127.0.0.1:7080` | The server's address; or the environment variable `SCION_ENDPOINT` |
+| `--json` | — | JSON output, schema `scion.cli.import/v1` |
 
-`--json` 输出示例：
+`--json` output looks like this:
 
 ```json
 {"schema":"scion.cli.import/v1","repo":"mono","ref":"main","commits":1287,"skipped_gitlinks":0,"tip":"c1a3f09b2c41…"}
 ```
 
-退出码：`0` 成功；`1` 一般错误（不是 git 仓库、git 引用不存在、历史分叉等）；`2` 用法错误（如缺少 `--repo`）；`4` 可重试的网络错误；`5` 认证失败。
+Exit codes: `0` success; `1` a general error (not a git repository, a missing git reference, diverged history and so on); `2` a usage error (such as a missing `--repo`); `4` a retryable network error; `5` an authentication failure.
 
-需要导入多个分支时，对每个分支各执行一次，用 `--git-ref` 和 `--ref` 指定对应关系：
+To import several branches, run it once per branch, mapping each with `--git-ref` and `--ref`:
 
 ```sh
 scn import git ~/src/my-repo --repo mono --git-ref main --ref main
 scn import git ~/src/my-repo --repo mono --git-ref release/1.x --ref release/1.x
 ```
 
-两个分支共有的提交不会重复上传，也会得到相同的 Scion 提交 id。
+Commits the branches share are not uploaded twice, and get the same Scion commit ids.
 
-Re-imports and shared history: commits the server already has are skipped without reading them from git, so importing another branch that shares history with an imported one, re-importing, or importing a tag takes about a second; the summary says how many commits were new. (Importing starhub-server's second branch went from 39 s to 0.5 s.)
+**Re-imports and shared history:** commits the server already has are skipped without reading them from git, so importing another branch that shares history with an imported one, re-importing, or importing a tag takes about a second; the summary says how many commits were new. (Importing starhub-server's second branch went from 39 s to 0.5 s.)
 
-Tags: import a git tag into `tags/NAME` to create a Scion tag at the same commit, for example `scn import git ~/src/my-repo --repo mono --git-ref v1.0 --ref tags/v1.0`. The tag is created in one step (tags never move); importing it again is a no-op, and a tag that already points elsewhere is reported instead of moved.
+**Tags:** import a git tag into `tags/NAME` to create a Scion tag at the same commit, for example `scn import git ~/src/my-repo --repo mono --git-ref v1.0 --ref tags/v1.0`. The tag is created in one step (tags never move); importing it again is a no-op, and a tag that already points elsewhere is reported instead of moved.
 
-## 导入了什么
+## What is imported
 
-| git | Scion | 说明 |
+| git | Scion | Notes |
 |---|---|---|
-| 提交 | 提交 | 按拓扑顺序导入，父提交总是先于子提交 |
-| 父提交（含合并提交的多个父提交） | `parents` | 顺序不变，第一个是 first parent |
-| 相对第一个父提交的改动 | `delta` | 根提交相对空目录树 |
-| 作者 / 提交者 | `author` / `committer` | 姓名、邮箱、时间（精确到秒）和时区都保留 |
-| 提交说明 | `message` | 原样保留；非 UTF-8 字节按有损方式转换 |
-| 提交 sha | 扩展字段 `git.sha1` | 20 字节，可据此从 Scion 提交反查 git 提交 |
-| — | `change_id` | 取 git sha 的前 16 字节 |
-| 普通文件 `100644`（及旧格式 `100664`） | 文件 | |
-| 可执行文件 `100755` | 可执行文件 | |
-| 符号链接 `120000` | 符号链接 | 链接目标作为内容 |
-| 子模块 `160000` | — | 跳过，数量计入 `skipped_gitlinks` |
+| Commits | Commits | In topological order: parents always before children |
+| Parents (several for a merge) | `parents` | In the same order; the first is the first parent |
+| Changes against the first parent | `delta` | A root commit's against the empty tree |
+| Author / committer | `author` / `committer` | Name, email, time (to the second) and time zone kept |
+| Message | `message` | Kept as it is; non-UTF-8 bytes are converted lossily |
+| Commit SHA | The extension field `git.sha1` | 20 bytes, to find the git commit of a Scion commit |
+| — | `change_id` | The first 16 bytes of the git SHA |
+| Files `100644` (and the old `100664`) | Files | |
+| Executables `100755` | Executables | |
+| Symbolic links `120000` | Symbolic links | The target as content |
+| Submodules `160000` | — | Skipped, and counted in `skipped_gitlinks` |
 
-**结果是确定的**：同样的 git 历史无论导入多少次、导入到哪个服务端，都会得到完全相同的 Scion 提交 id。已经上传过的文件内容不会重复上传，所以重复执行导入的代价很小。
+**The result is deterministic:** the same git history gives exactly the same Scion commit ids however many times and into whichever server it is imported. File contents already uploaded are not uploaded again, so repeating an import is cheap.
 
-## 增量导入
+## Incremental imports
 
-git 仓库有了新提交以后，再执行一次同样的命令：
+When the git repository has new commits, run the same command again:
 
 ```sh
 scn import git ~/src/my-repo --repo mono
 ```
 
-导入器会复用已有的提交，只导入新增的部分，然后从 Scion ref 的当前位置，沿着第一父提交链把 ref 逐个快进到最新提交。
+The importer reuses the commits already there, imports only the new ones, and fast-forwards the Scion ref from where it is, commit by commit along the first-parent chain, to the latest.
 
-如果 git 历史被改写过（`rebase`、`commit --amend`、`reset` 后强推），Scion ref 当前指向的提交已不在新历史中，导入会失败并报 `not in the imported first-parent history`，ref 保持不变。这时可以导入到一个新 ref：
+When the git history was rewritten (a `rebase`, `commit --amend` or `reset` and a force push), the Scion ref's commit is no longer in the new history; the import fails with `not in the imported first-parent history` and leaves the ref alone. Import into a new ref then:
 
 ```sh
 scn import git ~/src/my-repo --repo mono --ref main-rewritten
 ```
 
-## 验证导入结果
+## Checking the result
 
-- 查看文件：`scn ls main:src`、`scn cat main:src/lib.rs`。
-- 按提交读取历史版本：`scn cat <提交 id>:path`。提交 id 可以从 `scn import git --json` 输出的 `tip`，或工作副本中 `scn status --json` 的 `base` 字段得到。
-- 对照 git：每个 Scion 提交的扩展字段 `git.sha1` 记录了对应的 git 提交，供程序通过 SDK 查询（读取提交对象后用 `scion_object::Changeset::decode` 解码）。
+- Look at files: `scn ls main:src`, `scn cat main:src/lib.rs`.
+- Read history by commit: `scn cat <commit id>:path`. Commit ids come from `tip` in the output of `scn import git --json`, or from the `base` field of `scn status --json` in a working copy.
+- Against git: each Scion commit's extension field `git.sha1` records its git commit, for programs to look up through the SDK (decode the commit object with `scion_object::Changeset::decode`).
 
-导入器的正确性由差分测试保证（`client/gitimport/tests/differential.rs`）。测试用真实 git 构造一段历史，覆盖改名、删除、可执行位、符号链接、二进制文件、中文路径、分支合并、目录与文件互换、子模块和空提交；导入后逐个提交比对文件列表、mode、内容、时间、时区和父提交，结果必须与 git 完全一致。
+Differential tests check the importer (`client/gitimport/tests/differential.rs`). They build a history with real git, covering renames, deletions, executable bits, symbolic links, binary files, non-ASCII paths, merges, directories and files swapping places, submodules and empty commits, then compare every imported commit's file list, modes, contents, times, time zones and parents with git's, which must match exactly.
 
-## 限制
+## Limits
 
-| 限制 | 说明 |
+| Limit | What |
 |---|---|
-| 子模块 | 跳过，不导入子模块指针 |
-| 提交签名 | GPG / SSH 签名（`gpgsig`）不导入。Scion 提交的 id 由内容决定，与签名无关 |
-| 标签 | 不导入标签对象；需要时用 `--git-ref <tag> --ref <name>` 把标签指向的历史导入为一个 ref |
-| 改名 | 记为「删除 + 新增」。内容不变的文件不会重复上传 |
-| 单个文件大小 | 受服务端上传上限约束，默认 256 MiB；更大的文件会导致导入失败。分块存储会在后续版本支持更大的文件 |
-| Git LFS | 导入的是 LFS 指针文件本身，不会下载 LFS 对象 |
-| 文件名 | 必须是合法的 UTF-8；否则导入失败并报出路径 |
-| 速度 | 每个提交调用一次 `git diff-tree` 和一次服务端请求，适合中小型仓库。超大仓库的批量迁移（如接入 starhub）后续改为服务端直写 |
+| Submodules | Skipped: submodule pointers are not imported |
+| Commit signatures | GPG and SSH signatures (`gpgsig`) are not imported; Scion commit ids depend on content, not signatures |
+| Tag objects | Not imported; import the history a tag points at with `--git-ref <tag> --ref tags/<name>` (see above) |
+| Renames | Recorded as a deletion and an addition; unchanged contents are not uploaded again |
+| File size | Bounded by the server's upload limit, 256 MiB by default; larger files fail the import. Chunked storage will allow larger files in a later version |
+| Git LFS | The LFS pointer files themselves are imported; LFS objects are not downloaded |
+| File names | Must be valid UTF-8; otherwise the import fails and names the path |
+| Speed | One `git diff-tree` and one server request per commit, which suits small and medium repositories; bulk migrations of very large ones (such as for starhub) will write on the server directly |
 
-## 常见问题
+## Troubleshooting
 
 **`repository "mono" not found`**
-服务端上还没有这个仓库。启动服务端时加上 `--repo mono`。
+The server has no such repository yet. Create it with `scn repo create mono`, or start the server with `--repo mono`.
 
 **`cannot connect to http://127.0.0.1:7080`**
-服务端没有启动，或地址不对。用 `--endpoint` 或环境变量 `SCION_ENDPOINT` 指定地址。如果设置了 HTTP 代理（`http_proxy`），访问本机服务端时请设置 `NO_PROXY=127.0.0.1,localhost`。
+The server is not running, or the address is wrong. Pass it with `--endpoint` or the environment variable `SCION_ENDPOINT`. With an HTTP proxy set (`http_proxy`), set `NO_PROXY=127.0.0.1,localhost` to reach a local server.
 
-**`not a git repository`** 或 **`git rev-list … failed`**
-`<PATH>` 不是 git 仓库，或 `--git-ref` 指定的引用不存在。用 `git -C <PATH> branch -a` 查看可用的分支。
+**`not a git repository`** or **`git rev-list … failed`**
+`<PATH>` is not a git repository, or the reference given by `--git-ref` does not exist. `git -C <PATH> branch -a` lists the branches.
 
-**导入中途失败了怎么办？**
-直接重新执行。已导入的提交和已上传的内容都会被复用，Scion ref 只在全部提交都导入成功之后才会更新。
+**What if an import fails midway?**
+Run it again. Imported commits and uploaded contents are reused, and the Scion ref is updated only after every commit was imported.

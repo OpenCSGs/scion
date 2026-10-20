@@ -56,13 +56,14 @@ fn mode_of(meta: &Metadata) -> Option<Mode> {
 /// directory, `.scionignore` is read last and wins.
 pub const IGNORE_FILES: [&str; 2] = [".gitignore", ".scionignore"];
 
-/// Ignore rules of one directory (`None` when it has no ignore files).
-fn dir_rules(dir: &Path) -> Option<Arc<Gitignore>> {
+/// Ignore rules of one directory (`None` when it has no ignore files). `has` says whether the
+/// directory lists a name, so directories without ignore files cost no extra lookup.
+fn dir_rules(dir: &Path, has: impl Fn(&str) -> bool) -> Option<Arc<Gitignore>> {
     let mut b = GitignoreBuilder::new(dir);
     let mut any = false;
     for name in IGNORE_FILES {
         let f = dir.join(name);
-        if f.is_file() {
+        if has(name) && f.is_file() {
             // Lines that fail to parse are skipped, like git does
             let _ = b.add(&f);
             any = true;
@@ -95,81 +96,169 @@ fn tracks_under<R>(tracked: &BTreeMap<String, R>, dir: &str) -> bool {
         .is_some_and(|(k, _)| k.starts_with(&prefix))
 }
 
+/// A directory still to scan.
+struct Dir {
+    path: PathBuf,
+    prefix: String,
+    rules: Vec<Arc<Gitignore>>,
+    /// Inside an ignored directory that still holds tracked files: only those are returned.
+    ignored: bool,
+}
+
+/// Threads scanning a working tree: its cost is one `lstat` per file, which threads overlap.
+fn scan_threads() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8)
+}
+
 /// Scans the working tree and returns `relative path (/-separated) → file info`.
 ///
 /// Skips `.scion/`, `.git/`, directories themselves and special files, and untracked paths matched
 /// by `.gitignore` / `.scionignore`. Tracked files (keys of `tracked`) are always returned, even
 /// when an ignore rule matches them, so ignoring a tracked file never looks like deleting it.
-pub(crate) fn scan<R>(root: &Path, tracked: &BTreeMap<String, R>) -> Result<BTreeMap<String, Found>> {
-    struct Dir {
-        path: PathBuf,
-        prefix: String,
-        rules: Vec<Arc<Gitignore>>,
-        /// Inside an ignored directory that still holds tracked files: only those are returned.
-        ignored: bool,
+///
+/// Directories are scanned by several threads at once.
+pub(crate) fn scan<R: Sync>(root: &Path, tracked: &BTreeMap<String, R>) -> Result<BTreeMap<String, Found>> {
+    scan_with(root, tracked, scan_threads())
+}
+
+fn scan_with<R: Sync>(root: &Path, tracked: &BTreeMap<String, R>, threads: usize) -> Result<BTreeMap<String, Found>> {
+    use std::sync::{Condvar, Mutex, MutexGuard};
+    fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
-    let mut out = BTreeMap::new();
-    let mut stack = vec![Dir {
-        path: root.to_path_buf(),
-        prefix: String::new(),
-        rules: Vec::new(),
-        ignored: false,
-    }];
-    while let Some(Dir {
+    struct Queue {
+        dirs: Vec<Dir>,
+        /// Directories taken and not finished: more may be pushed while any is
+        busy: usize,
+        failed: Option<Error>,
+    }
+    let queue = Mutex::new(Queue {
+        dirs: vec![Dir {
+            path: root.to_path_buf(),
+            prefix: String::new(),
+            rules: Vec::new(),
+            ignored: false,
+        }],
+        busy: 0,
+        failed: None,
+    });
+    let ready = Condvar::new();
+    let worker = || {
+        let mut found = Vec::new();
+        loop {
+            let dir = {
+                let mut q = lock(&queue);
+                loop {
+                    if q.failed.is_some() {
+                        return found;
+                    }
+                    if let Some(d) = q.dirs.pop() {
+                        q.busy += 1;
+                        break d;
+                    }
+                    if q.busy == 0 {
+                        return found;
+                    }
+                    q = ready.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            };
+            let mut subdirs = Vec::new();
+            let result = scan_dir(dir, tracked, &mut found, &mut subdirs);
+            let mut q = lock(&queue);
+            q.busy -= 1;
+            match result {
+                Ok(()) => q.dirs.append(&mut subdirs),
+                Err(e) => {
+                    q.failed.get_or_insert(e);
+                }
+            }
+            drop(q);
+            ready.notify_all();
+        }
+    };
+    let parts: Vec<Vec<(String, Found)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = (1..threads.max(1)).map(|_| s.spawn(worker)).collect();
+        let mut parts = vec![worker()];
+        parts.extend(handles.into_iter().map(|h| h.join().unwrap_or_default()));
+        parts
+    });
+    if let Some(e) = lock(&queue).failed.take() {
+        return Err(e);
+    }
+    Ok(parts.into_iter().flatten().collect())
+}
+
+/// Scans one directory: its files go to `found`, its subdirectories to `subdirs`.
+fn scan_dir<R>(
+    dir: Dir,
+    tracked: &BTreeMap<String, R>,
+    found: &mut Vec<(String, Found)>,
+    subdirs: &mut Vec<Dir>,
+) -> Result<()> {
+    let Dir {
         path: dir,
         prefix,
         mut rules,
         ignored,
-    }) = stack.pop()
-    {
-        if !ignored {
-            rules.extend(dir_rules(&dir));
+    } = dir;
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(io(&dir))? {
+        let entry = entry.map_err(io(&dir))?;
+        let name = entry.file_name();
+        let name = name
+            .to_str()
+            .ok_or_else(|| Error::Corrupt(format!("non UTF-8 file name in {}", dir.display())))?
+            .to_owned();
+        // The type comes with the listing on most file systems: no lookup for directories
+        let ft = entry.file_type().map_err(io(&entry.path()))?;
+        entries.push((name, ft));
+    }
+    if !ignored {
+        rules.extend(dir_rules(&dir, |n| entries.iter().any(|(e, _)| e == n)));
+    }
+    for (name, ft) in entries {
+        if prefix.is_empty() && name == DIR {
+            continue;
         }
-        for entry in std::fs::read_dir(&dir).map_err(io(&dir))? {
-            let entry = entry.map_err(io(&dir))?;
-            let name = entry.file_name();
-            let name = name
-                .to_str()
-                .ok_or_else(|| Error::Corrupt(format!("non UTF-8 file name in {}", dir.display())))?
-                .to_owned();
-            if prefix.is_empty() && name == DIR {
+        let rel = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let path = dir.join(&name);
+        if ft.is_dir() {
+            let skip = ignored || name == ".git" || is_ignored(&rules, &path, true);
+            if skip && !tracks_under(tracked, &rel) {
                 continue;
             }
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            let path = entry.path();
-            let meta = std::fs::symlink_metadata(&path).map_err(io(&path))?;
-            if meta.is_dir() {
-                let skip = ignored || name == ".git" || is_ignored(&rules, &path, true);
-                if skip && !tracks_under(tracked, &rel) {
-                    continue;
-                }
-                stack.push(Dir {
-                    path,
-                    prefix: rel,
-                    rules: rules.clone(),
-                    ignored: skip,
-                });
-            } else if let Some(mode) = mode_of(&meta) {
-                let skip = ignored || is_ignored(&rules, &path, false);
-                if skip && !tracked.contains_key(&rel) {
-                    continue;
-                }
-                out.insert(
-                    rel,
-                    Found {
-                        mode,
-                        size: meta.len(),
-                        mtime_ns: mtime_ns(&meta),
-                    },
-                );
-            }
+            subdirs.push(Dir {
+                path,
+                prefix: rel,
+                rules: rules.clone(),
+                ignored: skip,
+            });
+            continue;
+        }
+        if !ft.is_file() && !ft.is_symlink() {
+            continue;
+        }
+        let skip = ignored || is_ignored(&rules, &path, false);
+        if skip && !tracked.contains_key(&rel) {
+            continue;
+        }
+        let meta = std::fs::symlink_metadata(&path).map_err(io(&path))?;
+        if let Some(mode) = mode_of(&meta) {
+            found.push((
+                rel,
+                Found {
+                    mode,
+                    size: meta.len(),
+                    mtime_ns: mtime_ns(&meta),
+                },
+            ));
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 fn path_of(root: &Path, rel: &str) -> PathBuf {
@@ -446,6 +535,41 @@ mod tests {
             scan(&d.path().join("missing"), &none()),
             Err(Error::Io { .. })
         ));
+    }
+
+    /// Many threads find what one finds, ignore rules and tracked files under ignored
+    /// directories included; an unreadable directory fails the scan without hanging it.
+    #[test]
+    fn parallel_scan_matches_one_thread_and_reports_errors() {
+        let d = tempfile::tempdir().expect("tempdir");
+        let r = d.path();
+        for i in 0..40 {
+            for j in 0..5 {
+                std::fs::create_dir_all(r.join(format!("d{i}/e{j}"))).expect("mkdir");
+                std::fs::write(r.join(format!("d{i}/e{j}/f.txt")), b"x").expect("write");
+            }
+        }
+        std::fs::write(r.join(".gitignore"), "build/\n*.log\n").expect("ignore");
+        std::fs::create_dir_all(r.join("build/out")).expect("mkdir");
+        std::fs::write(r.join("build/out/kept.bin"), b"k").expect("write");
+        std::fs::write(r.join("build/out/other.bin"), b"o").expect("write");
+        std::fs::write(r.join("d0/noise.log"), b"n").expect("write");
+        let tracked: BTreeMap<String, ()> = [("build/out/kept.bin".to_owned(), ())].into();
+        let one = scan_with(r, &tracked, 1).expect("one thread");
+        let many = scan_with(r, &tracked, 8).expect("eight threads");
+        assert_eq!(one.keys().collect::<Vec<_>>(), many.keys().collect::<Vec<_>>());
+        assert_eq!(many.len(), 40 * 5 + 2, "{:?}", many.keys().take(3).collect::<Vec<_>>());
+        assert!(many.contains_key("build/out/kept.bin") && !many.contains_key("build/out/other.bin"));
+        assert!(!many.contains_key("d0/noise.log"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = r.join("d7/e3");
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+            let err = scan_with(r, &tracked, 8);
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod back");
+            assert!(err.is_err(), "an unreadable directory fails the scan");
+        }
     }
 
     #[cfg(unix)]

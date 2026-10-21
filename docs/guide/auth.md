@@ -174,6 +174,28 @@ allow if input.action == "read"; startswith(input.repo, "public/")
 allow if "eng" in input.groups
 ```
 
+### Several deciders
+
+Authorization asks a chain of deciders in order. Each one allows, denies or has no opinion; the first that allows or denies settles the request, and if none does it is denied. Without `[authorization]` the chain is `policy`, `grants` (the token's own `repos_claim`), then `[authz_webhook]`. Name the order, and add as many webhooks as you need, with `[authorization]`:
+
+```toml
+[authorization]
+chain = ["webhook:starhub", "policy", "grants", "webhook:opa"]
+
+[[authorization.webhook]]
+name = "starhub"
+url = "http://starhub-server:8080/api/v1/internal/scion/authz"
+bearer_env = "STARHUB_API_TOKEN"
+decides = "allow-deny"            # its false denies; allow-only (default): false has no opinion
+repos = ["models/*", "datasets/*"] # asked only about these; no opinion elsewhere
+
+[[authorization.webhook]]
+name = "opa"
+url = "http://opa:8181/v1/data/scion/allow"
+```
+
+Each webhook takes the same `bearer`, `bearer_env`, `cache_ttl`, `timeout` and `on_error` as `[authz_webhook]`. When one is unavailable, `on_error = "open"` makes it have no opinion, so the next decider is asked. An `[authz_webhook]` can stay; in a chain it is called `webhook`. The design is in [authorization](../design/authorization.md).
+
 ## Connecting starhub-server
 
 What starhub-server does:

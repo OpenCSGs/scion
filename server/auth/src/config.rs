@@ -180,11 +180,15 @@ struct RawIntrospection {
 }
 
 /// 调用外部接口时的认证方式。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ClientAuth {
+    #[default]
     None,
     Bearer(Secret),
-    Basic { client_id: String, secret: Secret },
+    Basic {
+        client_id: String,
+        secret: Secret,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,13 +214,77 @@ struct RawWebhook {
     on_error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A webhook in `[[authorization.webhook]]`: the legacy fields plus a name, what its `false`
+/// means, and the repositories it is asked about.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawNamedWebhook {
+    name: String,
+    url: String,
+    bearer: Option<String>,
+    bearer_env: Option<String>,
+    #[serde(default, deserialize_with = "duration")]
+    cache_ttl: Option<Duration>,
+    #[serde(default, deserialize_with = "duration")]
+    timeout: Option<Duration>,
+    on_error: Option<String>,
+    /// allow-only (default: `false` means no opinion) or allow-deny (`false` denies).
+    decides: Option<String>,
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+impl RawNamedWebhook {
+    fn hook(&self) -> RawWebhook {
+        RawWebhook {
+            url: self.url.clone(),
+            bearer: self.bearer.clone(),
+            bearer_env: self.bearer_env.clone(),
+            cache_ttl: self.cache_ttl,
+            timeout: self.timeout,
+            on_error: self.on_error.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorization {
+    chain: Option<Vec<String>>,
+    #[serde(default)]
+    webhook: Vec<RawNamedWebhook>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WebhookConfig {
+    /// `webhook` for the legacy `[authz_webhook]`.
+    pub name: String,
     pub url: String,
     pub auth: ClientAuth,
     pub cache_ttl: Duration,
     pub timeout: Duration,
     pub fail_open: bool,
+    /// A `false` answer denies (`decides = "allow-deny"`) instead of passing to the next decider.
+    pub denies: bool,
+    /// Repository patterns the webhook is asked about; empty asks it about every repository.
+    pub repos: Vec<String>,
+}
+
+/// One entry of `[authorization] chain`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainEntry {
+    Policy,
+    Grants,
+    /// The webhook with this name.
+    Webhook(String),
+}
+
+/// `[authorization]`: the order of the deciders and the webhooks they can name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthorizationConfig {
+    /// None: today's order (policy, grants, then the webhook if any).
+    pub chain: Option<Vec<ChainEntry>>,
+    pub webhooks: Vec<WebhookConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -250,6 +318,8 @@ struct RawConfig {
     introspection: Option<RawIntrospection>,
     authz_webhook: Option<RawWebhook>,
     oidc: Option<OidcConfig>,
+    #[serde(default)]
+    authorization: RawAuthorization,
 }
 
 /// 完整的认证配置。
@@ -260,6 +330,117 @@ pub struct AuthConfig {
     pub introspection: Option<IntrospectionConfig>,
     pub authz_webhook: Option<WebhookConfig>,
     pub oidc: Option<OidcConfig>,
+    pub authorization: AuthorizationConfig,
+}
+
+impl AuthConfig {
+    /// Every webhook: the legacy `[authz_webhook]` (named `webhook`) first, then the named ones.
+    pub fn webhooks(&self) -> impl Iterator<Item = &WebhookConfig> {
+        self.authz_webhook.iter().chain(&self.authorization.webhooks)
+    }
+
+    /// The deciders in order: the configured chain, or today's.
+    pub fn chain(&self) -> Vec<ChainEntry> {
+        match &self.authorization.chain {
+            Some(c) => c.clone(),
+            None => {
+                let mut c = vec![ChainEntry::Policy, ChainEntry::Grants];
+                c.extend(self.webhooks().map(|w| ChainEntry::Webhook(w.name.clone())));
+                c
+            }
+        }
+    }
+}
+
+fn webhook_config(name: String, r: RawWebhook, context: &str) -> Result<WebhookConfig, ConfigError> {
+    let fail_open = match r.on_error.as_deref() {
+        None | Some("closed") => false,
+        Some("open") => true,
+        Some(other) => {
+            return Err(ConfigError::Invalid(format!(
+                "{context}.on_error must be closed or open, got {other:?}"
+            )));
+        }
+    };
+    Ok(WebhookConfig {
+        name,
+        url: r.url,
+        auth: client_auth(r.bearer, r.bearer_env, None),
+        cache_ttl: r.cache_ttl.unwrap_or(Duration::from_secs(30)),
+        timeout: r.timeout.unwrap_or(Duration::from_secs(2)),
+        fail_open,
+        denies: false,
+        repos: Vec::new(),
+    })
+}
+
+fn authorization(raw: RawAuthorization, legacy: bool) -> Result<AuthorizationConfig, ConfigError> {
+    let mut webhooks: Vec<WebhookConfig> = Vec::with_capacity(raw.webhook.len());
+    for w in raw.webhook {
+        let context = format!("authorization.webhook {:?}", w.name);
+        if w.name.is_empty() || w.name == "webhook" && legacy || webhooks.iter().any(|x| x.name == w.name) {
+            return Err(ConfigError::Invalid(format!(
+                "{context}: the name must be unique and not empty"
+            )));
+        }
+        let denies = match w.decides.as_deref() {
+            None | Some("allow-only") => false,
+            Some("allow-deny") => true,
+            Some(other) => {
+                return Err(ConfigError::Invalid(format!(
+                    "{context}.decides must be allow-only or allow-deny, got {other:?}"
+                )));
+            }
+        };
+        let hook = w.hook();
+        webhooks.push(WebhookConfig {
+            denies,
+            repos: w.repos,
+            ..webhook_config(w.name, hook, &context)?
+        });
+    }
+    let chain = match raw.chain {
+        None => None,
+        Some(names) => {
+            let mut chain = Vec::with_capacity(names.len());
+            for n in &names {
+                let entry = match n.as_str() {
+                    "policy" => ChainEntry::Policy,
+                    "grants" => ChainEntry::Grants,
+                    "webhook" if legacy => ChainEntry::Webhook("webhook".into()),
+                    w => match w.strip_prefix("webhook:") {
+                        Some(name) if webhooks.iter().any(|x| x.name == name) => ChainEntry::Webhook(name.into()),
+                        _ => {
+                            return Err(ConfigError::Invalid(format!(
+                                "authorization.chain: unknown decider {n:?} (policy, grants, webhook:NAME)"
+                            )));
+                        }
+                    },
+                };
+                if chain.contains(&entry) {
+                    return Err(ConfigError::Invalid(format!(
+                        "authorization.chain: {n:?} appears twice"
+                    )));
+                }
+                chain.push(entry);
+            }
+            for w in &webhooks {
+                if !chain.contains(&ChainEntry::Webhook(w.name.clone())) {
+                    return Err(ConfigError::Invalid(format!(
+                        "authorization.webhook {:?} is not in authorization.chain",
+                        w.name
+                    )));
+                }
+            }
+            Some(chain)
+        }
+    };
+    if chain.is_none() && !webhooks.is_empty() {
+        return Err(ConfigError::Invalid(
+            "authorization.webhook needs authorization.chain to say where the webhooks go".into(),
+        ));
+    }
+    Ok(AuthorizationConfig { chain, webhooks })
 }
 
 fn client_auth(
@@ -315,33 +496,18 @@ impl AuthConfig {
             subject_claim: r.subject_claim.unwrap_or_else(|| "username".into()),
             groups_claim: r.groups_claim,
         });
-        let authz_webhook = match raw.authz_webhook {
-            Some(r) => {
-                let fail_open = match r.on_error.as_deref() {
-                    None | Some("closed") => false,
-                    Some("open") => true,
-                    Some(other) => {
-                        return Err(ConfigError::Invalid(format!(
-                            "authz_webhook.on_error must be closed or open, got {other:?}"
-                        )));
-                    }
-                };
-                Some(WebhookConfig {
-                    url: r.url,
-                    auth: client_auth(r.bearer, r.bearer_env, None),
-                    cache_ttl: r.cache_ttl.unwrap_or(Duration::from_secs(30)),
-                    timeout: r.timeout.unwrap_or(Duration::from_secs(2)),
-                    fail_open,
-                })
-            }
-            None => None,
-        };
+        let authz_webhook = raw
+            .authz_webhook
+            .map(|r| webhook_config("webhook".into(), r, "authz_webhook"))
+            .transpose()?;
+        let authorization = authorization(raw.authorization, authz_webhook.is_some())?;
         Ok(Self {
             token: raw.token,
             issuers,
             introspection,
             authz_webhook,
             oidc: raw.oidc,
+            authorization,
         })
     }
 }
@@ -430,6 +596,71 @@ client_id = "scn"
             AuthConfig::parse(none).expect("ok").introspection.map(|i| i.auth),
             Some(ClientAuth::None)
         );
+    }
+
+    #[test]
+    fn authorization_chain_and_named_webhooks() {
+        let c = AuthConfig::parse(FULL).expect("parse");
+        assert_eq!(
+            c.chain(),
+            [
+                ChainEntry::Policy,
+                ChainEntry::Grants,
+                ChainEntry::Webhook("webhook".into())
+            ],
+            "without [authorization], today's order"
+        );
+        assert_eq!(AuthConfig::default().chain(), [ChainEntry::Policy, ChainEntry::Grants]);
+        let text = r#"
+[authz_webhook]
+url = "http://opa/allow"
+
+[authorization]
+chain = ["webhook:starhub", "policy", "webhook", "grants"]
+
+[[authorization.webhook]]
+name = "starhub"
+url = "http://starhub/authz"
+bearer_env = "STARHUB_API_TOKEN"
+decides = "allow-deny"
+repos = ["models/*", "datasets/*"]
+cache_ttl = "10s"
+"#;
+        let c = AuthConfig::parse(text).expect("parse");
+        assert_eq!(
+            c.chain(),
+            [
+                ChainEntry::Webhook("starhub".into()),
+                ChainEntry::Policy,
+                ChainEntry::Webhook("webhook".into()),
+                ChainEntry::Grants
+            ]
+        );
+        let names: Vec<&str> = c.webhooks().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["webhook", "starhub"]);
+        let s = &c.authorization.webhooks[0];
+        assert!(s.denies && s.repos.len() == 2 && s.cache_ttl == Duration::from_secs(10));
+        assert!(!c.authz_webhook.as_ref().expect("legacy").denies);
+        let hook = |extra: &str| format!("[[authorization.webhook]]\nname = \"a\"\nurl = \"u\"\n{extra}");
+        for (bad, why) in [
+            ("[authorization]\nchain = [\"magic\"]".to_owned(), "unknown decider"),
+            ("[authorization]\nchain = [\"policy\", \"policy\"]".to_owned(), "twice"),
+            ("[authorization]\nchain = [\"webhook\"]".to_owned(), "no legacy webhook"),
+            (format!("[authorization]\nchain = [\"policy\"]\n{}", hook("")), "not in the chain"),
+            (hook(""), "webhooks without a chain"),
+            (format!("[authorization]\nchain = [\"webhook:a\"]\n{}", hook("decides = \"maybe\"")), "decides"),
+            (format!("[authorization]\nchain = [\"webhook:a\"]\n{}", hook("on_error = \"x\"")), "on_error"),
+            (
+                format!("[authorization]\nchain = [\"webhook:a\"]\n{}\n{}", hook(""), hook("")),
+                "duplicate name",
+            ),
+            (
+                "[authz_webhook]\nurl = \"u\"\n[authorization]\nchain = [\"webhook\"]\n[[authorization.webhook]]\nname = \"webhook\"\nurl = \"u\"".to_owned(),
+                "the legacy name",
+            ),
+        ] {
+            assert!(matches!(AuthConfig::parse(&bad), Err(ConfigError::Invalid(_))), "{why}: {bad}");
+        }
     }
 
     #[test]

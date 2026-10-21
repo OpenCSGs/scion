@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use scion_store::{MetaStore, TokenRecord};
 
-use crate::config::AuthConfig;
+use crate::config::{AuthConfig, ChainEntry};
 use crate::external::{ExternalIssuer, VerifyError};
 use crate::oidc::{DevicePoll, DeviceStart, Oidc};
 use crate::policy::{Action, Policy, Principal, Request, grants_allow};
@@ -93,11 +93,9 @@ enum Decider {
     Policy,
     /// Grants carried by the token (`repos_claim`).
     Grants,
-    /// The authorization callback.
-    Webhook,
+    /// The webhook at this index of `Guard::webhooks`.
+    Webhook(usize),
 }
-
-const DEFAULT_CHAIN: [Decider; 3] = [Decider::Policy, Decider::Grants, Decider::Webhook];
 
 pub struct Guard {
     required: bool,
@@ -106,7 +104,7 @@ pub struct Guard {
     issuer: Option<Issuer>,
     externals: Vec<ExternalIssuer>,
     introspection: Option<Introspection>,
-    webhook: Option<AuthzWebhook>,
+    webhooks: Vec<AuthzWebhook>,
     oidc: Option<Oidc>,
     policy: RwLock<PolicyState>,
 }
@@ -157,12 +155,12 @@ impl Guard {
     fn unconfigured() -> Self {
         Self {
             required: false,
-            chain: DEFAULT_CHAIN.to_vec(),
+            chain: vec![Decider::Policy, Decider::Grants],
             meta: None,
             issuer: None,
             externals: Vec::new(),
             introspection: None,
-            webhook: None,
+            webhooks: Vec::new(),
             oidc: None,
             policy: RwLock::new(PolicyState::Unset),
         }
@@ -173,13 +171,32 @@ impl Guard {
         // only they need an HTTP client: building one needs the system's CA certificates, which a
         // minimal Linux may not have, and a server that calls nobody should still start there
         let a = &config.auth;
-        let http = if a.issuers.is_empty() && a.introspection.is_none() && a.authz_webhook.is_none() && a.oidc.is_none()
-        {
-            None
-        } else {
-            Some(http_client()?)
-        };
+        let http =
+            if a.issuers.is_empty() && a.introspection.is_none() && a.webhooks().next().is_none() && a.oidc.is_none() {
+                None
+            } else {
+                Some(http_client()?)
+            };
         let http = || http.clone().expect("built when something calls out");
+        let webhooks: Vec<AuthzWebhook> = config
+            .auth
+            .webhooks()
+            .map(|c| AuthzWebhook::new(c.clone(), http(), lookup.clone()))
+            .collect();
+        let chain = config
+            .auth
+            .chain()
+            .into_iter()
+            .map(|e| match e {
+                ChainEntry::Policy => Ok(Decider::Policy),
+                ChainEntry::Grants => Ok(Decider::Grants),
+                ChainEntry::Webhook(name) => webhooks
+                    .iter()
+                    .position(|w| w.name() == name)
+                    .map(Decider::Webhook)
+                    .ok_or_else(|| format!("authorization.chain names an unknown webhook {name:?}")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let ttl = i64::try_from(config.auth.token.ttl().as_secs()).unwrap_or(900);
         let issuer = config
             .signing_key_pem
@@ -195,7 +212,7 @@ impl Guard {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Arc::new(Self {
             required: config.required,
-            chain: DEFAULT_CHAIN.to_vec(),
+            chain,
             meta: Some(meta),
             issuer,
             externals,
@@ -203,10 +220,7 @@ impl Guard {
                 .auth
                 .introspection
                 .map(|c| Introspection::new(c, http(), lookup.clone())),
-            webhook: config
-                .auth
-                .authz_webhook
-                .map(|c| AuthzWebhook::new(c, http(), lookup.clone())),
+            webhooks,
             oidc: config.auth.oidc.map(|c| Oidc::new(c, http(), lookup)),
             policy: RwLock::new(PolicyState::Unloaded),
         }))
@@ -456,17 +470,21 @@ impl Guard {
 
     // ---------- 鉴权 ----------
 
-    async fn webhook_allows(&self, p: &Principal, req: &Request<'_>) -> Result<bool, AuthError> {
-        match &self.webhook {
-            Some(w) => match w.allows(p, req).await {
-                Ok(b) => Ok(b),
-                Err(e) if w.fail_open() => {
-                    tracing::warn!(error = %e, "authz webhook unavailable; falling back to the ACL");
-                    Ok(false)
-                }
-                Err(e) => Err(AuthError::Unavailable(e)),
-            },
-            None => Ok(false),
+    /// A webhook's answer: abstains for repositories it does not cover, and when unavailable
+    /// with `on_error = "open"`.
+    async fn webhook_decides(&self, w: &AuthzWebhook, p: &Principal, req: &Request<'_>) -> Result<Decision, AuthError> {
+        if !w.covers(req.repo) {
+            return Ok(Decision::Abstain);
+        }
+        match w.allows(p, req).await {
+            Ok(true) => Ok(Decision::Allow),
+            Ok(false) if w.denies() => Ok(Decision::Deny),
+            Ok(false) => Ok(Decision::Abstain),
+            Err(e) if w.fail_open() => {
+                tracing::warn!(webhook = w.name(), error = %e, "authz webhook unavailable; asking the next decider");
+                Ok(Decision::Abstain)
+            }
+            Err(e) => Err(AuthError::Unavailable(e)),
         }
     }
 
@@ -482,7 +500,7 @@ impl Guard {
                     pol.allows(p, req)
                 }),
                 // The built-in default settles the request either way
-                None if self.webhook.is_none() => {
+                None if self.webhooks.is_empty() => {
                     let builtin = Policy::builtin();
                     let allowed = if admin {
                         builtin.is_system_admin(p)
@@ -494,7 +512,7 @@ impl Guard {
                 None => Decision::Abstain,
             },
             Decider::Grants => yes(!admin && grants_allow(p, req)),
-            Decider::Webhook => yes(self.webhook_allows(p, req).await?),
+            Decider::Webhook(i) => self.webhook_decides(&self.webhooks[i], p, req).await?,
         })
     }
 
@@ -590,6 +608,62 @@ mod tests {
         Arc::new(|k: &str| (k == "STARHUB_JWT_SIGNING_KEY").then(|| "signing-key".to_string()))
     }
 
+    #[tokio::test]
+    async fn the_chain_runs_in_order_and_webhooks_cover_their_repos() {
+        let idp = FakeIdp::start().await;
+        let text = format!(
+            r#"
+[authorization]
+chain = ["webhook:starhub", "policy", "webhook:opa"]
+
+[[authorization.webhook]]
+name = "starhub"
+url = "{authz}"
+bearer = "opa"
+decides = "allow-deny"
+repos = ["models/*"]
+
+[[authorization.webhook]]
+name = "opa"
+url = "{authz}"
+bearer = "opa"
+"#,
+            authz = idp.url("/authz")
+        );
+        let g = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::parse(&text).expect("config"),
+                signing_key_pem: None,
+            },
+            Arc::new(MemStore::new()),
+            lookup(),
+        )
+        .expect("build");
+        g.set_policy("[[rule]]\nsubjects = [\"*\"]\nrepos = [\"*\"]\nactions = [\"write\"]")
+            .await
+            .expect("policy");
+        let alice = Principal::user("alice", vec![]);
+        let (g, alice) = (&g, &alice);
+        let ok = |repo: &'static str, action| async move {
+            g.check(alice, &Request::repo(repo, action)).await.expect("check")
+        };
+        // starhub settles models/*, and its false denies although the policy allows writing
+        assert!(ok("models/a", Action::Read).await);
+        assert!(!ok("models/a", Action::Write).await);
+        // Elsewhere starhub abstains and the policy decides
+        assert!(ok("internal/x", Action::Write).await);
+        // Nobody allows landing: opa's false only abstains, and all abstaining denies
+        assert!(!ok("internal/x", Action::Land).await);
+        assert!(
+            g.check(&Principal::anonymous(), &Request::repo("public", Action::Read))
+                .await
+                .expect("check"),
+            "opa, last in the chain"
+        );
+        assert!(!g.is_admin(&Principal::user("alice", vec![])).await.expect("admin"));
+    }
+
     async fn guard(idp: &FakeIdp, webhook: bool) -> Arc<Guard> {
         let mut auth = AuthConfig::default();
         auth.token.issuer = "https://scion.test".into();
@@ -632,6 +706,7 @@ mod tests {
                 cache_ttl: Duration::from_secs(30),
                 timeout: Duration::from_secs(2),
                 fail_open: false,
+                ..WebhookConfig::default()
             });
         }
         let g = Guard::build(
@@ -661,7 +736,7 @@ mod tests {
             lookup(),
         )
         .expect("guard");
-        assert!(g.externals.is_empty() && g.introspection.is_none() && g.webhook.is_none() && g.oidc.is_none());
+        assert!(g.externals.is_empty() && g.introspection.is_none() && g.webhooks.is_empty() && g.oidc.is_none());
         assert!(g.required() && g.can_issue() && !g.device_login());
         http_client().expect("an HTTP client where CA certificates exist");
     }
@@ -1002,6 +1077,7 @@ mod tests {
             cache_ttl: Duration::from_secs(1),
             timeout: Duration::from_millis(200),
             fail_open: false,
+            ..WebhookConfig::default()
         });
         let closed = Guard::build(
             GuardConfig {

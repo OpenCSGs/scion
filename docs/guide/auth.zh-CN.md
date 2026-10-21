@@ -174,6 +174,28 @@ allow if input.action == "read"; startswith(input.repo, "public/")
 allow if "eng" in input.groups
 ```
 
+### 多个判定器
+
+鉴权按顺序询问一条判定器链。每个判定器给出允许、拒绝或不表态；第一个给出允许或拒绝的判定器决定结果，全都不表态则拒绝。不写 `[authorization]` 时，链依次是 `policy`、`grants`（令牌自带的 `repos_claim`）、`[authz_webhook]`。用 `[authorization]` 指定顺序，回调需要几个就配几个：
+
+```toml
+[authorization]
+chain = ["webhook:starhub", "policy", "grants", "webhook:opa"]
+
+[[authorization.webhook]]
+name = "starhub"
+url = "http://starhub-server:8080/api/v1/internal/scion/authz"
+bearer_env = "STARHUB_API_TOKEN"
+decides = "allow-deny"            # 它返回 false 就拒绝；allow-only（默认）：false 表示不表态
+repos = ["models/*", "datasets/*"] # 只问这些仓库，其他仓库不表态
+
+[[authorization.webhook]]
+name = "opa"
+url = "http://opa:8181/v1/data/scion/allow"
+```
+
+每个回调都支持和 `[authz_webhook]` 相同的 `bearer`、`bearer_env`、`cache_ttl`、`timeout`、`on_error`。回调不可用时，`on_error = "open"` 让它不表态，转而询问下一个判定器。原来的 `[authz_webhook]` 可以保留，在链里叫 `webhook`。设计见[授权](../design/authorization.zh-CN.md)。
+
 ## 接入 starhub-server
 
 starhub-server 的实际情况：

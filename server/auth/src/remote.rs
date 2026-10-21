@@ -158,6 +158,20 @@ impl AuthzWebhook {
         self.config.fail_open
     }
 
+    pub fn name(&self) -> &str {
+        &self.config.name
+    }
+
+    /// Whether a `false` answer denies rather than passing to the next decider.
+    pub fn denies(&self) -> bool {
+        self.config.denies
+    }
+
+    /// Whether the webhook is asked about `repo` (its `repos` patterns; none means every one).
+    pub fn covers(&self, repo: &str) -> bool {
+        self.config.repos.is_empty() || self.config.repos.iter().any(|p| crate::policy::glob(p, repo))
+    }
+
     fn input(p: &Principal, req: &Request<'_>) -> Value {
         json!({
             "input": {
@@ -287,6 +301,7 @@ mod tests {
                 cache_ttl: Duration::from_secs(30),
                 timeout: Duration::from_secs(2),
                 fail_open,
+                ..WebhookConfig::default()
             },
             reqwest::Client::new(),
             env_lookup(),

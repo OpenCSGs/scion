@@ -266,11 +266,32 @@ pub struct WorkingCopy {
     state: State,
 }
 
+/// How far a clone has got, reported as it goes (see [`WorkingCopy::clone_with_progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// Files found so far while reading the directory trees.
+    Listing { files: usize },
+    /// Files written so far, of `total`, and the bytes downloaded.
+    Checkout { done: usize, total: usize, bytes: u64 },
+}
+
+/// Receives [`Progress`] reports.
+pub type OnProgress<'a> = &'a (dyn Fn(Progress) + Sync);
+
 /// 每次批量读取的对象数（SDK 还会按服务端上限再分批）。
 const FETCH_BATCH: usize = 256;
 
 /// 递归展开目录树，得到稀疏范围内的 `路径 → 文件`。按层批量读取目录树；范围外的子树不读取。
 async fn flatten(client: &Client, root: ObjectId, sparse: &Sparse) -> Result<BTreeMap<String, TreeFile>> {
+    flatten_with(client, root, sparse, &|_| {}).await
+}
+
+async fn flatten_with(
+    client: &Client,
+    root: ObjectId,
+    sparse: &Sparse,
+    progress: OnProgress<'_>,
+) -> Result<BTreeMap<String, TreeFile>> {
     let mut out = BTreeMap::new();
     let mut level = vec![(String::new(), root)];
     while !level.is_empty() {
@@ -295,6 +316,7 @@ async fn flatten(client: &Client, root: ObjectId, sparse: &Sparse) -> Result<BTr
                     }
                 }
             }
+            progress(Progress::Listing { files: out.len() });
         }
         level = next;
     }
@@ -309,6 +331,7 @@ async fn checkout_files(
     client: &Client,
     root: &Path,
     files: &BTreeMap<String, TreeFile>,
+    progress: OnProgress<'_>,
 ) -> Result<Vec<(String, FileRecord)>> {
     use futures::StreamExt;
     fsutil::create_parents(root, files.keys().map(String::as_str))?;
@@ -321,8 +344,18 @@ async fn checkout_files(
         .buffered(FETCHES_IN_FLIGHT);
     let mut writes = tokio::task::JoinSet::new();
     let mut out = Vec::with_capacity(files.len());
+    let mut bytes = 0;
+    let report = |done: usize, bytes: u64| {
+        progress(Progress::Checkout {
+            done,
+            total: files.len(),
+            bytes,
+        })
+    };
     while let Some(batch) = fetches.next().await {
         let (part, data) = batch?;
+        bytes += data.iter().map(|d| d.len() as u64).sum::<u64>();
+        report(out.len(), bytes);
         let root = root.to_path_buf();
         writes.spawn_blocking(move || -> Result<Vec<(String, FileRecord)>> {
             part.into_iter()
@@ -337,11 +370,13 @@ async fn checkout_files(
         while writes.len() >= FETCHES_IN_FLIGHT {
             if let Some(done) = writes.join_next().await {
                 out.extend(done.map_err(|e| Error::Corrupt(format!("checkout task: {e}")))??);
+                report(out.len(), bytes);
             }
         }
     }
     while let Some(done) = writes.join_next().await {
         out.extend(done.map_err(|e| Error::Corrupt(format!("checkout task: {e}")))??);
+        report(out.len(), bytes);
     }
     Ok(out)
 }
@@ -357,6 +392,19 @@ impl WorkingCopy {
         dir: &Path,
         sparse: Sparse,
     ) -> Result<Self> {
+        Self::clone_with_progress(client, endpoint, repo, reference, dir, sparse, &|_| {}).await
+    }
+
+    /// [`WorkingCopy::clone`], reporting [`Progress`] as it goes.
+    pub async fn clone_with_progress(
+        client: &Client,
+        endpoint: &str,
+        repo: &str,
+        reference: &str,
+        dir: &Path,
+        sparse: Sparse,
+        progress: OnProgress<'_>,
+    ) -> Result<Self> {
         if dir.exists() && std::fs::read_dir(dir).map_err(error::io(dir))?.next().is_some() {
             return Err(Error::TargetNotEmpty(dir.to_path_buf()));
         }
@@ -367,8 +415,10 @@ impl WorkingCopy {
         state.sparse = sparse.list().map(<[String]>::to_vec);
         let mut dirstate = DirState::default();
         if let Some(tip) = client.resolve_ref(reference).await? {
-            let files = flatten(client, tip.root_tree, &sparse).await?;
-            dirstate.files.extend(checkout_files(client, dir, &files).await?);
+            let files = flatten_with(client, tip.root_tree, &sparse, progress).await?;
+            dirstate
+                .files
+                .extend(checkout_files(client, dir, &files, progress).await?);
             state.base = Some(tip.changeset.to_string());
         }
         paths.save_dirstate(&mut dirstate)?;

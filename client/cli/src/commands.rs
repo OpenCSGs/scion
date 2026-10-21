@@ -5,10 +5,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use scion_client::{Client, EntryMode};
-use scion_wc::{Sparse, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{Progress, Sparse, Status, SyncOutcome, WorkingCopy};
 use serde::Serialize;
 
 use crate::output::{CliError, DoctorOut, Render, doctor_out};
+use crate::progress::Meter;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:7080";
 const DEFAULT_REF: &str = "main";
@@ -19,6 +20,8 @@ pub struct Ctx {
     pub endpoint: Option<String>,
     pub repo: Option<String>,
     pub cwd: PathBuf,
+    /// Print progress and git-style notes on standard error (not with `--json` or `--quiet`).
+    pub chatty: bool,
 }
 
 impl Ctx {
@@ -188,6 +191,13 @@ pub fn parse_author(s: &str) -> Result<(String, String), CliError> {
     Ok((name.to_owned(), email.to_owned()))
 }
 
+/// A git-style note on standard error, unless `--json` or `--quiet`.
+pub fn note(ctx: &Ctx, msg: &str) {
+    if ctx.chatty {
+        eprintln!("{msg}");
+    }
+}
+
 fn short(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
@@ -207,33 +217,10 @@ pub struct CloneOut {
     pub sparse: Option<Vec<String>>,
 }
 
+/// Like `git clone`, nothing on standard output: progress and notes go to standard error.
 impl Render for CloneOut {
     fn text(&self) -> String {
-        let s = match &self.base {
-            Some(b) => format!(
-                "cloned {} ({} at {}) into {}",
-                self.repo,
-                self.reference,
-                short(b),
-                self.path
-            ),
-            None => format!(
-                "cloned empty repository {} into {} ({} does not exist yet)",
-                self.repo, self.path, self.reference
-            ),
-        };
-        match &self.sparse {
-            Some(dirs) => format!("{s}\nsparse checkout: {}", sparse_list(dirs)),
-            None => s,
-        }
-    }
-}
-
-fn sparse_list(dirs: &[String]) -> String {
-    if dirs.is_empty() {
-        "root files only".to_owned()
-    } else {
-        dirs.join(", ")
+        String::new()
     }
 }
 
@@ -255,8 +242,24 @@ pub async fn clone(
     };
     let endpoint = ctx.endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
     let client = connect(&endpoint, Some(repo)).await?;
-    let target = ctx.cwd.join(dir.unwrap_or_else(|| Path::new(default_dir(repo))));
-    let wc = WorkingCopy::clone(&client, &endpoint, repo, reference, &target, sparse).await?;
+    let dir = dir.unwrap_or_else(|| Path::new(default_dir(repo)));
+    let target = ctx.cwd.join(dir);
+    note(ctx, &format!("Cloning into '{}'...", dir.display()));
+    let meter = Meter::stderr(ctx.chatty);
+    let wc = WorkingCopy::clone_with_progress(&client, &endpoint, repo, reference, &target, sparse, &|p| match p {
+        Progress::Listing { files } => meter.update("Listing files", files as u64, None, None),
+        Progress::Checkout { done, total, bytes } => {
+            meter.update("Receiving objects", done as u64, Some(total as u64), Some(bytes));
+        }
+    })
+    .await?;
+    meter.done();
+    if wc.state().base.is_none() {
+        note(
+            ctx,
+            &format!("warning: You appear to have cloned an empty repository ({reference} does not exist yet)."),
+        );
+    }
     Ok(CloneOut {
         schema: "scion.cli.clone/v1",
         repo: repo.to_owned(),
@@ -1166,17 +1169,7 @@ mod tests {
             base: None,
             sparse: None,
         };
-        assert!(c.text().contains("empty repository"));
-        let c = CloneOut {
-            base: Some("c1abcdefghijklmnop".into()),
-            ..c
-        };
-        assert!(c.text().contains("main at c1abcdefghij"));
-        let c = CloneOut {
-            sparse: Some(vec![]),
-            ..c
-        };
-        assert!(c.text().ends_with("sparse checkout: root files only"));
+        assert_eq!(c.text(), "", "like git clone, nothing on stdout");
         let sp = SparseOut {
             schema: "s",
             dirs: None,

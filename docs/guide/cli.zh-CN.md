@@ -74,6 +74,18 @@ cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
 
 工作副本会记住克隆时的服务端，所以进入目录后 `status`、`commit`、`land`、`sync`、`log` 等命令都不用再写地址。同时给出多个地址时，优先级依次是 URL 中的地址、`--endpoint` / `SCION_ENDPOINT`、工作副本记录的地址、`http://127.0.0.1:7080`。
 
+## 输出
+
+文本输出与 git 一致：同一步骤 git 打印什么，scn 就打印什么；git 不出声的命令，scn 也什么都不打印。进度和 `Cloning into 'mono'...` 这类提示写到标准错误。标准错误是终端时，`clone` 显示 git 风格的进度：
+
+```text
+Cloning into 'mono'...
+Listing files: 18342, done.
+Receiving objects: 100% (18342/18342), 212.40 MiB | 38.12 MiB/s, done.
+```
+
+`-q` / `--quiet` 关掉进度和提示，错误照常输出。`--json` 改为输出一个带 `schema` 字段的 JSON 对象，不显示进度。
+
 ## 检出不会写入的路径
 
 仓库里的路径来自服务端，所以恶意仓库不能借此改动工作副本以外的任何东西。遇到以下路径，`scn` 拒绝写入或删除，并以 `refusing to write <path>` 停止：

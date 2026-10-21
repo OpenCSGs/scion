@@ -19,7 +19,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git tag`, `git tag NAME [REV]`, `git tag -d NAME` | `scn tag`, `scn tag NAME [REV]`, `scn tag -d NAME` | Lightweight tags |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | the same | |
 | `git show [REV] [-- PATH]` | the same | |
-| `git diff`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `-- PATH` |
+| `git diff`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH` |
 | `git blame PATH` | `scn blame PATH` | `scn blame REV:PATH` for a revision |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`, `--prefix`, `-o FILE` |
 | Revisions: `HEAD`, `@`, `HEAD~1`, `main^2`, `A..B`, 40-digit SHAs | the same | Every commit has a git SHA |

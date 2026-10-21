@@ -39,8 +39,8 @@
 | 解决冲突后的 `git add` | `scn resolve PATH`，`--ours` / `--theirs` | 还有冲突标记时拒绝，除非加 `--force`；不带路径时列出冲突 |
 | `git rebase --continue`、`git merge --continue` | `scn commit` | `-m` 可以省略，沿用原来的提交说明 |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | 与 git 格式相同（默认 20 个提交）；也可以用 `--path PATH` |
-| `git show [REV] [-- PATH]` | `scn show [REV] [--name-only] [-- PATH]` | |
-| `git diff`、`git diff A B`、`A..B`、`A...B` | `scn diff`、`scn diff A B`、`A..B`、`A...B` | `--name-only`、`-- PATH` |
+| `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status] [-- PATH]` | |
+| `git diff`、`git diff A B`、`A..B`、`A...B` | `scn diff`、`scn diff A B`、`A..B`、`A...B` | `--name-only`、`--name-status`、`-- PATH` |
 | `git blame [REV] -- PATH` | `scn blame [REV:]PATH` | |
 | `git show REV:PATH` | `scn cat REV:PATH` | 不需要工作副本 |
 | `git ls-tree REV DIR` | `scn ls REV:DIR`，根目录用 `scn ls REV` | 不是版本号的单个参数按目录处理；`:DIR` 强制当作目录 |

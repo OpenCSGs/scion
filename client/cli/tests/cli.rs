@@ -736,7 +736,11 @@ async fn log_and_diff_commands() {
         let out = scn_in(&wc, &["diff"]);
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(text.contains("-two") && text.contains("+three"), "{text}");
-        assert!(text.contains("Binary files a/b.bin and b/b.bin differ"), "{text}");
+        assert!(text.contains("Binary files /dev/null and b/b.bin differ"), "{text}");
+        let out = scn_in(&wc, &["diff", "--name-status"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "M\ta.txt\nA\tb.bin\n");
+        let out = scn_in(&wc, &["show", "--name-status"]);
+        assert!(out.status.success(), "{out:?}");
         let v = json_of(&scn_in(&wc, &["diff", "--name-only", "--json"]));
         assert_eq!(v["files"].as_array().expect("files").len(), 2);
         let v = json_of(&scn_in(&wc, &["diff", "--path", "a.txt", "--json"]));
@@ -762,7 +766,10 @@ async fn log_and_diff_commands() {
         assert!(text.starts_with("commit c1") && text.contains("\nDate:   "), "{text}");
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline"]).stdout).to_string();
         let lines: Vec<&str> = text.lines().collect();
-        assert!(lines.len() == 2 && lines[0].ends_with(" second") && lines[0].len() == 19, "{text}");
+        assert!(
+            lines.len() == 2 && lines[0].ends_with(" second") && lines[0].len() == 19,
+            "{text}"
+        );
 
         // 某个提交引入的改动；两个版本之间的差异
         let v = json_of(&scn_in(&wc, &["diff", "main", "--name-only", "--json"]));

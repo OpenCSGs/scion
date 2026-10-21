@@ -20,6 +20,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use crate::commands::Ctx;
+use crate::history::DiffOut;
 use crate::output::{CliError, Render, error_out, render, version_out};
 
 #[derive(Debug, Parser)]
@@ -253,9 +254,12 @@ enum Command {
     /// Show a commit (default HEAD) and the changes it introduced, like `git show`.
     Show {
         revision: Option<String>,
-        /// Only list file names and status (A / M / D).
+        /// Only the changed files' names.
         #[arg(long)]
         name_only: bool,
+        /// Only the changed files' names and status (A / M / D).
+        #[arg(long, conflicts_with = "name_only")]
+        name_status: bool,
         /// `-- PATH`: only changes under this path.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
@@ -269,9 +273,12 @@ enum Command {
         /// Only this path.Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
-        /// Only file names and status (A / M / D).
+        /// Only the changed files' names.
         #[arg(long)]
         name_only: bool,
+        /// Only the changed files' names and status (A / M / D).
+        #[arg(long, conflicts_with = "name_only")]
+        name_status: bool,
         /// `-- PATH`, as in git.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
@@ -798,10 +805,16 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Show {
             revision,
             name_only,
+            name_status,
             paths,
         } => match one_path(None, paths) {
             Ok(path) => emit(
-                history::show(&ctx, revision.as_deref(), path.as_deref(), name_only).await,
+                history::show(&ctx, revision.as_deref(), path.as_deref(), name_only || name_status)
+                    .await
+                    .map(|mut s| {
+                        s.diff.name_status = name_status;
+                        s
+                    }),
                 json,
             ),
             Err(e) => fail(&e, json),
@@ -811,9 +824,15 @@ async fn run(cli: Cli) -> ExitCode {
             revisions,
             path,
             name_only,
+            name_status,
             paths,
         } => match one_path(path, paths) {
-            Ok(path) => emit(history::diff(&ctx, &revisions, path.as_deref(), name_only).await, json),
+            Ok(path) => emit(
+                history::diff(&ctx, &revisions, path.as_deref(), name_only || name_status)
+                    .await
+                    .map(|d| DiffOut { name_status, ..d }),
+                json,
+            ),
             Err(e) => fail(&e, json),
         },
         Command::Login {

@@ -31,7 +31,8 @@ The import writes only through the public protocol, with the same server-side ch
 
 ```sh
 scn import git ~/src/my-repo --repo mono
-# imported 1287 commits into mono (main at c1a3f09b2c41)
+# Importing commits: 100% (1287/1287), done.
+# imported 1287 commits into mono (main at c1a3f09b2c41; 1287 new, 0 already there)
 ```
 
 Then clone and look around:

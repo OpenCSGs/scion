@@ -243,7 +243,7 @@ enum Command {
         /// At most this many commits.
         #[arg(short = 'n', long = "max-count", default_value_t = 20)]
         max_count: usize,
-        /// Accepted for git compatibility; the output is one line per commit already.
+        /// One line per commit: its short id and subject.
         #[arg(long)]
         oneline: bool,
         /// `-- PATH`, as in git.
@@ -786,11 +786,11 @@ async fn run(cli: Cli) -> ExitCode {
             revision,
             path,
             max_count,
+            oneline,
             paths,
-            ..
         } => match one_path(path, paths) {
             Ok(path) => emit(
-                history::log(&ctx, revision.as_deref(), path.as_deref(), max_count).await,
+                history::log(&ctx, revision.as_deref(), path.as_deref(), max_count, oneline).await,
                 json,
             ),
             Err(e) => fail(&e, json),

@@ -468,7 +468,10 @@ async fn clone_commit_land_sync_workflow() {
         assert!(String::from_utf8_lossy(&out.stdout).contains("old"), "{out:?}");
         let out = scn_in(&wc, &["branch", "-d", "old"]);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(text.starts_with("Deleted branch old (was c1") && text.ends_with(").\n"), "{text}");
+        assert!(
+            text.starts_with("Deleted branch old (was c1") && text.ends_with(").\n"),
+            "{text}"
+        );
         assert!(!String::from_utf8_lossy(&scn_in(&wc, &["branch"]).stdout).contains("old"));
         std::fs::write(wc.join("am.txt"), "am").expect("write");
         json_of(&scn_in(
@@ -756,6 +759,10 @@ async fn log_and_diff_commands() {
         assert_eq!(v["entries"].as_array().expect("entries").len(), 1);
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "-n", "1"]).stdout).to_string();
         assert!(text.contains("second") && !text.contains("first"), "{text}");
+        assert!(text.starts_with("commit c1") && text.contains("\nDate:   "), "{text}");
+        let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline"]).stdout).to_string();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.len() == 2 && lines[0].ends_with(" second") && lines[0].len() == 19, "{text}");
 
         // 某个提交引入的改动；两个版本之间的差异
         let v = json_of(&scn_in(&wc, &["diff", "main", "--name-only", "--json"]));

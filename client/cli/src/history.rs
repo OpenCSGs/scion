@@ -24,6 +24,29 @@ pub fn format_time(time_ms: i64, tz_offset_minutes: i32) -> String {
     )
 }
 
+/// git's default date format: `Wed Nov 15 06:13:20 2023 +0800`, in the author's time zone.
+pub fn git_date(time_ms: i64, tz_offset_minutes: i32) -> String {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let secs = time_ms.div_euclid(1000) + i64::from(tz_offset_minutes) * 60;
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let (y, m, d) = civil_from_days(days);
+    let sign = if tz_offset_minutes < 0 { '-' } else { '+' };
+    let tz = tz_offset_minutes.unsigned_abs();
+    format!(
+        "{} {} {d} {:02}:{:02}:{:02} {y} {sign}{:02}{:02}",
+        DAYS[(days + 4).rem_euclid(7) as usize],
+        MONTHS[m as usize - 1],
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        tz / 60,
+        tz % 60
+    )
+}
+
 /// 1970-01-01 起的天数 → 公历 (年, 月, 日)。算法来自 Howard Hinnant 的 `civil_from_days`。
 fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
@@ -65,27 +88,52 @@ pub struct LogOut {
     pub revision: String,
     pub path: Option<String>,
     pub entries: Vec<LogLine>,
+    /// `--oneline`.
+    #[serde(skip)]
+    pub oneline: bool,
 }
 
+/// A commit as `git log` and `git show` print it: `commit`, `Merge:`, `Author:`, `Date:`, then
+/// the message indented by four spaces.
+fn commit_header(c: &LogLine) -> String {
+    let mut out = format!("commit {}\n", c.id);
+    if c.parents.len() > 1 {
+        let short: Vec<&str> = c.parents.iter().map(|p| &p[..p.len().min(12)]).collect();
+        out.push_str(&format!("Merge: {}\n", short.join(" ")));
+    }
+    out.push_str(&format!(
+        "Author: {} <{}>\nDate:   {}",
+        c.author,
+        c.email,
+        git_date(c.time_ms, c.tz_offset_minutes)
+    ));
+    if !c.message.trim().is_empty() {
+        out.push('\n');
+        for line in c.message.lines() {
+            out.push_str(&format!("\n    {line}"));
+        }
+    }
+    out
+}
+
+/// Like `git log`, or `git log --oneline`.
 impl Render for LogOut {
     fn text(&self) -> String {
-        if self.entries.is_empty() {
-            return "no matching changes".to_owned();
+        if self.oneline {
+            return self
+                .entries
+                .iter()
+                .map(|e| {
+                    format!(
+                        "{} {}",
+                        &e.id[..12.min(e.id.len())],
+                        e.message.lines().next().unwrap_or("")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
         }
-        self.entries
-            .iter()
-            .map(|e| {
-                let subject = e.message.lines().next().unwrap_or("");
-                let merge = if e.parents.len() > 1 { " (merge)" } else { "" };
-                format!(
-                    "{}  {}  {}  {subject}{merge}",
-                    &e.id[..12.min(e.id.len())],
-                    format_time(e.time_ms, e.tz_offset_minutes),
-                    e.author
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.entries.iter().map(commit_header).collect::<Vec<_>>().join("\n\n")
     }
 }
 
@@ -106,7 +154,13 @@ fn log_line(e: LogItem) -> LogLine {
 }
 
 /// 自动翻页直到凑够 `limit` 条或历史结束。
-pub async fn log(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, limit: usize) -> Result<LogOut, CliError> {
+pub async fn log(
+    ctx: &Ctx,
+    revision: Option<&str>,
+    path: Option<&str>,
+    limit: usize,
+    oneline: bool,
+) -> Result<LogOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
     let revision = ctx.expand_rev(&revision.map_or(default_rev, str::to_owned))?;
     let mut entries = Vec::new();
@@ -126,6 +180,7 @@ pub async fn log(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, limit: u
         revision,
         path: path.map(str::to_owned),
         entries,
+        oneline,
     })
 }
 
@@ -438,26 +493,13 @@ pub struct ShowOut {
     pub diff: DiffOut,
 }
 
+/// Like `git show`: the commit as `git log` prints it, then its diff.
 impl Render for ShowOut {
     fn text(&self) -> String {
-        let c = &self.commit;
-        let mut out = format!("commit {}\n", c.id);
-        if c.parents.len() > 1 {
-            let short: Vec<&str> = c.parents.iter().map(|p| &p[..p.len().min(12)]).collect();
-            out.push_str(&format!("Merge: {}\n", short.join(" ")));
-        }
-        out.push_str(&format!(
-            "Author: {} <{}>\nDate:   {}\n\n",
-            c.author,
-            c.email,
-            format_time(c.time_ms, c.tz_offset_minutes)
-        ));
-        for line in c.message.lines() {
-            out.push_str(&format!("    {line}\n"));
-        }
+        let mut out = commit_header(&self.commit);
         let diff = self.diff.text();
         if !diff.is_empty() {
-            out.push('\n');
+            out.push_str("\n\n");
             out.push_str(&diff);
         }
         out
@@ -579,10 +621,18 @@ mod tests {
         .text();
         assert!(
             text.starts_with(
-                "commit c1aaaaaaaaaaaaaaaa\nMerge: c1bbbbbbbbbb c1cccccccccc\nAuthor: Ada <ada@x>\nDate:   1970-01-01 00:00 +0000\n\n    subject\n    \n    body\n"
+                "commit c1aaaaaaaaaaaaaaaa\nMerge: c1bbbbbbbbbb c1cccccccccc\nAuthor: Ada <ada@x>\nDate:   Thu Jan 1 00:00:00 1970 +0000\n\n    subject\n    \n    body"
             ),
             "{text}"
         );
+    }
+
+    #[test]
+    fn git_dates() {
+        assert_eq!(git_date(0, 0), "Thu Jan 1 00:00:00 1970 +0000");
+        assert_eq!(git_date(1_700_000_000_000, 480), "Wed Nov 15 06:13:20 2023 +0800");
+        assert_eq!(git_date(1_700_000_000_000, -330), "Tue Nov 14 16:43:20 2023 -0530");
+        assert_eq!(git_date(-1_000, 0), "Wed Dec 31 23:59:59 1969 +0000");
     }
 
     #[test]
@@ -740,12 +790,27 @@ mod tests {
             revision: "main".into(),
             path: None,
             entries: vec![line(1), line(2)],
+            oneline: false,
         };
         assert_eq!(
             out.text(),
-            "c1aaaaaaaaaa  1970-01-01 00:00 +0000  Ada  subject\nc1aaaaaaaaaa  1970-01-01 00:00 +0000  Ada  subject (merge)"
+            "commit c1aaaaaaaaaaaaaaaa\nAuthor: Ada <a@x>\nDate:   Thu Jan 1 00:00:00 1970 +0000\n\n    subject\n    \n    body\n\n\
+             commit c1aaaaaaaaaaaaaaaa\nMerge: c1p c1p\nAuthor: Ada <a@x>\nDate:   Thu Jan 1 00:00:00 1970 +0000\n\n    \
+             subject\n    \n    body"
         );
+        let one = LogOut {
+            oneline: true,
+            entries: vec![line(1)],
+            ..out
+        };
+        assert_eq!(one.text(), "c1aaaaaaaaaa subject");
+        let out = LogOut { oneline: false, ..one };
         let empty = LogOut { entries: vec![], ..out };
-        assert_eq!(empty.text(), "no matching changes");
+        assert_eq!(empty.text(), "");
+        let bare = LogLine {
+            message: String::new(),
+            ..line(1)
+        };
+        assert!(commit_header(&bare).ends_with("+0000"));
     }
 }

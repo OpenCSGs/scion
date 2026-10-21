@@ -6,8 +6,11 @@
 //! - JWT：`iss` 为本服务时用自己的公钥验证；否则交给配置的外部签发方（JWKS 或 HS256）；
 //! - 其它：配置了 RFC 7662 内省时交给内省接口。
 //!
-//! **鉴权**：允许 = ACL 策略允许，或令牌自带的授权允许，或外部鉴权回调允许。没有配置策略和回调时，
-//! 已认证的身份可以读写和合入所有仓库（系统管理始终需要策略明确授予）。未开启认证时一切允许。
+//! **Authorization** runs a chain of deciders (docs/design/authorization.md): each allows, denies
+//! or abstains, and the first that allows or denies settles the request; if all abstain it is
+//! denied. The chain is the ACL policy, then the token's own grants, then the authorization
+//! callback. With no policy saved and no callback, the built-in default policy decides. Without
+//! required authentication everything is allowed.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -74,8 +77,31 @@ pub struct GuardConfig {
     pub signing_key_pem: Option<String>,
 }
 
+/// What one decider says about a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+    /// No opinion: the next decider is asked.
+    Abstain,
+}
+
+/// The deciders [`Guard::check`] asks, in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decider {
+    /// The saved ACL policy, or the built-in default when none is saved and no callback is set.
+    Policy,
+    /// Grants carried by the token (`repos_claim`).
+    Grants,
+    /// The authorization callback.
+    Webhook,
+}
+
+const DEFAULT_CHAIN: [Decider; 3] = [Decider::Policy, Decider::Grants, Decider::Webhook];
+
 pub struct Guard {
     required: bool,
+    chain: Vec<Decider>,
     meta: Option<Arc<dyn MetaStore>>,
     issuer: Option<Issuer>,
     externals: Vec<ExternalIssuer>,
@@ -131,6 +157,7 @@ impl Guard {
     fn unconfigured() -> Self {
         Self {
             required: false,
+            chain: DEFAULT_CHAIN.to_vec(),
             meta: None,
             issuer: None,
             externals: Vec::new(),
@@ -168,6 +195,7 @@ impl Guard {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Arc::new(Self {
             required: config.required,
+            chain: DEFAULT_CHAIN.to_vec(),
             meta: Some(meta),
             issuer,
             externals,
@@ -442,21 +470,52 @@ impl Guard {
         }
     }
 
+    /// One decider's answer. `admin` asks for system administration (policies, tokens) rather
+    /// than `req` itself.
+    async fn decide(&self, d: Decider, p: &Principal, req: &Request<'_>, admin: bool) -> Result<Decision, AuthError> {
+        let yes = |b: bool| if b { Decision::Allow } else { Decision::Abstain };
+        Ok(match d {
+            Decider::Policy => match self.current_policy()? {
+                Some(pol) => yes(if admin {
+                    pol.is_system_admin(p)
+                } else {
+                    pol.allows(p, req)
+                }),
+                // The built-in default settles the request either way
+                None if self.webhook.is_none() => {
+                    let builtin = Policy::builtin();
+                    let allowed = if admin {
+                        builtin.is_system_admin(p)
+                    } else {
+                        builtin.allows(p, req)
+                    };
+                    if allowed { Decision::Allow } else { Decision::Deny }
+                }
+                None => Decision::Abstain,
+            },
+            Decider::Grants => yes(!admin && grants_allow(p, req)),
+            Decider::Webhook => yes(self.webhook_allows(p, req).await?),
+        })
+    }
+
+    /// Runs the chain: the first decider that allows or denies settles it; all abstaining denies.
+    async fn run_chain(&self, p: &Principal, req: &Request<'_>, admin: bool) -> Result<bool, AuthError> {
+        for d in &self.chain {
+            match self.decide(*d, p, req, admin).await? {
+                Decision::Allow => return Ok(true),
+                Decision::Deny => return Ok(false),
+                Decision::Abstain => {}
+            }
+        }
+        Ok(false)
+    }
+
     /// 是否允许。
     pub async fn check(&self, p: &Principal, req: &Request<'_>) -> Result<bool, AuthError> {
         if !self.required {
             return Ok(true);
         }
-        let policy = self.current_policy()?;
-        match &policy {
-            Some(pol) if pol.allows(p, req) => return Ok(true),
-            None if self.webhook.is_none() => return Ok(Policy::builtin().allows(p, req)),
-            _ => {}
-        }
-        if grants_allow(p, req) {
-            return Ok(true);
-        }
-        self.webhook_allows(p, req).await
+        self.run_chain(p, req, false).await
     }
 
     /// 在仓库里是否有 `action`（不论 ref 和路径的限制），见 [`Policy::allows_any`]。
@@ -515,12 +574,7 @@ impl Guard {
         if !self.required {
             return Ok(true);
         }
-        match self.current_policy()? {
-            Some(pol) if pol.is_system_admin(p) => return Ok(true),
-            None if self.webhook.is_none() => return Ok(Policy::builtin().is_system_admin(p)),
-            _ => {}
-        }
-        self.webhook_allows(p, &Request::repo("*", Action::Admin)).await
+        self.run_chain(p, &Request::repo("*", Action::Admin), true).await
     }
 }
 

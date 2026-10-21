@@ -244,6 +244,19 @@ chain = ["policy", "orgs", "personal", "grants"]
   - 最后一个 owner 不能被移除或降级；还有仓库的组织不能删除。
 - **何时生效。** 通过某台服务端做的修改在这台服务端上立即生效，其他节点在 30 秒内生效。
 
+用户用 `scn` 管理组织；组织参数也可以写成 URL，例如 `http://host:7080/acme`：
+
+```sh
+scn org create acme [--internal]
+scn org member add acme bob --role developer     # 或 maintainer、owner、reporter；再执行一次即可改角色
+scn org member ls acme
+scn org member rm acme bob                      # 成员可以移除自己
+scn org visibility acme internal
+scn org ls [--mine]
+scn org info acme
+scn org rm acme
+```
+
 运维也可以直接操作元数据库，存储参数与 `scion server` 相同：
 
 ```sh

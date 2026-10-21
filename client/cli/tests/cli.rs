@@ -944,17 +944,22 @@ async fn daemon_is_started_on_demand_and_can_be_stopped() {
 
 /// 要求认证的服务端（可选 OIDC 登录）：返回地址与用来创建令牌的 Guard。
 async fn auth_server(oidc_issuer: Option<String>) -> (String, Arc<scion_api::scion_auth::Guard>) {
+    let toml = oidc_issuer
+        .map(|i| format!("[oidc]\nissuer = \"{i}\"\nclient_id = \"scn\"\nsubject_claim = \"preferred_username\"\n"))
+        .unwrap_or_default();
+    auth_server_with(&toml).await
+}
+
+/// A server that requires authentication, with this auth.toml.
+async fn auth_server_with(toml: &str) -> (String, Arc<scion_api::scion_auth::Guard>) {
     use scion_api::scion_auth::{AuthConfig, Guard, GuardConfig};
     let store = Arc::new(MemStore::new());
     scion_store::MetaStore::create_repo(store.as_ref(), "mono")
         .await
         .expect("repo");
-    let toml = oidc_issuer
-        .map(|i| format!("[oidc]\nissuer = \"{i}\"\nclient_id = \"scn\"\nsubject_claim = \"preferred_username\"\n"))
-        .unwrap_or_default();
     let auth = GuardConfig {
         required: true,
-        auth: AuthConfig::parse(&toml).expect("auth"),
+        auth: AuthConfig::parse(toml).expect("auth"),
         signing_key_pem: Some(scion_api::scion_auth::token::generate_signing_key()),
     };
     let guard = Guard::build(auth.clone(), store.clone(), Arc::new(|_: &str| None)).expect("guard");
@@ -1409,4 +1414,104 @@ async fn repository_urls_name_the_server() {
     .await
     .expect("join");
     let _ = tx.send(());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn organizations_from_the_command_line() {
+    let (url, guard) = auth_server_with("[authorization]\nchain = [\"policy\", \"orgs\", \"personal\"]").await;
+    let token = |subject: &'static str| {
+        let guard = guard.clone();
+        async move {
+            guard
+                .create_token("pat", subject, vec![], "", None)
+                .await
+                .expect("pat")
+                .0
+        }
+    };
+    let (alice, bob) = (token("alice").await, token("bob").await);
+    let u = url.clone();
+    tokio::task::spawn_blocking(move || {
+        let scn = |token: &str, args: &[&str]| {
+            Command::new(env!("CARGO_BIN_EXE_scn"))
+                .args(args)
+                .env("SCION_ENDPOINT", &u)
+                .env("SCION_TOKEN", token)
+                .env("SCION_NO_DAEMON", "1")
+                .output()
+                .expect("run scn")
+        };
+        let text = |token: &str, args: &[&str]| {
+            let out = scn(token, args);
+            assert!(out.status.success(), "{args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        assert_eq!(
+            text(&alice, &["org", "create", "acme"]),
+            "created organization acme (private); you are its owner\n"
+        );
+        assert_eq!(
+            text(&bob, &["org", "create", &format!("{u}/open"), "--internal"]),
+            "created organization open (internal); you are its owner\n"
+        );
+        assert_eq!(text(&bob, &["org", "ls"]), "acme  private\nopen  internal\n");
+        assert_eq!(text(&bob, &["org", "ls", "--mine"]), "open  internal\n");
+        assert!(text(&bob, &["org", "info", "acme"]).starts_with("acme (private)\ncreated by alice on "));
+        assert_eq!(
+            text(&alice, &["org", "member", "add", "acme", "bob"]),
+            "bob is developer of acme\n",
+            "developer by default"
+        );
+        assert_eq!(
+            text(&alice, &["org", "member", "add", "acme", "bob", "--role", "maintainer"]),
+            "bob is maintainer of acme\n"
+        );
+        assert_eq!(
+            text(&bob, &["org", "member", "ls", "acme"]),
+            "alice  owner\nbob    maintainer\n"
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&scn(&bob, &["org", "member", "ls", "acme", "--json"]).stdout).expect("json");
+        assert_eq!(v["members"][1]["role"], "maintainer");
+        assert_eq!(
+            scn(&bob, &["org", "member", "add", "acme", "eve"]).status.code(),
+            Some(5),
+            "not an owner"
+        );
+        assert_eq!(
+            text(&alice, &["org", "visibility", "acme", "internal"]),
+            "acme is now internal\n"
+        );
+        assert_eq!(
+            text(&bob, &["org", "member", "rm", "acme", "bob"]),
+            "removed bob from acme\n"
+        );
+        assert_eq!(text(&bob, &["org", "rm", "open"]), "deleted organization open\n");
+        let out = scn(&alice, &["org", "info", "open"]);
+        assert_eq!(out.status.code(), Some(1), "{out:?}");
+        let v: serde_json::Value = serde_json::from_slice(&scn(&alice, &["org", "ls", "--json"]).stdout).expect("json");
+        assert_eq!(v["orgs"][0]["name"], "acme");
+    })
+    .await
+    .expect("join");
+
+    // Without orgs in the chain the command says how to turn them on
+    let (url, guard) = auth_server_with("").await;
+    let t = guard
+        .create_token("pat", "alice", vec![], "", None)
+        .await
+        .expect("pat")
+        .0;
+    let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+        .args(["org", "ls"])
+        .env("SCION_ENDPOINT", &url)
+        .env("SCION_TOKEN", &t)
+        .env("SCION_NO_DAEMON", "1")
+        .output()
+        .expect("run scn");
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("[authorization] chain"),
+        "{out:?}"
+    );
 }

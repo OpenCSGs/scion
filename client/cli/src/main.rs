@@ -9,6 +9,7 @@ mod creds;
 mod daemon;
 mod history;
 mod login;
+mod orgs;
 mod output;
 mod progress;
 mod remote;
@@ -106,6 +107,9 @@ enum Command {
     /// Repositories: create, list, change, delete, restore, fork.
     #[command(subcommand)]
     Repo(RepoCmd),
+    /// Organizations and their members (on servers with organizations enabled).
+    #[command(subcommand)]
+    Org(OrgCmd),
     /// Branches: list, create, delete (of the working copy's repository, or --repo).
     /// git-style forms also work: `scn branch` (list), `scn branch NAME [REV]`, `scn branch -d NAME`.
     #[command(args_conflicts_with_subcommands = true)]
@@ -555,6 +559,83 @@ enum RemoteCmd {
 }
 
 #[derive(Debug, Subcommand)]
+enum OrgCmd {
+    /// Create an organization; you become its owner. It owns the repositories named ORG/….
+    #[command(
+        after_help = "Examples:\n  scn org create acme\n  scn org create http://scion.example.com:7080/acme --internal"
+    )]
+    Create {
+        /// The name, or its URL http(s)://host[:port]/ORG.
+        #[arg(value_name = "ORG | URL")]
+        name: String,
+        /// Every signed-in user can read its repositories (default: only members).
+        #[arg(long)]
+        internal: bool,
+    },
+    /// List organizations.
+    Ls {
+        /// Only those you belong to.
+        #[arg(long)]
+        mine: bool,
+    },
+    /// Show an organization.
+    Info {
+        /// The name, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        name: String,
+    },
+    /// Change who besides the members can read: private or internal.
+    Visibility {
+        /// The name, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        name: String,
+        /// private (only members) or internal (every signed-in user).
+        visibility: String,
+    },
+    /// Delete an organization (it must have no repositories left).
+    Rm {
+        /// The name, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        name: String,
+    },
+    /// Members: add (or change the role of), remove, list.
+    #[command(subcommand)]
+    Member(MemberCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum MemberCmd {
+    /// Add a member, or change a member's role.
+    #[command(
+        after_help = "Examples:\n  scn org member add acme bob --role developer\n  scn org member add acme bob --role owner"
+    )]
+    Add {
+        /// The organization, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        org: String,
+        /// The member's subject (their user name).
+        subject: String,
+        /// owner (admin), maintainer (land), developer (write) or reporter (read).
+        #[arg(long, default_value = "developer")]
+        role: String,
+    },
+    /// Remove a member; you can remove yourself.
+    Rm {
+        /// The organization, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        org: String,
+        /// The member's subject.
+        subject: String,
+    },
+    /// List the members.
+    Ls {
+        /// The organization, or its URL.
+        #[arg(value_name = "ORG | URL")]
+        org: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum RepoCmd {
     /// Create a repository.
     Create {
@@ -931,6 +1012,40 @@ async fn run(cli: Cli) -> ExitCode {
                 };
                 arg!(remote::check_name(name));
                 emit(remote::set_url(&ctx, url).await, json)
+            }
+        },
+        Command::Org(cmd) => match cmd {
+            OrgCmd::Create { name, internal } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(
+                    orgs::create(&ctx, &name, if internal { "internal" } else { "private" }).await,
+                    json,
+                )
+            }
+            OrgCmd::Ls { mine } => emit(orgs::list(&ctx, mine).await, json),
+            OrgCmd::Info { name } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(orgs::info(&ctx, &name).await, json)
+            }
+            OrgCmd::Visibility { name, visibility } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(orgs::set_visibility(&ctx, &name, &visibility).await, json)
+            }
+            OrgCmd::Rm { name } => {
+                let name = arg!(ctx.named_repo_arg(&name));
+                emit(orgs::delete(&ctx, &name).await, json)
+            }
+            OrgCmd::Member(MemberCmd::Add { org, subject, role }) => {
+                let org = arg!(ctx.named_repo_arg(&org));
+                emit(orgs::add_member(&ctx, &org, &subject, &role).await, json)
+            }
+            OrgCmd::Member(MemberCmd::Rm { org, subject }) => {
+                let org = arg!(ctx.named_repo_arg(&org));
+                emit(orgs::remove_member(&ctx, &org, &subject).await, json)
+            }
+            OrgCmd::Member(MemberCmd::Ls { org }) => {
+                let org = arg!(ctx.named_repo_arg(&org));
+                emit(orgs::members(&ctx, &org).await, json)
             }
         },
         Command::Repo(cmd) => match cmd {
@@ -1462,6 +1577,7 @@ Read without a working copy:
 
 Repositories, accounts and setup:
   repo       Create, list, change, delete, restore or fork repositories
+  org        Organizations and their members
   import     Import the history of a git repository
   login      Log in, in a browser or with a token
   logout     Delete the saved credentials

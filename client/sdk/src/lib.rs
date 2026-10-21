@@ -22,6 +22,7 @@ mod history;
 mod identity;
 mod info;
 mod ops;
+mod orgs;
 mod repos;
 mod watch;
 
@@ -36,6 +37,7 @@ pub use info::{Limits, ProtocolVersion, ReadEndpoint, Role, ServerInfo};
 pub use ops::{
     ChangesetBuilder, CreatedChangeset, DirEntry, LAND_ATTEMPTS, Landed, LandedChangeset, Person, RefTip, Signature,
 };
+pub use orgs::{MemberInfo, OrgInfo};
 pub use repos::{NewRepo, RefEventInfo, RefEventPage, RepoInfo, RepoPage};
 pub use scion_object::{EntryMode, ObjectId, ObjectKind};
 /// gRPC 状态码，出现在 [`Error::Rpc`] 中。

@@ -244,6 +244,19 @@ chain = ["policy", "orgs", "personal", "grants"]
   - The last owner cannot be removed or demoted, and an organization with repositories cannot be deleted.
 - **When changes apply.** Changes made through a server apply on it at once; other nodes see them within 30 seconds.
 
+Users manage organizations with `scn`; an organization or member argument can also be a URL, `http://host:7080/acme`:
+
+```sh
+scn org create acme [--internal]
+scn org member add acme bob --role developer     # or maintainer, owner, reporter; again to change the role
+scn org member ls acme
+scn org member rm acme bob                      # members can remove themselves
+scn org visibility acme internal
+scn org ls [--mine]
+scn org info acme
+scn org rm acme
+```
+
 Operators can manage organizations directly in the metadata database, with the same storage options as `scion server`:
 
 ```sh

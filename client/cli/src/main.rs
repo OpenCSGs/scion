@@ -78,6 +78,12 @@ enum Command {
             default_value = "main"
         )]
         reference: String,
+        /// Accepted for git compatibility: a clone never downloads history, only the snapshot.
+        #[arg(long, value_name = "N", hide_short_help = true)]
+        depth: Option<u32>,
+        /// Accepted for git compatibility: a clone checks out one branch.
+        #[arg(long, hide_short_help = true)]
+        single_branch: bool,
         /// Sparse checkout: only these directories (comma-separated) and the files at the root.
         /// Can be repeated: `--sparse src --sparse docs`.
         #[arg(long, value_name = "DIRS", value_delimiter = ',', num_args = 1)]
@@ -179,6 +185,9 @@ enum Command {
         /// `user.name` / `user.email`.
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
+        /// Paths are not taken: scn commits every local change.
+        #[arg(hide = true)]
+        stray: Vec<String>,
     },
     /// Move the working copy to another branch (-c creates it at the current snapshot).
     Switch {
@@ -274,7 +283,13 @@ enum Command {
         paths: Vec<String>,
     },
     #[command(hide = true)]
-    Mv { from: PathBuf, to: PathBuf },
+    Mv {
+        from: PathBuf,
+        to: PathBuf,
+        /// Accepted: the move replaces an existing file anyway.
+        #[arg(short, long)]
+        force: bool,
+    },
     /// git commands scn does without: they say what to do instead.
     #[command(hide = true)]
     Init {
@@ -400,6 +415,9 @@ enum Command {
         /// One line per commit: its short id and subject.
         #[arg(long)]
         oneline: bool,
+        /// git's `--pretty=oneline` / `--format=oneline`; other formats are not supported.
+        #[arg(long, alias = "format", value_name = "FORMAT", value_parser = ["oneline", "medium"])]
+        pretty: Option<String>,
         /// `-- PATH`, as in git.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
@@ -852,6 +870,7 @@ async fn run(cli: Cli) -> ExitCode {
             dir,
             reference,
             sparse,
+            ..
         } => {
             let repo = arg!(ctx.named_repo_arg(&repo));
             emit(
@@ -982,6 +1001,14 @@ async fn run(cli: Cli) -> ExitCode {
                 cwd: if porcelain { String::new() } else { s.cwd.clone() },
                 ..s
             }),
+            json,
+        ),
+        Command::Commit { ref stray, .. } if !stray.is_empty() => fail(
+            &CliError::Usage(format!(
+                "unexpected argument {:?}: the message goes after -m (`scn commit -m \"...\"`), \
+                 and scn always commits every local change",
+                stray[0]
+            )),
             json,
         ),
         Command::Commit {
@@ -1140,7 +1167,7 @@ async fn run(cli: Cli) -> ExitCode {
                 None => ExitCode::SUCCESS,
             }
         }
-        Command::Mv { from, to } => {
+        Command::Mv { from, to, .. } => {
             transitional("mv", "commit (after moving the files yourself)");
             let (from, to) = (ctx.cwd.join(from), ctx.cwd.join(to));
             let to = if to.is_dir() {
@@ -1232,10 +1259,18 @@ async fn run(cli: Cli) -> ExitCode {
             path,
             max_count,
             oneline,
+            pretty,
             paths,
         } => match one_path(path, paths) {
             Ok(path) => emit(
-                history::log(&ctx, revision.as_deref(), path.as_deref(), max_count, oneline).await,
+                history::log(
+                    &ctx,
+                    revision.as_deref(),
+                    path.as_deref(),
+                    max_count,
+                    oneline || pretty.as_deref() == Some("oneline"),
+                )
+                .await,
                 json,
             ),
             Err(e) => fail(&e, json),
@@ -1457,9 +1492,17 @@ mod tests {
             &["scn", "diff", "--cached"][..],
             &["scn", "diff", "--staged"],
             &["scn", "merge", "--no-ff", "x"],
+            &["scn", "clone", "r", "--depth", "1", "--single-branch"],
+            &["scn", "mv", "-f", "a", "b"],
+            &["scn", "log", "--pretty=oneline"],
+            &["scn", "log", "--format", "medium"],
         ] {
             assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }
+        assert!(
+            Cli::try_parse_from(["scn", "log", "--pretty=%H"]).is_err(),
+            "only oneline / medium"
+        );
     }
 
     #[test]

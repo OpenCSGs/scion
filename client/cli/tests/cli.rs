@@ -798,6 +798,14 @@ async fn log_and_diff_commands() {
         assert!(text.starts_with("commit c1") && text.contains("\nDate:   "), "{text}");
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline", "-1"]).stdout).to_string();
         assert_eq!(text.lines().count(), 1, "git's -N: {text}");
+        let pretty = String::from_utf8_lossy(&scn_in(&wc, &["log", "--pretty=oneline", "-1"]).stdout).to_string();
+        assert_eq!(pretty, text);
+        let out = scn_in(&wc, &["commit", "a message"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("goes after -m"),
+            "{out:?}"
+        );
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline"]).stdout).to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert!(

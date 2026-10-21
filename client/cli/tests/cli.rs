@@ -154,11 +154,16 @@ async fn clone_commit_land_sync_workflow() {
         std::fs::write(wc.join("src/lib.rs"), "pub fn f() {}\n").expect("write");
         let v = json_of(&scn_in(&wc, &["status", "--json"]));
         assert_eq!(v["added"], serde_json::json!(["src/lib.rs"]));
-        let text = scn_in(&wc.join("src"), &["status"]);
+        let text = scn_in(&wc.join("src"), &["status", "-s"]);
         assert_eq!(
             String::from_utf8_lossy(&text.stdout).trim(),
-            "A src/lib.rs",
-            "works from a subdirectory"
+            "A  lib.rs",
+            "works from a subdirectory, with paths relative to it"
+        );
+        let text = String::from_utf8_lossy(&scn_in(&wc, &["status"]).stdout).into_owned();
+        assert!(
+            text.starts_with("On branch main\n") && text.contains("\tnew file:   src/lib.rs"),
+            "{text}"
         );
         let v = json_of(&scn_in(
             &wc,
@@ -374,9 +379,9 @@ async fn clone_commit_land_sync_workflow() {
             String::from_utf8_lossy(&out.stderr).contains("conflict in src/lib.rs"),
             "{out:?}"
         );
-        let out = scn_in(&wc, &["status"]);
+        let out = scn_in(&wc, &["status", "--short"]);
         assert!(
-            String::from_utf8_lossy(&out.stdout).starts_with("C src/lib.rs"),
+            String::from_utf8_lossy(&out.stdout).starts_with("UU src/lib.rs"),
             "{out:?}"
         );
         // Abort, merge again, take theirs, commit without -m (the merge's message), land

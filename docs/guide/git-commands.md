@@ -9,7 +9,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | git | scn | Notes |
 |---|---|---|
 | `git clone URL [DIR]` | `scn clone URL [DIR]` | `URL` is `http(s)://host[:port]/REPO`; `--ref B` instead of `-b B`. Inside the clone, no command needs the address again |
-| `git status` | `scn status` | `A` / `M` / `D`, and `C` for conflicts |
+| `git status` | `scn status` | git's long format; `-s` gives `A ` / `M ` / `D ` (every change is staged) and `UU` for conflicts |
 | `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | Takes every local change (`-a` is accepted and changes nothing) |
 | `git commit --amend` | `scn commit --amend` | |
 | `git restore PATH` | `scn restore PATH` | |

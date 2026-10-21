@@ -106,14 +106,15 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz
 
-  # The server image for linux/amd64 and linux/arm64, tagged with the version and latest. Secrets
-  # REGISTRY_USERNAME and REGISTRY_PASSWORD (release environment) log in to the registry
+  # The server image for linux/amd64 and linux/arm64, tagged with the version and latest, on Docker
+  # Hub and the Aliyun registry (for users in China). Secrets in the release environment:
+  # DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, REGISTRY_USERNAME and REGISTRY_PASSWORD (Aliyun)
   image:
     needs: check
     environment: release
     runs-on: ubuntu-latest
     env:
-      IMAGE: opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion
+      IMAGES: opencsghq/scion opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion
     steps:
       - uses: actions/checkout@v5
         with:
@@ -122,21 +123,33 @@ jobs:
       - name: Tags
         id: tags
         run: |
-          tags="$IMAGE:${TAG#v}"
           # latest moves only forward: rerunning an older tag leaves it alone
           newest=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ "$newest" = "$TAG" ]; then tags="$tags,$IMAGE:latest"; fi
+          tags=
+          for image in $IMAGES; do
+            tags="$tags,$image:${TAG#v}"
+            if [ "$newest" = "$TAG" ]; then tags="$tags,$image:latest"; fi
+          done
+          tags=${tags#,}
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
           echo "$tags"
       - name: Check the registry secrets
         env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
         run: |
-          if [ -z "$REGISTRY_USERNAME" ] || [ -z "$REGISTRY_PASSWORD" ]; then
-            echo "::error::REGISTRY_USERNAME and REGISTRY_PASSWORD are not set; the image cannot be pushed"
-            exit 1
-          fi
+          for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN REGISTRY_USERNAME REGISTRY_PASSWORD; do
+            if [ -z "$(printenv "$name")" ]; then
+              echo "::error::$name is not set; the image cannot be pushed"
+              exit 1
+            fi
+          done
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - uses: docker/login-action@v3
         with:
           registry: opencsg-registry.cn-beijing.cr.aliyuncs.com

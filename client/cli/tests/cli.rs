@@ -154,6 +154,12 @@ async fn clone_commit_land_sync_workflow() {
         std::fs::write(wc.join("src/lib.rs"), "pub fn f() {}\n").expect("write");
         let v = json_of(&scn_in(&wc, &["status", "--json"]));
         assert_eq!(v["added"], serde_json::json!(["src/lib.rs"]));
+        let out = scn_in(&wc, &["status", "-sb"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "## main\nA  src/lib.rs\n");
+        let out = scn_in(&wc, &["status", "--porcelain"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "A  src/lib.rs\n");
+        let out = scn_in(&wc.join("src"), &["status", "--porcelain"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "A  src/lib.rs\n", "root-relative");
         let text = scn_in(&wc.join("src"), &["status", "-s"]);
         assert_eq!(
             String::from_utf8_lossy(&text.stdout).trim(),

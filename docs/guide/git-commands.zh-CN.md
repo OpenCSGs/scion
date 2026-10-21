@@ -9,7 +9,7 @@
 | git | scn | 说明 |
 |---|---|---|
 | `git clone URL [DIR] [-b B]` | 相同 | `URL` 为 `http(s)://host[:port]/REPO`；`-b`、`--branch`、`--ref` 都可以指定分支。进入克隆目录后，所有命令都不用再写地址 |
-| `git status` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU` |
+| `git status [-s] [-b] [--porcelain]` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU` |
 | `git config user.name NAME`、`git config --list`、`--unset` | 相同 | 只有 `user.name` 和 `user.email`；设置按用户保存（接受 `--global`） |
 | `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用）；多个 `-m` 成为多段说明 |
 | `git commit --amend` | `scn commit --amend` | |

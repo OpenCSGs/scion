@@ -152,6 +152,12 @@ enum Command {
         /// git's short format: `XY PATH` per change (every change is staged in scn).
         #[arg(short, long)]
         short: bool,
+        /// With the short format, start with `## BRANCH`.
+        #[arg(short, long)]
+        branch: bool,
+        /// The short format, for scripts (as git's `--porcelain`).
+        #[arg(long)]
+        porcelain: bool,
     },
     /// Commit the local changes (not landed yet; see `scn land`).
     #[command(after_help = "Examples:\n  scn commit -m \"Fix the parser\"\n  \
@@ -894,7 +900,19 @@ async fn run(cli: Cli) -> ExitCode {
             (None, Some(name)) => emit(repos::delete_tag(&ctx, &name).await, json),
             (None, None) => emit(repos::tags(&ctx).await, json),
         },
-        Command::Status { short } => emit(commands::status(&ctx, short), json),
+        Command::Status {
+            short,
+            branch,
+            porcelain,
+        } => emit(
+            // --porcelain paths are relative to the root, as in git
+            commands::status(&ctx, short || porcelain).map(|s| commands::StatusOut {
+                branch,
+                cwd: if porcelain { String::new() } else { s.cwd.clone() },
+                ..s
+            }),
+            json,
+        ),
         Command::Commit {
             message,
             amend: true,

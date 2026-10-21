@@ -345,6 +345,9 @@ pub struct StatusOut {
     /// `scn status -s`.
     #[serde(skip)]
     pub short: bool,
+    /// `-b`: the short format starts with `## BRANCH`.
+    #[serde(skip)]
+    pub branch: bool,
     /// The current directory inside the working copy (`/`-separated, empty at the root): text
     /// output shows paths relative to it, like git.
     #[serde(skip)]
@@ -403,7 +406,11 @@ impl Render for StatusOut {
         })
         .collect();
         if self.short {
-            let mut lines: Vec<String> = unmerged.iter().map(|(p, _, code)| format!("{code} {p}")).collect();
+            let mut lines: Vec<String> = Vec::new();
+            if self.branch {
+                lines.push(format!("## {}", self.reference));
+            }
+            lines.extend(unmerged.iter().map(|(p, _, code)| format!("{code} {p}")));
             lines.extend(changes.iter().map(|(_, code, p)| format!("{code} {p}")));
             return lines.join("\n");
         }
@@ -478,6 +485,7 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
             .unwrap_or_default(),
         merging: conflict.map(|c| c.merge.is_some()),
         short: false,
+        branch: false,
         cwd: String::new(),
     }
 }
@@ -1448,6 +1456,7 @@ mod tests {
             kinds: Default::default(),
             merging: None,
             short: false,
+            branch: false,
             cwd: String::new(),
         };
         assert_eq!(

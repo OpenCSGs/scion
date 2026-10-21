@@ -26,7 +26,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | `-a` is accepted and changes nothing. The author comes from `--author`, then `scn config`, then git's `user.name` / `user.email` |
 | `git commit --amend` | `scn commit --amend` | Only the pending commit |
 | `git reset --soft HEAD~1` | `scn uncommit` | Drops the pending commit and keeps its changes |
-| `git restore PATH`, `git checkout -- PATH` | `scn restore PATH` | `.` for everything; added files are kept (no `git clean`) |
+| `git restore [-s REV] PATH`, `git checkout [REV] -- PATH` | `scn restore [-s REV] PATH` | `.` for everything; added files are kept (no `git clean`); `--source REV` takes the files from REV as local changes |
 | `git remote -v`, `git remote set-url origin URL` | `scn remote -v`, `scn remote set-url URL` | The server's new address, or another repository with the same commits (a fork); checked before it is saved |
 | `git push` | `scn land` | The server rebases when the branch moved |
 | `git pull --rebase` | `scn sync` | Moves to the branch tip and rebases the pending commit; no separate `fetch` |

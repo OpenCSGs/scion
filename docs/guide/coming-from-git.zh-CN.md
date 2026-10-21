@@ -26,7 +26,7 @@
 | `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 接受 `-a`，但没有作用。作者依次取 `--author`、`scn config`、git 的 `user.name` / `user.email` |
 | `git commit --amend` | `scn commit --amend` | 只能修改待合入的提交 |
 | `git reset --soft HEAD~1` | `scn uncommit` | 撤掉待合入的提交，保留它的改动 |
-| `git restore PATH`、`git checkout -- PATH` | `scn restore PATH` | `.` 表示全部；新增的文件会保留（没有 `git clean`） |
+| `git restore [-s REV] PATH`、`git checkout [REV] -- PATH` | `scn restore [-s REV] PATH` | `.` 表示全部；新增的文件会保留（没有 `git clean`）；`--source REV` 从 REV 取文件，成为本地改动 |
 | `git remote -v`、`git remote set-url origin URL` | `scn remote -v`、`scn remote set-url URL` | 服务端的新地址，或有相同提交的另一个仓库（如 fork）；保存前会先检查 |
 | `git push` | `scn land` | 分支已经前进时由服务端 rebase |
 | `git pull --rebase` | `scn sync` | 移到分支最新提交，并 rebase 待合入的提交；没有单独的 `fetch` |

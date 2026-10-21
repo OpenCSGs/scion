@@ -719,10 +719,17 @@ impl Render for RestoreOut {
 }
 
 /// Paths are relative to the current directory, like other commands that take local paths.
-pub async fn restore(ctx: &Ctx, paths: &[String]) -> Result<RestoreOut, CliError> {
+/// With `source`, from that revision instead of the working copy's commit (`--source`).
+pub async fn restore(ctx: &Ctx, paths: &[String], source: Option<&str>) -> Result<RestoreOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
     let rel = wc_relative(wc.root(), &ctx.cwd, paths)?;
-    let r = wc.restore(&client, &rel).await?;
+    let r = match source {
+        Some(rev) => {
+            let root = client.root_tree(&ctx.expand_rev(rev)?).await?;
+            wc.restore_from(&client, root, &rel).await?
+        }
+        None => wc.restore(&client, &rel).await?,
+    };
     Ok(RestoreOut {
         schema: "scion.cli.restore/v1",
         restored: r.restored,

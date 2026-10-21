@@ -13,7 +13,7 @@
 | `git config user.name NAME`、`git config --list`、`--unset` | 相同 | 只有 `user.name` 和 `user.email`；设置按用户保存（接受 `--global`） |
 | `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用）；多个 `-m` 成为多段说明 |
 | `git commit --amend` | `scn commit --amend` | |
-| `git restore PATH` | `scn restore PATH` | |
+| `git restore [-s REV] PATH`、`git checkout REV -- PATH` | `scn restore [-s REV] PATH` | `--source` 从 REV 取文件，成为本地改动 |
 | `git switch B`、`git switch -c B` | `scn switch B`、`scn switch -c B` | |
 | `git merge B`、`git merge --abort` | `scn merge B`、`scn merge --abort` | 之后用 `scn land` 发布 |
 | `git branch [-v] [-a]`、`git branch NAME [REV]`、`git branch -d NAME`、`--show-current` | 相同 | 分支都在服务端，所以 `-a` 列出的是同一批 |

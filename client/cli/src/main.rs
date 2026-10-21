@@ -334,6 +334,10 @@ enum Command {
         /// Files or directories, relative to the current directory.
         #[arg(required = true, value_name = "PATH")]
         paths: Vec<String>,
+        /// Take the files from this revision instead (they become local changes; files it lacks are
+        /// deleted), as git's `restore --source`.
+        #[arg(short, long, value_name = "REV")]
+        source: Option<String>,
     },
     /// User settings: the default commit author (`user.name`, `user.email`).
     /// git-style forms also work: `scn config KEY [VALUE]`, `--list`, `--unset KEY`.
@@ -1058,11 +1062,14 @@ async fn run(cli: Cli) -> ExitCode {
             emit(commands::sync(&ctx).await, json)
         }
         Command::Checkout { create, target, paths } => match (create, target, paths.is_empty()) {
-            (false, target, false) => {
-                let mut all = paths;
-                all.extend(target);
+            // git checkout REV -- PATH: the files from REV
+            (false, Some(rev), false) => {
+                transitional("checkout REV -- PATH", "restore --source REV PATH");
+                emit(commands::restore(&ctx, &paths, Some(&rev)).await, json)
+            }
+            (false, None, false) => {
                 transitional("checkout -- PATH", "restore PATH");
-                emit(commands::restore(&ctx, &all).await, json)
+                emit(commands::restore(&ctx, &paths, None).await, json)
             }
             (true, Some(name), true) => {
                 transitional("checkout -b NAME", "switch -c NAME");
@@ -1071,7 +1078,7 @@ async fn run(cli: Cli) -> ExitCode {
             // A path in the current directory restores it, anything else is a branch
             (false, Some(t), true) if ctx.cwd.join(&t).exists() => {
                 transitional("checkout PATH", "restore PATH");
-                emit(commands::restore(&ctx, &[t]).await, json)
+                emit(commands::restore(&ctx, &[t], None).await, json)
             }
             (false, Some(name), true) => {
                 transitional("checkout BRANCH", "switch BRANCH");
@@ -1097,7 +1104,7 @@ async fn run(cli: Cli) -> ExitCode {
                 emit(commands::uncommit(&ctx).await, json)
             } else if hard && head {
                 transitional("reset --hard", "restore .");
-                emit(commands::restore(&ctx, &[".".to_owned()]).await, json)
+                emit(commands::restore(&ctx, &[".".to_owned()], None).await, json)
             } else {
                 fail(
                     &CliError::Usage(
@@ -1211,7 +1218,7 @@ async fn run(cli: Cli) -> ExitCode {
             };
             emit(commands::resolve(&ctx, &paths, side, force).await, json)
         }
-        Command::Restore { paths } => emit(commands::restore(&ctx, &paths).await, json),
+        Command::Restore { paths, source } => emit(commands::restore(&ctx, &paths, source.as_deref()).await, json),
         Command::Config {
             cmd, key, value, unset, ..
         } => {
@@ -1599,7 +1606,7 @@ mod tests {
         ));
         assert!(Cli::try_parse_from(["scn", "restore"]).is_err(), "paths required");
         let cli = Cli::try_parse_from(["scn", "restore", "src", "a.txt"]).expect("parse");
-        assert!(matches!(cli.command, Command::Restore { ref paths } if paths.len() == 2));
+        assert!(matches!(cli.command, Command::Restore { ref paths, source: None } if paths.len() == 2));
         assert!(matches!(
             Cli::try_parse_from(["scn", "uncommit"]).expect("parse").command,
             Command::Uncommit

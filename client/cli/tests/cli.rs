@@ -837,6 +837,22 @@ async fn log_and_diff_commands() {
         assert_ne!(commits[1], first_id);
         let text = String::from_utf8_lossy(&scn_in(&wc, &["blame", "main:a.txt"]).stdout).to_string();
         assert!(text.contains(" 2) three"), "{text}");
+        // restore --source: an older version as a local change
+        let out = scn_in(&wc, &["restore", "--source", "HEAD~1", "a.txt"]);
+        assert!(out.status.success(), "{out:?}");
+        assert_eq!(std::fs::read_to_string(wc.join("a.txt")).expect("a"), "one\ntwo\n");
+        assert_eq!(
+            String::from_utf8_lossy(&scn_in(&wc, &["status", "-s"]).stdout),
+            "M  a.txt\n"
+        );
+        json_of(&scn_in(&wc, &["restore", "a.txt", "--json"]));
+        let out = scn_in(&wc, &["checkout", "HEAD~1", "--", "a.txt"]);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("restore --source REV PATH"),
+            "{out:?}"
+        );
+        assert_eq!(std::fs::read_to_string(wc.join("a.txt")).expect("a"), "one\ntwo\n");
+        json_of(&scn_in(&wc, &["restore", ".", "--json"]));
         let out = scn_in(&wc, &["diff", "a", "b", "c"]);
         assert_eq!(out.status.code(), Some(2));
     })

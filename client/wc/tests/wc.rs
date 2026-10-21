@@ -462,6 +462,43 @@ async fn clone_reports_progress() {
 }
 
 #[tokio::test]
+async fn restore_from_an_older_commit() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let dir = tmp.path().join("wc");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&dir, "a.txt", "1");
+    write(&dir, "d/b.txt", "b");
+    let v1 = wc.commit(&c, "v1", None).await.expect("commit").expect("created");
+    wc.land(&c).await.expect("land");
+    write(&dir, "a.txt", "2");
+    std::fs::remove_file(dir.join("d/b.txt")).expect("rm");
+    write(&dir, "c.txt", "c");
+    wc.commit(&c, "v2", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    write(&dir, "new.txt", "untracked");
+
+    let root = c.root_tree(&v1.id.to_string()).await.expect("root");
+    let r = wc.restore_from(&c, root, &["d".into()]).await.expect("restore d");
+    assert_eq!(r.restored, ["d/b.txt"]);
+    assert_eq!(std::fs::read_to_string(dir.join("d/b.txt")).expect("b"), "b");
+    let r = wc.restore_from(&c, root, &[".".into()]).await.expect("restore all");
+    assert_eq!(r.restored, ["a.txt", "c.txt"], "d/b.txt is already v1's");
+    assert_eq!(r.kept_added, ["d/b.txt", "new.txt"]);
+    assert_eq!(std::fs::read_to_string(dir.join("a.txt")).expect("a"), "1");
+    assert!(!dir.join("c.txt").exists());
+    assert!(dir.join("new.txt").exists(), "added files are kept");
+    assert_eq!(
+        wc.status().expect("status"),
+        status(&["d/b.txt", "new.txt"], &["a.txt"], &["c.txt"]),
+        "local changes on top of v2"
+    );
+}
+
+#[tokio::test]
 async fn clone_into_non_empty_dir_rejected() {
     let srv = server().await;
     let c = client(&srv.url).await;

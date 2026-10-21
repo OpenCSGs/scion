@@ -807,6 +807,53 @@ impl WorkingCopy {
         self.restore_locked(client, paths).await
     }
 
+    /// `restore --source REV`: makes the files under `paths` what they are in the commit whose
+    /// root tree is `root`, as local changes (the working copy stays on its commit); tracked files
+    /// under them that `root` lacks are deleted. Added files are left alone, as in
+    /// [`WorkingCopy::restore`].
+    pub async fn restore_from(&mut self, client: &Client, root: ObjectId, paths: &[String]) -> Result<Restored> {
+        let _lock = self.paths.lock()?;
+        let wanted: Vec<&str> = paths.iter().map(|p| p.trim_end_matches('/')).collect();
+        let matches = |p: &str| {
+            wanted.iter().any(|w| {
+                w.is_empty() || *w == "." || p == *w || (p.starts_with(*w) && p.as_bytes().get(w.len()) == Some(&b'/'))
+            })
+        };
+        let (status, _) = self.changes()?;
+        let changed = |p: &String| status.modified.contains(p) || status.deleted.contains(p);
+        let dirstate = self.paths.load_dirstate()?;
+        let target = flatten(client, root, &self.sparse()?).await?;
+        let mut delta = BTreeMap::new();
+        for (path, f) in target.iter().filter(|(p, _)| matches(p)) {
+            let same = dirstate
+                .files
+                .get(path)
+                .is_some_and(|r| r.mode == f.mode && r.id == f.id.to_string());
+            // A changed or untracked file may already hold that version
+            let on_disk =
+                || fsutil::read_content(self.root(), path, f.mode).is_ok_and(|b| ObjectId::of_blob(&b) == f.id);
+            let up_to_date = if dirstate.files.contains_key(path) && !changed(path) {
+                same
+            } else {
+                on_disk()
+            };
+            if !up_to_date {
+                delta.insert(path.clone(), Some(*f));
+            }
+        }
+        for path in dirstate.files.keys().filter(|p| matches(p) && !target.contains_key(*p)) {
+            if !status.deleted.contains(path) {
+                delta.insert(path.clone(), None);
+            }
+        }
+        // Written through a copy of the dirstate that is not saved, so they show as local changes
+        self.apply(client, &mut dirstate.clone(), &delta).await?;
+        Ok(Restored {
+            restored: delta.into_keys().collect(),
+            kept_added: status.added.into_iter().filter(|p| matches(p)).collect(),
+        })
+    }
+
     async fn restore_locked(&mut self, client: &Client, paths: &[String]) -> Result<Restored> {
         let wanted: Vec<&str> = paths.iter().map(|p| p.trim_end_matches('/')).collect();
         let matches = |p: &str| {

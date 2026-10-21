@@ -13,7 +13,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git config user.name NAME`, `git config --list`, `--unset` | the same | Only `user.name` and `user.email`; settings are per user (`--global` is accepted) |
 | `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | Takes every local change (`-a` is accepted and changes nothing); several `-m` become paragraphs |
 | `git commit --amend` | `scn commit --amend` | |
-| `git restore PATH` | `scn restore PATH` | |
+| `git restore [-s REV] PATH`, `git checkout REV -- PATH` | `scn restore [-s REV] PATH` | `--source` takes the files from REV as local changes |
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | |
 | `git merge B`, `git merge --abort` | `scn merge B`, `scn merge --abort` | Then `scn land` to publish |
 | `git branch [-v] [-a]`, `git branch NAME [REV]`, `git branch -d NAME`, `--show-current` | the same | Branches live on the server, so `-a` lists the same ones |

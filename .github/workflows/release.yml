@@ -1,7 +1,8 @@
 name: release
 
 # Pushing a tag vX.Y.Z builds the server (`scion`) and the client (`scn`) for Linux and macOS and
-# publishes them as a GitHub release. The tag must match the workspace version in Cargo.toml.
+# publishes them as a GitHub release, and pushes the server image (the version and latest). The tag
+# must match the workspace version in Cargo.toml.
 #
 #   git tag v0.1.0 && git push origin v0.1.0
 #
@@ -104,6 +105,52 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: dist/*.tar.gz
+
+  # The server image for linux/amd64 and linux/arm64, tagged with the version and latest. Secrets
+  # REGISTRY_USERNAME and REGISTRY_PASSWORD (release environment) log in to the registry
+  image:
+    needs: check
+    environment: release
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - name: Tags
+        id: tags
+        run: |
+          tags="$IMAGE:${TAG#v}"
+          # latest moves only forward: rerunning an older tag leaves it alone
+          newest=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ "$newest" = "$TAG" ]; then tags="$tags,$IMAGE:latest"; fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+          echo "$tags"
+      - name: Check the registry secrets
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          if [ -z "$REGISTRY_USERNAME" ] || [ -z "$REGISTRY_PASSWORD" ]; then
+            echo "::error::REGISTRY_USERNAME and REGISTRY_PASSWORD are not set; the image cannot be pushed"
+            exit 1
+          fi
+      - uses: docker/login-action@v3
+        with:
+          registry: opencsg-registry.cn-beijing.cr.aliyuncs.com
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha,scope=release-image
+          cache-to: type=gha,scope=release-image,mode=max
 
   release:
     needs: build

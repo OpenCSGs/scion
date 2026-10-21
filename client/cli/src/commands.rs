@@ -550,9 +550,10 @@ pub struct AbortOut {
     pub schema: &'static str,
 }
 
+/// Silent, like `git merge --abort`.
 impl Render for AbortOut {
     fn text(&self) -> String {
-        "merge aborted; the working copy is back where it was".to_owned()
+        String::new()
     }
 }
 
@@ -809,17 +810,17 @@ pub struct MergeOut {
     pub removed: usize,
 }
 
+/// Like `git merge`; the merge commit is pending until `scn land`.
 impl Render for MergeOut {
     fn text(&self) -> String {
-        match &self.changeset {
-            Some(c) => format!(
-                "merged as {} ({} written, {} removed; run `scn land` to publish)",
-                short(c),
-                self.written,
-                self.removed
-            ),
-            None => "already up to date".to_owned(),
+        if self.changeset.is_none() {
+            return "Already up to date.".to_owned();
         }
+        let n = self.written + self.removed;
+        format!(
+            "Merge made by the 'scion' strategy.\n {n} file{} changed",
+            if n == 1 { "" } else { "s" }
+        )
     }
 }
 
@@ -1558,6 +1559,19 @@ mod tests {
         };
         assert_eq!(land.text(), "Everything up-to-date");
 
+        let m = MergeOut {
+            schema: "s",
+            changeset: None,
+            written: 2,
+            removed: 0,
+        };
+        assert_eq!(m.text(), "Already up to date.");
+        let m = MergeOut {
+            changeset: Some("c1m".into()),
+            ..m
+        };
+        assert_eq!(m.text(), "Merge made by the 'scion' strategy.\n 2 files changed");
+        assert_eq!(AbortOut { schema: "s" }.text(), "");
         let sw = SwitchOut {
             schema: "s",
             reference: "dev".into(),

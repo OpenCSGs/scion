@@ -87,39 +87,32 @@ Without `--server`, the script installs only the client, `scn`. From source inst
 
 ## Deployment
 
-Three ways to run it: one command on this machine, the container image on one node, or several nodes on PostgreSQL and S3.
-
-**On this machine, in one command (Linux or macOS).** [`install.sh`](install.sh) downloads the latest [release](https://github.com/OpenCSGs/scion/releases), checks it against `SHA256SUMS` and installs it:
+### Option 1: install script (Linux or macOS)
 
 ```sh
-# The client, scn
+# Client only
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh
-# and the server, as a service on 127.0.0.1:7080
+# Client and server, as a service on 127.0.0.1:7080
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
-# for a team: authentication on, and the first administrator's token printed
+# For a team: listen on all interfaces with authentication on; prints the first admin token
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server --listen 0.0.0.0:7080
 ```
 
-The server runs under systemd on Linux (user `scion`, data in `/var/lib/scion`) and launchd on macOS (data in `~/Library/Application Support/scion`). `--version`, `--data-dir`, `--no-service` and `--install-dir` change the defaults, and `SCION_DOWNLOAD_URL` points at a mirror of the release files; `sh install.sh --help` lists them. To install the release files by hand instead, see [release binaries](docs/guide/deploy.md#release-binaries).
+Runs under systemd on Linux (data in `/var/lib/scion`) or launchd on macOS (data in `~/Library/Application Support/scion`). `sh install.sh --help` lists the options; [release binaries](docs/guide/deploy.md#release-binaries) covers installing by hand.
 
-**One node in Docker (Lite: SQLite and a local directory).** The image `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and a version such as `0.1.1`) is built for `linux/amd64` and `linux/arm64`, so it runs on Linux servers and in Docker Desktop on Apple silicon and Intel Macs. It holds the server, `scion`, and the client, `scn`, runs as an unprivileged user, and requires authentication by default.
+### Option 2: Docker, one node (SQLite and a local directory)
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest
+docker exec scion scion admin token create --lite --subject admin --group admins   # shown only once
 
-# The first administrator: a policy (admins manage everything; anyone signed in can read, write and land)
-docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
-  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
-  && scion admin policy set --lite /data/acl.toml'
-# and a token, shown only this once
-docker exec scion scion admin token create --lite --subject admin --group admins
-
-scn login http://localhost:7080 --token scn_pat_…    # the policy takes effect within 30 s
+scn login http://localhost:7080 --token scn_pat_…
 scn repo create http://localhost:7080/mono
-scn clone http://localhost:7080/mono && cd mono     # inside it, no address is needed
 ```
 
-**Production (Standard: PostgreSQL and S3-compatible storage).** Point the server at both through environment variables, and run the admin commands above without `--lite`:
+The image is built for `linux/amd64` and `linux/arm64` and requires authentication. Members of `admins` manage the server and anyone signed in can read, write and land; to change that, see [access control](docs/guide/auth.md#access-control-policy).
+
+### Option 3: production (PostgreSQL and S3-compatible storage)
 
 ```sh
 docker run -d --name scion -p 7080:7080 \
@@ -127,20 +120,23 @@ docker run -d --name scion -p 7080:7080 \
   -e SCION_BLOBS=s3://scion-objects -e SCION_S3_ENDPOINT=https://s3.example.com \
   -e SCION_S3_ACCESS_KEY_ID=… -e SCION_S3_SECRET_ACCESS_KEY=… \
   opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
+docker exec scion scion admin token create --subject admin --group admins
 ```
 
-**Tokens.** With authentication on, every user and CI job signs in with a token: `scn login SERVER --token scn_pat_…` once, after which every command uses it (CI can set `SCION_TOKEN` instead). An administrator creates tokens on the server with `scion admin token create`, which prints each token only once; where to run it:
+Several nodes behind a load balancer share one database and bucket ([clusters](docs/guide/cluster.md)). To try it all on one machine, [`deploy/compose`](deploy/compose/docker-compose.yml) starts PostgreSQL, SeaweedFS and the server.
+
+### Tokens
+
+Each user or CI job signs in once with `scn login SERVER --token scn_pat_…` (or sets `SCION_TOKEN`). An administrator creates tokens with `scion admin token create --subject NAME`, adding `--group admins` for another administrator or `--ttl 90d` for expiry:
 
 | Deployment | Command |
 |---|---|
-| `install.sh --server`, Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject NAME` |
-| `install.sh --server`, macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject NAME` |
+| install script, Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject NAME` |
+| install script, macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject NAME` |
 | Docker, one node | `docker exec scion scion admin token create --lite --subject NAME` |
-| Docker Compose or Standard | `docker compose exec scion scion admin token create --subject NAME` |
+| Docker Compose or production | `docker compose exec scion scion admin token create --subject NAME` |
 
-Add `--group admins` for another administrator, and `--ttl 90d` for a token that expires. `scion admin token list` and `scion admin token revoke ID` (same options) show and revoke tokens; what each person may do is set by the access policy. With an OIDC provider configured, people sign in with `scn login SERVER` in a browser instead. See [authentication](docs/guide/auth.md).
-
-Several nodes behind a load balancer share one database and bucket ([clusters](docs/guide/cluster.md)); a regional cache runs from the same image as `scion cache` ([caching](docs/guide/cache.md)). To try everything on one machine, [`deploy/compose`](deploy/compose/docker-compose.yml) starts PostgreSQL, SeaweedFS and the server without authentication. The server refuses to listen beyond loopback without `--auth-required` unless `--allow-anonymous` is given. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details: ports, health checks, OIDC login and external identity providers such as starhub-server.
+With an OIDC provider configured, people sign in with `scn login SERVER` in a browser instead. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details.
 
 ## Documentation
 

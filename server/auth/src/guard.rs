@@ -90,7 +90,7 @@ pub struct Guard {
 enum PolicyState {
     /// 还没从元数据库加载成功：拒绝一切（返回 Unavailable），不能退回到默认放行。
     Unloaded,
-    /// 元数据库里没有策略：已认证的身份可以读写和合入（见 [`Guard::check`]）。
+    /// 元数据库里没有策略：没有鉴权回调时按 [`DEFAULT_POLICY`](crate::policy::DEFAULT_POLICY) 执行。
     Unset,
     /// 显式保存的策略（包括空策略：没有规则命中即拒绝）。
     Set(Arc<Policy>),
@@ -450,7 +450,7 @@ impl Guard {
         let policy = self.current_policy()?;
         match &policy {
             Some(pol) if pol.allows(p, req) => return Ok(true),
-            None if self.webhook.is_none() => return Ok(p.authenticated && req.action <= Action::Land),
+            None if self.webhook.is_none() => return Ok(Policy::builtin().allows(p, req)),
             _ => {}
         }
         if grants_allow(p, req) {
@@ -515,8 +515,10 @@ impl Guard {
         if !self.required {
             return Ok(true);
         }
-        if self.current_policy()?.is_some_and(|pol| pol.is_system_admin(p)) {
-            return Ok(true);
+        match self.current_policy()? {
+            Some(pol) if pol.is_system_admin(p) => return Ok(true),
+            None if self.webhook.is_none() => return Ok(Policy::builtin().is_system_admin(p)),
+            _ => {}
         }
         self.webhook_allows(p, &Request::repo("*", Action::Admin)).await
     }
@@ -676,7 +678,8 @@ mod tests {
         let fresh = Guard::build(
             GuardConfig {
                 required: true,
-                ..GuardConfig::default()
+                auth: AuthConfig::default(),
+                signing_key_pem: Some(crate::token::generate_signing_key()),
             },
             Arc::new(MemStore::new()),
             lookup(),
@@ -686,6 +689,25 @@ mod tests {
         assert!(
             fresh
                 .check(&alice, &Request::repo("y", Action::Land))
+                .await
+                .expect("ok")
+        );
+        assert!(
+            !fresh
+                .check(&alice, &Request::repo("y", Action::Admin))
+                .await
+                .expect("ok")
+        );
+        assert!(!fresh.is_admin(&alice).await.expect("ok"));
+        // 默认策略：admins 组可以管理
+        let (token, _) = fresh
+            .issue(&Principal::user("root", vec!["admins".into()]))
+            .expect("issue");
+        let root = fresh.authenticate(Some(&token)).await.expect("jwt");
+        assert!(fresh.is_admin(&root).await.expect("ok"));
+        assert!(
+            fresh
+                .check(&root, &Request::repo("y", Action::Admin))
                 .await
                 .expect("ok")
         );

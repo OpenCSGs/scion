@@ -15,6 +15,8 @@
 //!   （按 id 读对象、合入）只有不带 `paths` 的规则才允许，读对象因此需要整个仓库的读权限。
 //! - 系统管理（策略、令牌）需要 `repos` 含 `"*"` 且 `actions` 含 `"admin"` 的规则。
 
+use std::sync::LazyLock;
+
 use serde::Deserialize;
 
 /// 权限动作，高的包含低的。
@@ -218,6 +220,19 @@ pub enum PolicyError {
     Rule { index: usize, message: String },
 }
 
+/// The policy in effect when none is saved and no authorization callback is configured:
+/// the `admins` group manages everything, and anyone signed in can read, write and land.
+pub const DEFAULT_POLICY: &str = r#"[[rule]]
+subjects = ["group:admins"]
+repos    = ["*"]
+actions  = ["admin"]
+
+[[rule]]
+subjects = ["*"]
+repos    = ["*"]
+actions  = ["land"]
+"#;
+
 /// 解析好的策略。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Policy {
@@ -225,6 +240,13 @@ pub struct Policy {
 }
 
 impl Policy {
+    /// [`DEFAULT_POLICY`], parsed once.
+    pub fn builtin() -> &'static Policy {
+        static P: LazyLock<Policy> =
+            LazyLock::new(|| Policy::parse(DEFAULT_POLICY).expect("the default policy parses"));
+        &P
+    }
+
     pub fn parse(text: &str) -> Result<Self, PolicyError> {
         let raw: RawPolicy = toml::from_str(text).map_err(|e| PolicyError::Syntax(e.to_string()))?;
         let mut rules = Vec::with_capacity(raw.rule.len());

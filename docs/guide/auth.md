@@ -95,7 +95,21 @@ What each API needs:
 | Landing | land on the target ref |
 | Admin APIs | system administration |
 
-With no policy and no authorization callback configured, authenticated identities can read, write and land in every repository; system administration always needs a policy that grants it. Write the first policy straight into the metadata database with `scion admin policy set`.
+With no policy saved and no authorization callback configured, the default policy applies: the `admins` group manages everything (so a token created with `--group admins` is an administrator), and anyone signed in can read, write and land in every repository:
+
+```toml
+[[rule]]
+subjects = ["group:admins"]
+repos    = ["*"]
+actions  = ["admin"]
+
+[[rule]]
+subjects = ["*"]
+repos    = ["*"]
+actions  = ["land"]
+```
+
+To change it, write a policy of your own (start from this one to keep an administrator) and save it with `scion admin policy set`; a saved policy replaces the default entirely.
 
 - **An empty policy:** an explicitly saved policy with no rules denies everything; it is not the same as no policy.
 - **When the policy fails to load** (the metadata database is unavailable, or the stored policy does not parse):

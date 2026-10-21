@@ -49,7 +49,6 @@ scion server --lite --data-dir ~/.scion-data
 
 # For a team: reachable by others, so authentication is required
 scion server --lite --data-dir ~/.scion-data --listen 0.0.0.0:7080 --auth-required
-scion admin policy set --lite --data-dir ~/.scion-data acl.toml       # the policy of the Docker example below
 scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins
 ```
 
@@ -75,22 +74,18 @@ docker build -t scion \
   --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim .
 ```
 
-The default command runs the Lite tier, SQLite and a local directory, with its data in the volume `/data`, and **requires authentication** (`--auth-required`). After the first start, write an administrator policy and issue the first token inside the container:
+The default command runs the Lite tier, SQLite and a local directory, with its data in the volume `/data`, and **requires authentication** (`--auth-required`). After the first start, issue the first token inside the container:
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data scion
-
-# Policy: the admins group manages everything; anyone authenticated can read, write and land in
-# every repository (takes effect within 30 s)
-docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
-  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
-  && scion admin policy set --lite /data/acl.toml'
 # The first token (shown only this once)
 docker exec scion scion admin token create --lite --subject admin --group admins
 
 scn login http://localhost:7080 --token scn_pat_…
 scn repo create http://localhost:7080/mono
 ```
+
+Until a policy is saved, the [default policy](auth.md#access-control-policy) applies: the `admins` group manages everything and anyone signed in can read, write and land.
 
 The server refuses to start when it listens beyond loopback without authentication, since anyone who can reach it could then read and write every repository. To run anonymously anyway (for example, for a test on an internal network), add `--allow-anonymous` (`SCION_ALLOW_ANONYMOUS=true`):
 

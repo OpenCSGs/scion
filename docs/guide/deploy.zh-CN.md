@@ -49,7 +49,6 @@ scion server --lite --data-dir ~/.scion-data
 
 # 给团队用：其他人能连上，所以必须开启认证
 scion server --lite --data-dir ~/.scion-data --listen 0.0.0.0:7080 --auth-required
-scion admin policy set --lite --data-dir ~/.scion-data acl.toml       # 策略内容见下文 Docker 示例
 scion admin token create --lite --data-dir ~/.scion-data --subject admin --group admins
 ```
 
@@ -75,21 +74,18 @@ docker build -t scion \
   --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim .
 ```
 
-默认命令是 Lite 档：SQLite 加本地目录，数据放在卷 `/data`，并且**要求认证**（`--auth-required`）。第一次启动后，在容器里写入管理员策略、签发第一个令牌：
+默认命令是 Lite 档：SQLite 加本地目录，数据放在卷 `/data`，并且**要求认证**（`--auth-required`）。第一次启动后，在容器里签发第一个令牌：
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data scion
-
-# 策略：admins 组管理一切，任何已认证身份可以读写、合入所有仓库（30 秒内生效）
-docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
-  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
-  && scion admin policy set --lite /data/acl.toml'
 # 第一个令牌（只显示这一次）
 docker exec scion scion admin token create --lite --subject admin --group admins
 
 scn login http://localhost:7080 --token scn_pat_…
 scn repo create http://localhost:7080/mono
 ```
+
+保存策略之前，生效的是[默认策略](auth.zh-CN.md#访问控制策略)：admins 组管理一切，任何已登录的身份都可以读写、合入。
 
 服务端监听在回环地址以外、又没有开认证时拒绝启动，因为能连上的人都能读写所有仓库。确实要匿名运行（例如只在内网测试）时加 `--allow-anonymous`（`SCION_ALLOW_ANONYMOUS=true`）：
 

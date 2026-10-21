@@ -87,39 +87,32 @@ scn log
 
 ## 部署
 
-有三种运行方式：在本机一键安装、在单节点上运行容器镜像，或者多节点接 PostgreSQL 和 S3。
-
-**本机一键安装（Linux 或 macOS）。** [`install.sh`](install.sh) 下载最新的 [release](https://github.com/OpenCSGs/scion/releases)，按 `SHA256SUMS` 校验后安装：
+### 方式一：安装脚本（Linux 或 macOS）
 
 ```sh
-# 客户端 scn
+# 只装客户端
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh
-# 加上服务端，作为系统服务运行在 127.0.0.1:7080
+# 客户端和服务端，服务运行在 127.0.0.1:7080
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server
-# 给团队用：开启认证，并打印第一个管理员令牌
+# 给团队用：监听所有网卡并开启认证，打印第一个管理员令牌
 curl -fsSL https://raw.githubusercontent.com/OpenCSGs/scion/main/install.sh | sh -s -- --server --listen 0.0.0.0:7080
 ```
 
-服务端在 Linux 上由 systemd 管理（用户 `scion`，数据在 `/var/lib/scion`），在 macOS 上由 launchd 管理（数据在 `~/Library/Application Support/scion`）。`--version`、`--data-dir`、`--no-service`、`--install-dir` 可以改默认值，`SCION_DOWNLOAD_URL` 指向 release 文件的镜像；`sh install.sh --help` 列出全部选项。想手动下载安装，见 [release 二进制](docs/guide/deploy.zh-CN.md#release-二进制)。
+Linux 上由 systemd 管理（数据在 `/var/lib/scion`），macOS 上由 launchd 管理（数据在 `~/Library/Application Support/scion`）。`sh install.sh --help` 列出全部选项；手动安装见 [release 二进制](docs/guide/deploy.zh-CN.md#release-二进制)。
 
-**Docker 单节点（Lite 档：SQLite + 本地目录）。** 镜像 `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion`（标签 `latest` 和版本号，例如 `0.1.1`）同时构建了 `linux/amd64` 和 `linux/arm64`，可以运行在 Linux 服务器上，也可以运行在 Apple 芯片和 Intel 芯片 Mac 的 Docker Desktop 里。镜像包含服务端 `scion` 和客户端 `scn`，以非特权用户运行，默认要求认证。
+### 方式二：Docker 单节点（SQLite + 本地目录）
 
 ```sh
 docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest
+docker exec scion scion admin token create --lite --subject admin --group admins   # 令牌只显示这一次
 
-# 第一个管理员：先写入策略（admins 组管理一切；任何已登录的身份都可以读写、合入）
-docker exec scion sh -c 'printf "%s\n" "[[rule]]" "subjects = [\"group:admins\"]" "repos = [\"*\"]" "actions = [\"admin\"]" \
-  "[[rule]]" "subjects = [\"*\"]" "repos = [\"*\"]" "actions = [\"land\"]" > /data/acl.toml \
-  && scion admin policy set --lite /data/acl.toml'
-# 再签发令牌，令牌只显示这一次
-docker exec scion scion admin token create --lite --subject admin --group admins
-
-scn login http://localhost:7080 --token scn_pat_…    # 策略在 30 秒内生效
+scn login http://localhost:7080 --token scn_pat_…
 scn repo create http://localhost:7080/mono
-scn clone http://localhost:7080/mono && cd mono     # 进入目录后不用再写地址
 ```
 
-**生产环境（Standard 档：PostgreSQL + S3 兼容存储）。** 用环境变量指定两者；上面的管理命令去掉 `--lite` 即可：
+镜像支持 `linux/amd64` 和 `linux/arm64`，默认要求认证。`admins` 组的成员管理服务端，任何已登录的身份都可以读写、合入；要修改，见[访问控制策略](docs/guide/auth.zh-CN.md#访问控制策略)。
+
+### 方式三：生产环境（PostgreSQL + S3 兼容存储）
 
 ```sh
 docker run -d --name scion -p 7080:7080 \
@@ -127,20 +120,23 @@ docker run -d --name scion -p 7080:7080 \
   -e SCION_BLOBS=s3://scion-objects -e SCION_S3_ENDPOINT=https://s3.example.com \
   -e SCION_S3_ACCESS_KEY_ID=… -e SCION_S3_SECRET_ACCESS_KEY=… \
   opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
+docker exec scion scion admin token create --subject admin --group admins
 ```
 
-**令牌。** 开启认证后，每个用户和 CI 任务都用令牌登录：执行一次 `scn login 服务端地址 --token scn_pat_…`，之后的命令都会自动带上它（CI 里也可以设置环境变量 `SCION_TOKEN`）。令牌由管理员在服务端用 `scion admin token create` 签发，每个令牌只显示一次。不同部署方式下的命令：
+多个节点放在负载均衡后面，共用一个数据库和 bucket（见[多节点](docs/guide/cluster.zh-CN.md)）。想在一台机器上试用全部组件，用 [`deploy/compose`](deploy/compose/docker-compose.yml)，它会启动 PostgreSQL、SeaweedFS 和服务端。
+
+### 令牌
+
+每个用户或 CI 任务登录一次：`scn login 服务端地址 --token scn_pat_…`（或设置 `SCION_TOKEN`）。管理员用 `scion admin token create --subject 用户名` 签发令牌，加 `--group admins` 是另一个管理员，加 `--ttl 90d` 按期过期：
 
 | 部署方式 | 命令 |
 |---|---|
-| `install.sh --server`，Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject 用户名` |
-| `install.sh --server`，macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject 用户名` |
+| 安装脚本，Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject 用户名` |
+| 安装脚本，macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject 用户名` |
 | Docker 单节点 | `docker exec scion scion admin token create --lite --subject 用户名` |
-| Docker Compose 或 Standard 档 | `docker compose exec scion scion admin token create --subject 用户名` |
+| Docker Compose 或生产环境 | `docker compose exec scion scion admin token create --subject 用户名` |
 
-加 `--group admins` 签发的是另一个管理员的令牌，加 `--ttl 90d` 让令牌按期过期。`scion admin token list` 和 `scion admin token revoke ID`（选项同上）用来查看和吊销令牌；每个人能做什么由访问策略决定。配置了 OIDC 时，用户也可以直接 `scn login 服务端地址`，在浏览器里登录。详见[认证与鉴权](docs/guide/auth.zh-CN.md)。
-
-多个节点放在负载均衡后面，共用一个数据库和一个 bucket（见[多节点](docs/guide/cluster.zh-CN.md)）；区域缓存用同一个镜像运行 `scion cache`（见[缓存](docs/guide/cache.zh-CN.md)）。想在一台机器上试用全部组件，可以用 [`deploy/compose`](deploy/compose/docker-compose.yml)：它会启动 PostgreSQL、SeaweedFS 和不带认证的服务端。服务端监听在回环地址以外时，没有 `--auth-required` 就拒绝启动，除非显式加上 `--allow-anonymous`。端口、健康检查、OIDC 登录以及 starhub-server 等外部身份提供方，见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
+配置了 OIDC 时，用户直接 `scn login 服务端地址`，在浏览器里登录。详见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
 
 ## 文档
 

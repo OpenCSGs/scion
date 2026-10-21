@@ -130,6 +130,155 @@ pub async fn token(cmd: &TokenCmd, meta: Arc<dyn MetaStore>) -> anyhow::Result<V
     })
 }
 
+#[derive(Debug, clap::Subcommand)]
+pub enum OrgCmd {
+    /// Create an organization with its first owner.
+    Create {
+        name: String,
+        #[arg(long)]
+        owner: String,
+        /// private (only members read) or internal (every signed-in user reads).
+        #[arg(long, default_value = "private")]
+        visibility: String,
+    },
+    /// List organizations.
+    Ls,
+    /// Change who besides the members can read: private or internal.
+    Visibility { name: String, visibility: String },
+    /// Delete an organization (it must have no repositories left).
+    Rm { name: String },
+    /// Members: add (or change the role of), remove, list.
+    #[command(subcommand)]
+    Member(MemberCmd),
+}
+
+#[derive(Debug, clap::Subcommand)]
+pub enum MemberCmd {
+    /// Add a member, or change an existing member's role.
+    Add {
+        org: String,
+        subject: String,
+        /// owner, maintainer, developer or reporter.
+        #[arg(long)]
+        role: String,
+    },
+    Rm {
+        org: String,
+        subject: String,
+    },
+    Ls {
+        org: String,
+    },
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+fn role(r: &str) -> anyhow::Result<&'static str> {
+    scion_api::scion_auth::orgs::Role::parse(r)
+        .map(|r| r.as_str())
+        .ok_or_else(|| anyhow::anyhow!("unknown role {r:?}; use owner, maintainer, developer or reporter"))
+}
+
+fn visibility(v: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        scion_api::scion_auth::orgs::VISIBILITIES.contains(&v),
+        "unknown visibility {v:?}; use private or internal"
+    );
+    Ok(())
+}
+
+/// `scion admin org`: works on the metadata store directly, as an operator (no permission checks).
+pub async fn org(cmd: &OrgCmd, meta: Arc<dyn MetaStore>) -> anyhow::Result<Vec<String>> {
+    use scion_store::{OrgMember, OrgRecord, RepoFilter};
+    const BY: &str = "scion admin";
+    Ok(match cmd {
+        OrgCmd::Create {
+            name,
+            owner,
+            visibility: v,
+        } => {
+            scion_api::scion_auth::orgs::validate_org_name(name).map_err(anyhow::Error::msg)?;
+            visibility(v)?;
+            let now = now_ms();
+            meta.create_org(&OrgRecord {
+                name: name.clone(),
+                visibility: v.clone(),
+                created_at_ms: now,
+                created_by: BY.into(),
+            })
+            .await?;
+            meta.put_org_member(&OrgMember {
+                org: name.clone(),
+                subject: owner.clone(),
+                role: "owner".into(),
+                added_at_ms: now,
+                added_by: BY.into(),
+            })
+            .await?;
+            vec![format!("created {name} ({v}), owned by {owner}")]
+        }
+        OrgCmd::Ls => meta
+            .list_orgs()
+            .await?
+            .into_iter()
+            .map(|o| format!("{:<24} {:<9} created by {}", o.name, o.visibility, o.created_by))
+            .collect(),
+        OrgCmd::Visibility { name, visibility: v } => {
+            visibility(v)?;
+            anyhow::ensure!(meta.set_org_visibility(name, v).await?, "no organization {name}");
+            vec![format!("{name} is now {v}")]
+        }
+        OrgCmd::Rm { name } => {
+            for deleted in [false, true] {
+                let filter = RepoFilter {
+                    prefix: format!("{name}/"),
+                    after: None,
+                    limit: 1,
+                    deleted,
+                };
+                anyhow::ensure!(
+                    meta.list_repo_infos(&filter).await?.is_empty(),
+                    "{name} still has repositories; delete them (and wait until they are purged) first"
+                );
+            }
+            anyhow::ensure!(meta.delete_org(name).await?, "no organization {name}");
+            vec![format!("deleted {name}")]
+        }
+        OrgCmd::Member(MemberCmd::Add { org, subject, role: r }) => {
+            let r = role(r)?;
+            meta.put_org_member(&OrgMember {
+                org: org.clone(),
+                subject: subject.clone(),
+                role: r.into(),
+                added_at_ms: now_ms(),
+                added_by: BY.into(),
+            })
+            .await?;
+            vec![format!("{subject} is {r} of {org}")]
+        }
+        OrgCmd::Member(MemberCmd::Rm { org, subject }) => {
+            anyhow::ensure!(
+                meta.delete_org_member(org, subject).await?,
+                "{subject} is not a member of {org}"
+            );
+            vec![format!("removed {subject} from {org}")]
+        }
+        OrgCmd::Member(MemberCmd::Ls { org }) => {
+            anyhow::ensure!(meta.get_org(org).await?.is_some(), "no organization {org}");
+            meta.list_org_members(org)
+                .await?
+                .into_iter()
+                .map(|m| format!("{:<24} {:<10} added by {}", m.subject, m.role, m.added_by))
+                .collect()
+        }
+    })
+}
+
 pub async fn policy(cmd: &PolicyCmd, meta: Arc<dyn MetaStore>) -> anyhow::Result<Vec<String>> {
     let g = admin_guard(meta)?;
     Ok(match cmd {
@@ -146,6 +295,77 @@ pub async fn policy(cmd: &PolicyCmd, meta: Arc<dyn MetaStore>) -> anyhow::Result
 mod tests {
     use super::*;
     use scion_store::MemStore;
+
+    #[tokio::test]
+    async fn org_commands() {
+        let meta: Arc<dyn MetaStore> = Arc::new(MemStore::new());
+        let run = |cmd: OrgCmd| {
+            let meta = meta.clone();
+            async move { org(&cmd, meta).await }
+        };
+        let create = |name: &str, visibility: &str| OrgCmd::Create {
+            name: name.into(),
+            owner: "alice".into(),
+            visibility: visibility.into(),
+        };
+        assert_eq!(
+            run(create("acme", "private")).await.expect("create"),
+            ["created acme (private), owned by alice"]
+        );
+        assert!(run(create("acme", "private")).await.is_err(), "exists");
+        assert!(run(create("user", "private")).await.is_err(), "reserved");
+        assert!(run(create("x", "public")).await.is_err(), "visibility");
+        let add = |subject: &str, role: &str| {
+            OrgCmd::Member(MemberCmd::Add {
+                org: "acme".into(),
+                subject: subject.into(),
+                role: role.into(),
+            })
+        };
+        assert_eq!(
+            run(add("bob", "developer")).await.expect("add"),
+            ["bob is developer of acme"]
+        );
+        assert!(run(add("bob", "boss")).await.is_err());
+        let members = run(OrgCmd::Member(MemberCmd::Ls { org: "acme".into() }))
+            .await
+            .expect("ls");
+        assert!(
+            members[0].starts_with("alice") && members[1].contains("developer"),
+            "{members:?}"
+        );
+        assert!(run(OrgCmd::Member(MemberCmd::Ls { org: "nope".into() })).await.is_err());
+        let rm = |subject: &str| {
+            OrgCmd::Member(MemberCmd::Rm {
+                org: "acme".into(),
+                subject: subject.into(),
+            })
+        };
+        assert_eq!(run(rm("bob")).await.expect("rm"), ["removed bob from acme"]);
+        assert!(run(rm("bob")).await.is_err());
+        let vis = |name: &str, v: &str| OrgCmd::Visibility {
+            name: name.into(),
+            visibility: v.into(),
+        };
+        assert_eq!(
+            run(vis("acme", "internal")).await.expect("vis"),
+            ["acme is now internal"]
+        );
+        assert!(run(vis("nope", "internal")).await.is_err());
+        assert!(run(vis("acme", "secret")).await.is_err());
+        assert!(run(OrgCmd::Ls).await.expect("ls")[0].contains("internal"));
+        meta.create_repo("acme/app").await.expect("repo");
+        assert!(
+            run(OrgCmd::Rm { name: "acme".into() }).await.is_err(),
+            "has repositories"
+        );
+        run(create("tmp", "private")).await.expect("create");
+        assert_eq!(
+            run(OrgCmd::Rm { name: "tmp".into() }).await.expect("rm"),
+            ["deleted tmp"]
+        );
+        assert!(run(OrgCmd::Rm { name: "tmp".into() }).await.is_err());
+    }
 
     #[tokio::test]
     async fn token_commands() {

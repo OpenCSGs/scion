@@ -61,6 +61,13 @@ enum AdminCmd {
         #[command(flatten)]
         storage: StorageArgs,
     },
+    /// Organizations and their members, directly in the metadata store (docs/design/authorization.md).
+    Org {
+        #[command(subcommand)]
+        cmd: authcmd::OrgCmd,
+        #[command(flatten)]
+        storage: StorageArgs,
+    },
     /// Show or set the access control policy.
     Policy {
         #[command(subcommand)]
@@ -755,6 +762,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Admin(AdminCmd::Token { cmd, storage }) => {
             let meta = open_meta(&storage).await?;
             for line in authcmd::token(&cmd, meta).await? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        Command::Admin(AdminCmd::Org { cmd, storage }) => {
+            let meta = open_meta(&storage).await?;
+            for line in authcmd::org(&cmd, meta).await? {
                 println!("{line}");
             }
             Ok(())

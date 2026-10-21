@@ -215,6 +215,46 @@ url = "http://opa:8181/v1/data/scion/allow"
 
 链里还可以加两个内置判定器。`orgs` 让组织成员在 `ORG/…` 下做角色允许的事（owner：admin，maintainer：land，developer：write，reporter：read），并为成员补上 `org:ORG:ROLE` 组，策略里可以引用。`personal` 让每个登录用户拥有 `user/SUBJECT/…`。每个回调都支持和 `[authz_webhook]` 相同的 `bearer`、`bearer_env`、`cache_ttl`、`timeout`、`on_error`。回调不可用时，`on_error = "open"` 让它不表态，转而询问下一个判定器。原来的 `[authz_webhook]` 可以保留，在链里叫 `webhook`。设计见[授权](../design/authorization.zh-CN.md)。
 
+## 组织
+
+链里加上 `orgs` 后，独立部署的服务端就有了可以自助管理的组织；不加时，组织接口返回 `FAILED_PRECONDITION`。
+
+```toml
+# auth.toml
+[authorization]
+chain = ["policy", "orgs", "personal", "grants"]
+```
+
+- **命名空间。** 组织拥有所有名为 `ORG/…` 的仓库。
+- **角色。** 每个成员有一个角色：
+
+  | 角色 | 允许 |
+  |---|---|
+  | `owner` | admin：管理组织，在其中建库、删库、fork |
+  | `maintainer` | land |
+  | `developer` | write |
+  | `reporter` | read |
+
+- **可见性。** `internal` 组织所有登录用户都能读；`private`（默认）只有成员能读。
+- **策略。** 成员还会得到 `org:ORG:ROLE` 组，策略里可以直接引用，例如 `subjects = ["group:org:acme:owner"]`。
+- **个人命名空间。** `personal` 让每个登录用户拥有 `user/SUBJECT/…`。
+- **谁能管什么。**
+  - 任何登录用户都能建组织，并成为它的 owner。如果这个名字下已经有仓库，需要系统管理员来建。
+  - owner 管理成员和可见性；成员可以自己退出。
+  - 最后一个 owner 不能被移除或降级；还有仓库的组织不能删除。
+- **何时生效。** 通过某台服务端做的修改在这台服务端上立即生效，其他节点在 30 秒内生效。
+
+运维也可以直接操作元数据库，存储参数与 `scion server` 相同：
+
+```sh
+scion admin org create acme --owner alice [--visibility internal]
+scion admin org member add acme bob --role developer
+scion admin org member ls acme
+scion admin org visibility acme internal
+scion admin org ls
+scion admin org rm acme
+```
+
 ## 接入 starhub-server
 
 starhub-server 的实际情况：

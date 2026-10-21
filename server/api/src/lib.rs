@@ -18,6 +18,7 @@ use scion_proto::v1::auth_service_server::AuthServiceServer;
 use scion_proto::v1::event_service_server::EventServiceServer;
 use scion_proto::v1::land_service_server::LandServiceServer;
 use scion_proto::v1::object_service_server::ObjectServiceServer;
+use scion_proto::v1::org_service_server::OrgServiceServer;
 use scion_proto::v1::query_service_server::QueryServiceServer;
 use scion_proto::v1::ref_service_server::RefServiceServer;
 use scion_proto::v1::repo_service_server::RepoServiceServer;
@@ -31,8 +32,8 @@ pub use config::{Limits, ReadEndpoint, ServerConfig, WriteRate};
 pub use scion_auth;
 pub use scion_proto::PROTOCOL_VERSION;
 pub use service::{
-    AdminSvc, AuthSvc, EventSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, QuerySvc, RefSvc, RepoSvc, ServerInfoSvc,
-    WriteSvc, purge_deleted_repos, trusted_forward,
+    AdminSvc, AuthSvc, EventSvc, FORWARDED_HEADER, LandSvc, ObjectSvc, OrgSvc, QuerySvc, RefSvc, RepoSvc,
+    ServerInfoSvc, WriteSvc, purge_deleted_repos, trusted_forward,
 };
 
 /// 服务端依赖的全部状态。
@@ -179,6 +180,7 @@ pub async fn serve(
     health.set_serving::<AuthServiceServer<AuthSvc>>().await;
     health.set_serving::<AdminServiceServer<AdminSvc>>().await;
     health.set_serving::<RepoServiceServer<RepoSvc>>().await;
+    health.set_serving::<OrgServiceServer<OrgSvc>>().await;
     health.set_serving::<EventServiceServer<EventSvc>>().await;
 
     // 所有服务共享一份提交记录缓存；启动后在后台预热，不阻塞监听
@@ -306,6 +308,7 @@ pub async fn serve(
     );
     let admin_svc =
         AdminServiceServer::new(AdminSvc::new(guard.clone()).with_redactor(redactor, app.config.purge_grace));
+    let org_svc = OrgServiceServer::new(OrgSvc::new(app.meta.clone(), guard.clone()));
 
     let tenant = limit::TenantLimitLayer::new(
         app.config.tenant_rate.map(|r| (r.per_second, r.burst)),
@@ -335,6 +338,7 @@ pub async fn serve(
         .add_service(auth_svc)
         .add_service(admin_svc)
         .add_service(repo_svc)
+        .add_service(org_svc)
         .add_service(event_svc)
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
             shutdown.await;

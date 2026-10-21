@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package scion.v1;
+
+// Organizations (docs/design/authorization.md): an organization owns the repositories named
+// `ORG/…`, and its members have a role: owner (admin), maintainer (land), developer (write) or
+// reporter (read). Available when the server's authorization chain includes `orgs`; otherwise
+// every call fails with FAILED_PRECONDITION.
+//
+// Permissions:
+// - CreateOrg: any signed-in user, who becomes its owner. A system administrator is needed when
+//   repositories already exist under the name, since the new owner would gain them.
+// - GetOrg, ListOrgs: any signed-in user.
+// - ListMembers: members of the organization, and system administrators.
+// - SetOrgVisibility, PutMember, RemoveMember, DeleteOrg: owners, and system administrators.
+//   The last owner cannot be removed or given another role, and an organization that still has
+//   repositories cannot be deleted.
+service OrgService {
+  rpc CreateOrg(CreateOrgRequest) returns (CreateOrgResponse);
+  rpc GetOrg(GetOrgRequest) returns (GetOrgResponse);
+  rpc ListOrgs(ListOrgsRequest) returns (ListOrgsResponse);
+  rpc SetOrgVisibility(SetOrgVisibilityRequest) returns (SetOrgVisibilityResponse);
+  rpc DeleteOrg(DeleteOrgRequest) returns (DeleteOrgResponse);
+  // Adds a member, or changes an existing member's role.
+  rpc PutMember(PutMemberRequest) returns (PutMemberResponse);
+  rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+  rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+}
+
+message Org {
+  string name = 1;
+  // private (only members read) or internal (every signed-in user reads).
+  string visibility = 2;
+  int64 created_at_ms = 3;
+  string created_by = 4;
+}
+
+message Member {
+  string subject = 1;
+  // owner, maintainer, developer or reporter.
+  string role = 2;
+  int64 added_at_ms = 3;
+  string added_by = 4;
+}
+
+message CreateOrgRequest {
+  string name = 1;
+  // Empty for private.
+  string visibility = 2;
+}
+
+message CreateOrgResponse {
+  Org org = 1;
+}
+
+message GetOrgRequest {
+  string name = 1;
+}
+
+message GetOrgResponse {
+  Org org = 1;
+}
+
+message ListOrgsRequest {
+  // Only the caller's organizations.
+  bool mine = 1;
+}
+
+message ListOrgsResponse {
+  // By name.
+  repeated Org orgs = 1;
+}
+
+message SetOrgVisibilityRequest {
+  string name = 1;
+  string visibility = 2;
+}
+
+message SetOrgVisibilityResponse {
+  Org org = 1;
+}
+
+message DeleteOrgRequest {
+  string name = 1;
+}
+
+message DeleteOrgResponse {}
+
+message PutMemberRequest {
+  string org = 1;
+  string subject = 2;
+  string role = 3;
+}
+
+message PutMemberResponse {
+  Member member = 1;
+}
+
+message RemoveMemberRequest {
+  string org = 1;
+  string subject = 2;
+}
+
+message RemoveMemberResponse {}
+
+message ListMembersRequest {
+  string org = 1;
+}
+
+message ListMembersResponse {
+  // By subject.
+  repeated Member members = 1;
+}

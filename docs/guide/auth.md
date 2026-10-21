@@ -215,6 +215,46 @@ url = "http://opa:8181/v1/data/scion/allow"
 
 Two built-in deciders can join the chain. `orgs` lets organization members do what their role covers in `ORG/…` (owner: admin, maintainer: land, developer: write, reporter: read) and adds their `org:ORG:ROLE` groups, which policies can name. `personal` gives every signed-in user `user/SUBJECT/…`. Each webhook takes the same `bearer`, `bearer_env`, `cache_ttl`, `timeout` and `on_error` as `[authz_webhook]`. When one is unavailable, `on_error = "open"` makes it have no opinion, so the next decider is asked. An `[authz_webhook]` can stay; in a chain it is called `webhook`. The design is in [authorization](../design/authorization.md).
 
+## Organizations
+
+With `orgs` in the chain, a standalone server can have self-service organizations. Without it, the organization API answers `FAILED_PRECONDITION`.
+
+```toml
+# auth.toml
+[authorization]
+chain = ["policy", "orgs", "personal", "grants"]
+```
+
+- **Namespaces.** An organization owns the repositories named `ORG/…`.
+- **Roles.** Members have a role:
+
+  | Role | Allows |
+  |---|---|
+  | `owner` | admin: manage the organization, create, delete and fork its repositories |
+  | `maintainer` | land |
+  | `developer` | write |
+  | `reporter` | read |
+
+- **Visibility.** `internal` organizations can be read by every signed-in user; `private` ones (the default) only by members.
+- **Policies.** Members also get the group `org:ORG:ROLE`, so a policy can name it, for example `subjects = ["group:org:acme:owner"]`.
+- **Personal namespaces.** `personal` gives each signed-in user `user/SUBJECT/…`.
+- **Who manages what.**
+  - Any signed-in user can create an organization and becomes its owner. A system administrator is needed when repositories already exist under the name.
+  - Owners manage members and visibility; members can leave on their own.
+  - The last owner cannot be removed or demoted, and an organization with repositories cannot be deleted.
+- **When changes apply.** Changes made through a server apply on it at once; other nodes see them within 30 seconds.
+
+Operators can manage organizations directly in the metadata database, with the same storage options as `scion server`:
+
+```sh
+scion admin org create acme --owner alice [--visibility internal]
+scion admin org member add acme bob --role developer
+scion admin org member ls acme
+scion admin org visibility acme internal
+scion admin org ls
+scion admin org rm acme
+```
+
 ## Connecting starhub-server
 
 What starhub-server does:

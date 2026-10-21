@@ -268,6 +268,11 @@ impl Guard {
         self.required
     }
 
+    /// Whether the chain includes `orgs` (and OrgService is available).
+    pub fn orgs_enabled(&self) -> bool {
+        self.orgs.is_some()
+    }
+
     /// 能否签发访问令牌。
     pub fn can_issue(&self) -> bool {
         self.issuer.is_some()

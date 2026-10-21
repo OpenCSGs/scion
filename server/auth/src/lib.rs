@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod external;
+pub mod github;
 pub mod guard;
 pub mod oidc;
 pub mod orgs;

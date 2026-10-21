@@ -139,6 +139,7 @@ pub struct Guard {
     /// Set when `orgs` is in the chain.
     orgs: Option<OrgCache>,
     oidc: Option<Oidc>,
+    github: Option<crate::github::GitHub>,
     policy: RwLock<PolicyState>,
 }
 
@@ -196,6 +197,7 @@ impl Guard {
             webhooks: Vec::new(),
             orgs: None,
             oidc: None,
+            github: None,
             policy: RwLock::new(PolicyState::Unset),
         }
     }
@@ -205,12 +207,16 @@ impl Guard {
         // only they need an HTTP client: building one needs the system's CA certificates, which a
         // minimal Linux may not have, and a server that calls nobody should still start there
         let a = &config.auth;
-        let http =
-            if a.issuers.is_empty() && a.introspection.is_none() && a.webhooks().next().is_none() && a.oidc.is_none() {
-                None
-            } else {
-                Some(http_client()?)
-            };
+        let http = if a.issuers.is_empty()
+            && a.introspection.is_none()
+            && a.webhooks().next().is_none()
+            && a.oidc.is_none()
+            && a.github.is_none()
+        {
+            None
+        } else {
+            Some(http_client()?)
+        };
         let http = || http.clone().expect("built when something calls out");
         let webhooks: Vec<AuthzWebhook> = config
             .auth
@@ -259,6 +265,7 @@ impl Guard {
                 .introspection
                 .map(|c| Introspection::new(c, http(), lookup.clone())),
             webhooks,
+            github: config.auth.github.map(|c| crate::github::GitHub::new(c, http())),
             oidc: config.auth.oidc.map(|c| Oidc::new(c, http(), lookup)),
             policy: RwLock::new(PolicyState::Unloaded),
         }))
@@ -279,7 +286,7 @@ impl Guard {
     }
 
     pub fn device_login(&self) -> bool {
-        self.oidc.is_some() && self.issuer.is_some()
+        (self.oidc.is_some() || self.github.is_some()) && self.issuer.is_some()
     }
 
     fn meta(&self) -> Result<&Arc<dyn MetaStore>, AuthError> {
@@ -423,8 +430,9 @@ impl Guard {
     }
 
     pub async fn start_device_login(&self) -> Result<DeviceStart, AuthError> {
-        match (&self.oidc, &self.issuer) {
-            (Some(o), Some(_)) => Ok(o.start().await?),
+        match (&self.oidc, &self.github, &self.issuer) {
+            (Some(o), _, Some(_)) => Ok(o.start().await?),
+            (None, Some(g), Some(_)) => Ok(g.start().await?),
             _ => Err(AuthError::Unavailable(
                 "device login is not configured on this server".into(),
             )),
@@ -436,15 +444,15 @@ impl Guard {
         &self,
         device_code: &str,
     ) -> Result<(DevicePoll, Option<(String, String, i64)>), AuthError> {
-        let o = match (&self.oidc, &self.issuer) {
-            (Some(o), Some(_)) => o,
+        let poll = match (&self.oidc, &self.github, &self.issuer) {
+            (Some(o), _, Some(_)) => o.poll(device_code).await?,
+            (None, Some(g), Some(_)) => g.poll(device_code).await?,
             _ => {
                 return Err(AuthError::Unavailable(
                     "device login is not configured on this server".into(),
                 ));
             }
         };
-        let poll = o.poll(device_code).await?;
         let DevicePoll::Complete(p) = &poll else {
             return Ok((poll, None));
         };
@@ -773,6 +781,56 @@ bearer = "opa"
             "opa, last in the chain"
         );
         assert!(!g.is_admin(&Principal::user("alice", vec![])).await.expect("admin"));
+    }
+
+    #[tokio::test]
+    async fn github_device_login_issues_scion_tokens() {
+        let idp = FakeIdp::start().await;
+        let text = format!(
+            "[github]\nclient_id = \"gh-app\"\nweb_url = \"{gh}\"\napi_url = \"{gh}\"",
+            gh = idp.url("/gh")
+        );
+        let g = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::parse(&text).expect("config"),
+                signing_key_pem: Some(crate::token::generate_signing_key()),
+            },
+            Arc::new(MemStore::new()),
+            lookup(),
+        )
+        .expect("build");
+        assert!(g.device_login());
+        let start = g.start_device_login().await.expect("start");
+        assert_eq!(start.user_code, "WXYZ-1234");
+        let (poll, tokens) = g.poll_device_login(&start.device_code).await.expect("poll");
+        assert_eq!((poll, tokens), (DevicePoll::Pending, None));
+        idp.approve(&start.device_code);
+        let (_, tokens) = g.poll_device_login(&start.device_code).await.expect("poll");
+        let (refresh, access, _) = tokens.expect("tokens");
+        assert!(refresh.starts_with("scn_refresh_"));
+        let p = g.authenticate(Some(&access)).await.expect("access token");
+        assert_eq!(p.subject, "octocat");
+        // Without a signing key there is no device login
+        let no_key = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::parse(&text).expect("config"),
+                signing_key_pem: None,
+            },
+            Arc::new(MemStore::new()),
+            lookup(),
+        )
+        .expect("build");
+        assert!(!no_key.device_login());
+        assert!(matches!(
+            no_key.start_device_login().await,
+            Err(AuthError::Unavailable(_))
+        ));
+        assert!(matches!(
+            no_key.poll_device_login("x").await,
+            Err(AuthError::Unavailable(_))
+        ));
     }
 
     #[tokio::test]

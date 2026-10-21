@@ -322,6 +322,7 @@ struct RawConfig {
     introspection: Option<RawIntrospection>,
     authz_webhook: Option<RawWebhook>,
     oidc: Option<OidcConfig>,
+    github: Option<crate::github::GitHubConfig>,
     #[serde(default)]
     authorization: RawAuthorization,
 }
@@ -334,6 +335,8 @@ pub struct AuthConfig {
     pub introspection: Option<IntrospectionConfig>,
     pub authz_webhook: Option<WebhookConfig>,
     pub oidc: Option<OidcConfig>,
+    /// GitHub login (instead of `[oidc]`).
+    pub github: Option<crate::github::GitHubConfig>,
     pub authorization: AuthorizationConfig,
 }
 
@@ -507,12 +510,18 @@ impl AuthConfig {
             .map(|r| webhook_config("webhook".into(), r, "authz_webhook"))
             .transpose()?;
         let authorization = authorization(raw.authorization, authz_webhook.is_some())?;
+        if raw.oidc.is_some() && raw.github.is_some() {
+            return Err(ConfigError::Invalid(
+                "set [oidc] or [github] for browser login, not both".into(),
+            ));
+        }
         Ok(Self {
             token: raw.token,
             issuers,
             introspection,
             authz_webhook,
             oidc: raw.oidc,
+            github: raw.github,
             authorization,
         })
     }
@@ -669,6 +678,19 @@ cache_ttl = "10s"
         ] {
             assert!(matches!(AuthConfig::parse(&bad), Err(ConfigError::Invalid(_))), "{why}: {bad}");
         }
+    }
+
+    #[test]
+    fn github_login() {
+        let c = AuthConfig::parse("[github]\nclient_id = \"Iv1.abc\"\nsubject_prefix = \"gh-\"").expect("parse");
+        let g = c.github.expect("github");
+        assert_eq!((g.client_id.as_str(), g.subject_prefix.as_str()), ("Iv1.abc", "gh-"));
+        let both = "[github]\nclient_id = \"a\"\n[oidc]\nissuer = \"i\"\nclient_id = \"scn\"";
+        assert!(matches!(AuthConfig::parse(both), Err(ConfigError::Invalid(_))));
+        assert!(matches!(
+            AuthConfig::parse("[github]\nclient_id = \"a\"\nsecret = \"x\""),
+            Err(ConfigError::Syntax(_))
+        ));
     }
 
     #[test]

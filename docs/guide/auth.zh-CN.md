@@ -268,6 +268,26 @@ scion admin org ls
 scion admin org rm acme
 ```
 
+## GitHub 登录
+
+用户可以直接用 GitHub 账号登录。这是开源部署最省事的方式。
+
+1. **注册 OAuth app。** 在 GitHub 的 Settings → Developer settings → OAuth Apps → New OAuth App 里创建。主页和回调地址随便填，device flow 两个都用不到。勾选 **Enable Device Flow**。
+2. **配置服务端。** 填上这个 app 的 client id，并用签名密钥（`--jwt-key`）启动服务端：
+
+   ```toml
+   # auth.toml
+   [github]
+   client_id = "Ov23li…"
+   # subject_prefix = "gh-"                 # 可选：subject 变成 gh-LOGIN
+   # web_url = "https://github.example.com" # GitHub Enterprise
+   # api_url = "https://github.example.com/api/v3"
+   ```
+
+3. **登录。** 执行 `scn login http://scion.example.com:7080` 后会显示一个代码，到 github.com/login/device 输入即可。服务端用 GitHub 的令牌读出用户名，再签发自己的刷新令牌和访问令牌；GitHub 的令牌不保存。
+
+subject 就是 GitHub 用户名，所以策略、组织和个人命名空间（`user/LOGIN/…`）都直接用它。设置 `subject_prefix` 时，要让 subject 仍是合法的名字段（字母、数字、`-`、`_`、`.`），个人命名空间才能用。`[github]` 和 `[oidc]` 二选一。
+
 ## 接入 starhub-server
 
 starhub-server 的实际情况：

@@ -114,6 +114,46 @@ async fn token(State(st): State<St>, uri: Uri, Form(form): Form<HashMap<String, 
     Json(json!({"id_token": id_token, "access_token": "at"})).into_response()
 }
 
+async fn gh_device(State(st): State<St>, uri: Uri) -> Json<Value> {
+    count(&st, &uri);
+    Json(json!({
+        "device_code": "gh-dc",
+        "user_code": "WXYZ-1234",
+        "verification_uri": format!("{}/gh/login/device", base(&st)),
+        "interval": 1,
+        "expires_in": 900,
+    }))
+}
+
+/// GitHub answers 200 with an `error` field while the device flow is pending.
+async fn gh_token(State(st): State<St>, uri: Uri, Form(form): Form<HashMap<String, String>>) -> Json<Value> {
+    count(&st, &uri);
+    let dc = form.get("device_code").cloned().unwrap_or_default();
+    Json(match dc.as_str() {
+        "slow" => json!({"error": "slow_down"}),
+        "denied" => json!({"error": "access_denied"}),
+        "expired" => json!({"error": "expired_token"}),
+        "weird" => json!({"error": "incorrect_client_credentials"}),
+        "no-token" => json!({}),
+        "bad-token" => json!({"access_token": "bad"}),
+        "no-login" => json!({"access_token": "nologin"}),
+        dc if st.lock().is_ok_and(|s| s.approved.contains(dc)) => json!({"access_token": "gho_octocat"}),
+        _ => json!({"error": "authorization_pending"}),
+    })
+}
+
+async fn gh_user(State(st): State<St>, uri: Uri, headers: HeaderMap) -> Response {
+    count(&st, &uri);
+    if headers.get("user-agent").is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+        Some("Bearer gho_octocat") => Json(json!({"login": "octocat", "id": 1})).into_response(),
+        Some("Bearer nologin") => Json(json!({"id": 2})).into_response(),
+        _ => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
 async fn introspect(
     State(st): State<St>,
     uri: Uri,
@@ -168,6 +208,9 @@ impl FakeIdp {
             .route("/token", post(token))
             .route("/introspect", post(introspect))
             .route("/authz", post(authz))
+            .route("/gh/login/device/code", post(gh_device))
+            .route("/gh/login/oauth/access_token", post(gh_token))
+            .route("/gh/user", get(gh_user))
             .route("/status-500", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
             .route("/not-json", post(|| async { "plain text" }))
             .route(

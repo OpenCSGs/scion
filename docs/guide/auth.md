@@ -268,6 +268,26 @@ scion admin org ls
 scion admin org rm acme
 ```
 
+## GitHub login
+
+People can sign in with their GitHub accounts. This is the easiest setup for open-source deployments.
+
+1. **Register an OAuth app.** On GitHub, go to Settings → Developer settings → OAuth Apps → New OAuth App. Any homepage and callback URL will do, since the device flow uses neither. Tick **Enable Device Flow**.
+2. **Configure the server.** Give it the app's client id, and run it with a signing key (`--jwt-key`):
+
+   ```toml
+   # auth.toml
+   [github]
+   client_id = "Ov23li…"
+   # subject_prefix = "gh-"                 # optional: subjects become gh-LOGIN
+   # web_url = "https://github.example.com" # GitHub Enterprise
+   # api_url = "https://github.example.com/api/v3"
+   ```
+
+3. **Sign in.** `scn login http://scion.example.com:7080` shows a code to enter at github.com/login/device. The server reads the GitHub login with GitHub's token, then issues its own refresh and access tokens; GitHub's token is not kept.
+
+The subject is the GitHub login, so policies, organizations and personal namespaces (`user/LOGIN/…`) use it directly. A `subject_prefix` must keep the subject a valid name segment (letters, digits, `-`, `_`, `.`) for personal namespaces to work. `[github]` and `[oidc]` are alternatives: set one of them.
+
 ## Connecting starhub-server
 
 What starhub-server does:

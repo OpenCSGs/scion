@@ -297,10 +297,19 @@ enum Command {
     #[command(subcommand)]
     Import(ImportCmd),
     /// Log in to the server: in a browser (OIDC device flow) by default, or with an existing token (PAT).
+    #[command(
+        override_usage = "scn login [SERVER] [TOKEN]\n       scn login [SERVER] --with-token < FILE",
+        after_help = "Examples:\n  \
+            scn login http://scion.example.com:7080             # in a browser\n  \
+            scn login http://scion.example.com:7080 scn_pat_…   # with a token (either order)\n  \
+            scn login http://scion.example.com:7080 --with-token < token.txt"
+    )]
     Login {
-        /// The server, http(s)://host[:port]; instead of --endpoint.
-        server: Option<String>,
-        /// Log in with this token instead of a browser.
+        /// The server, http(s)://host[:port], and/or a token (scn_pat_…), in either order.
+        /// Without a server: --endpoint, then the working copy's.
+        #[arg(num_args = 0..=2, value_name = "SERVER | TOKEN")]
+        args: Vec<String>,
+        /// Log in with this token instead of a browser (same as giving it as an argument).
         #[arg(long, value_name = "TOKEN", conflicts_with = "with_token")]
         token: Option<String>,
         /// Read the token from standard input (keeps it out of the shell history).
@@ -458,6 +467,20 @@ enum ImportCmd {
 /// A git spelling accepted while people move over: says which scn command to use instead.
 fn transitional(git: &str, scn: &str) {
     eprintln!("hint: `scn {git}` is a transitional git-style spelling; use `scn {scn}` instead");
+}
+
+/// `scn login`'s arguments, in either order: the one that is an http(s) URL is the server, the
+/// other the token.
+fn login_args(args: &[String]) -> Result<(Option<&str>, Option<&str>), CliError> {
+    let is_url = |a: &str| a.starts_with("http://") || a.starts_with("https://");
+    let (urls, tokens): (Vec<&str>, Vec<&str>) = args.iter().map(String::as_str).partition(|a| is_url(a));
+    match (urls.as_slice(), tokens.as_slice()) {
+        ([_, _], _) => Err(CliError::Usage("give one server URL".into())),
+        (_, [_, _]) => Err(CliError::Usage(
+            "expected a server URL, http(s)://host[:port], and a token".into(),
+        )),
+        (u, t) => Ok((u.first().copied(), t.first().copied())),
+    }
 }
 
 /// `--path P` or git's `-- P`; history queries filter by one path.
@@ -887,13 +910,29 @@ async fn run(cli: Cli) -> ExitCode {
             Err(e) => fail(&e, json),
         },
         Command::Login {
-            server,
+            args,
             token,
             with_token,
         } => {
+            let (server, positional) = arg!(login_args(&args));
             if let Some(s) = server {
-                arg!(ctx.server_arg(&s));
+                arg!(ctx.server_arg(s));
             }
+            let token = match (token, positional) {
+                (Some(_), Some(_)) => {
+                    return fail(
+                        &CliError::Usage("give the token once: as an argument or with --token".into()),
+                        json,
+                    );
+                }
+                (_, Some(_)) if with_token => {
+                    return fail(
+                        &CliError::Usage("give the token as an argument or with --with-token, not both".into()),
+                        json,
+                    );
+                }
+                (t, p) => t.or_else(|| p.map(str::to_owned)),
+            };
             let token = if with_token {
                 let mut s = String::new();
                 match std::io::Read::read_to_string(&mut std::io::stdin(), &mut s) {
@@ -1109,13 +1148,25 @@ mod tests {
         assert!(matches!(
             cli.command,
             Command::Login {
-                server: None,
+                ref args,
                 token: Some(_),
                 with_token: false
-            }
+            } if args.is_empty()
         ));
         let cli = Cli::try_parse_from(["scn", "login", "https://h", "--token", "t"]).expect("parse");
-        assert!(matches!(cli.command, Command::Login { server: Some(ref s), .. } if s == "https://h"));
+        assert!(matches!(cli.command, Command::Login { ref args, .. } if args == &["https://h"]));
+        let cli = Cli::try_parse_from(["scn", "login", "scn_pat_x", "https://h"]).expect("parse");
+        assert!(matches!(cli.command, Command::Login { ref args, .. } if args.len() == 2));
+        assert!(Cli::try_parse_from(["scn", "login", "a", "b", "c"]).is_err());
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            login_args(&v(&["scn_pat_x", "https://h"])).ok(),
+            Some((Some("https://h"), Some("scn_pat_x")))
+        );
+        assert_eq!(login_args(&v(&["http://h"])).ok(), Some((Some("http://h"), None)));
+        assert_eq!(login_args(&v(&[])).ok(), Some((None, None)));
+        assert!(login_args(&v(&["http://a", "http://b"])).is_err());
+        assert!(login_args(&v(&["t1", "t2"])).is_err());
         for cmd in ["doctor", "logout", "whoami"] {
             assert!(Cli::try_parse_from(["scn", cmd, "http://h:1"]).is_ok(), "{cmd}");
         }

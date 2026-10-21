@@ -220,6 +220,7 @@ starhub 侧需要提供两个内部接口，都只是对现有逻辑的薄包装
 ```sh
 scn login                 # 在浏览器中登录（服务端配置了 [oidc]）
 scn login --token TOKEN   # 用 PAT 或外部令牌；--with-token 从标准输入读取
+scn login SERVER TOKEN     # 同上，并指定服务端（顺序任意）
 scn whoami
 scn logout
 ```

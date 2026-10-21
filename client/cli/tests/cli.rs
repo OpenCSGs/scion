@@ -970,6 +970,14 @@ async fn login_with_token_whoami_and_logout() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("logged out"));
     let out = run(&["logout"], None);
     assert!(String::from_utf8_lossy(&out.stdout).contains("no saved credentials"));
+    // The token as an argument, before or after the server
+    let out = run(&["login", &pat, &url, "--json"], None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = run(&["login", &url, &pat, "--json"], None);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(run(&["login", &pat, "--token", &pat], None).status.code(), Some(2));
+    assert_eq!(run(&["login", &pat, "--with-token"], Some("x")).status.code(), Some(2));
+    assert_eq!(run(&["login", "a", "b"], None).status.code(), Some(2));
     let out = run(&["login", "--token", " "], None);
     assert_eq!(out.status.code(), Some(2));
     // 服务端没有配置浏览器登录

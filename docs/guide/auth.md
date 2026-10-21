@@ -220,6 +220,7 @@ The regional cache (`scion cache`) and the local daemon do not parse tokens.
 ```sh
 scn login                 # log in in the browser (the server has [oidc] configured)
 scn login --token TOKEN   # a PAT or external token; --with-token reads it from standard input
+scn login SERVER TOKEN     # the same, with the server (either order)
 scn whoami
 scn logout
 ```

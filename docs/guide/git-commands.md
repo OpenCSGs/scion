@@ -21,6 +21,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git show [REV] [-- PATH]` | the same | |
 | `git diff`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH` |
 | `git blame PATH` | `scn blame PATH` | `scn blame REV:PATH` for a revision |
+| `git remote -v`, `git remote get-url origin`, `git remote set-url origin URL` | the same | One remote, `origin`; `set-url` checks the new URL has the working copy's commits |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`, `--prefix`, `-o FILE` |
 | Revisions: `HEAD`, `@`, `HEAD~1`, `main^2`, `A..B`, 40-digit SHAs | the same | Every commit has a git SHA |
 | `.gitignore` | `.gitignore` | `.scionignore` too |
@@ -60,4 +61,4 @@ Commands that read history also work outside a working copy with `--repo URL`, f
 
 ## Not available yet
 
-`revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote` and `fetch`. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).
+`revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote add` and `fetch`. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).

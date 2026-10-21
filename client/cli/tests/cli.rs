@@ -1247,6 +1247,56 @@ async fn repository_urls_name_the_server() {
         let out = scn_in(&root, &["cat", "README.md", "--repo", &format!("{u}/org/fork")]);
         assert_eq!(out.stdout, b"hello\n");
 
+        // scn remote: show the URL, point the working copy at the fork
+        let text = |args: &[&str]| String::from_utf8_lossy(&scn_in(&wc, args).stdout).into_owned();
+        assert_eq!(text(&["remote"]), "origin\n");
+        assert_eq!(
+            text(&["remote", "-v"]),
+            format!("origin\t{repo_url} (fetch)\norigin\t{repo_url} (push)\n")
+        );
+        assert_eq!(text(&["remote", "get-url", "origin"]), format!("{repo_url}\n"));
+        assert_eq!(scn_in(&wc, &["remote", "get-url", "upstream"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["remote", "set-url", "not-a-url"]).status.code(), Some(2));
+        assert_eq!(
+            scn_in(&wc, &["remote", "set-url", &u]).status.code(),
+            Some(2),
+            "names no repository"
+        );
+        json_of(&scn_in(&root, &["repo", "create", &format!("{u}/org/empty"), "--json"]));
+        let out = scn_in(&wc, &["remote", "set-url", &format!("{u}/org/empty")]);
+        assert_eq!(out.status.code(), Some(2), "{out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("does not have commit"),
+            "{out:?}"
+        );
+        assert_eq!(
+            scn_in(&wc, &["remote", "set-url", &format!("{u}/org/missing")])
+                .status
+                .code(),
+            Some(1)
+        );
+        assert_eq!(text(&["remote", "get-url"]), format!("{repo_url}\n"), "unchanged");
+        let fork_url = format!("{u}/org/fork");
+        let out = scn_in(&wc, &["remote", "set-url", "origin", &fork_url]);
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        let v = json_of(&scn_in(&wc, &["remote", "--json"]));
+        assert_eq!(
+            (v["repo"].as_str(), v["endpoint"].as_str()),
+            (Some("org/fork"), Some(u.as_str()))
+        );
+        std::fs::write(wc.join("fork.txt"), "f\n").expect("write");
+        json_of(&scn_in(
+            &wc,
+            &["commit", "-m", "fork", "--author", "Ada <ada@example.com>", "--json"],
+        ));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let out = scn_in(&root, &["cat", "fork.txt", "--repo", &fork_url]);
+        assert_eq!(out.stdout, b"f\n", "landed on the fork");
+        assert_eq!(
+            scn_in(&root, &["cat", "fork.txt", "--repo", &repo_url]).status.code(),
+            Some(1)
+        );
+
         // Malformed URLs are usage errors
         assert_eq!(scn_in(&root, &["clone", &format!("{u}/a?b")]).status.code(), Some(2));
         assert_eq!(scn_in(&root, &["clone", &u]).status.code(), Some(2));

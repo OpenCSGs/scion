@@ -11,6 +11,7 @@ mod history;
 mod login;
 mod output;
 mod progress;
+mod remote;
 mod repos;
 
 use std::io::Write;
@@ -63,6 +64,15 @@ enum Command {
         /// Can be repeated: `--sparse src --sparse docs`.
         #[arg(long, value_name = "DIRS", value_delimiter = ',', num_args = 1)]
         sparse: Option<Vec<String>>,
+    },
+    /// The working copy's server and repository, git-style: `scn remote [-v]`, `scn remote get-url`,
+    /// `scn remote set-url URL`. A working copy has one remote, named origin.
+    Remote {
+        /// Show the URL too.
+        #[arg(short, long)]
+        verbose: bool,
+        #[command(subcommand)]
+        cmd: Option<RemoteCmd>,
     },
     /// The directories of a sparse checkout.
     #[command(subcommand)]
@@ -313,6 +323,22 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum RemoteCmd {
+    /// Print the URL: http(s)://host[:port]/REPOSITORY.
+    GetUrl {
+        /// origin (the only remote).
+        name: Option<String>,
+    },
+    /// Point the working copy at a new address for its server, or at another repository with the
+    /// same commits (a fork, a migrated server). The new one is checked first.
+    SetUrl {
+        /// `[origin] URL`, as in git.
+        #[arg(num_args = 1..=2, required = true, value_name = "URL")]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum RepoCmd {
     /// Create a repository.
     Create {
@@ -528,6 +554,31 @@ async fn run(cli: Cli) -> ExitCode {
             )
         }
         Command::Sparse(cmd) => emit(commands::sparse(&ctx, cmd).await, json),
+        Command::Remote { verbose, cmd } => match cmd {
+            None => emit(
+                remote::show(
+                    &ctx,
+                    if verbose {
+                        remote::Show::Verbose
+                    } else {
+                        remote::Show::Name
+                    },
+                ),
+                json,
+            ),
+            Some(RemoteCmd::GetUrl { name }) => {
+                arg!(remote::check_name(name.as_deref()));
+                emit(remote::show(&ctx, remote::Show::Url), json)
+            }
+            Some(RemoteCmd::SetUrl { args }) => {
+                let (name, url) = match args.as_slice() {
+                    [name, url] => (Some(name.as_str()), url.as_str()),
+                    _ => (None, args[0].as_str()),
+                };
+                arg!(remote::check_name(name));
+                emit(remote::set_url(&ctx, url).await, json)
+            }
+        },
         Command::Repo(cmd) => match cmd {
             RepoCmd::Create {
                 name,

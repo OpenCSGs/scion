@@ -12,7 +12,7 @@
   - `scn commit` 在服务端创建一个提交，它还不在任何分支上。
   - `scn land` 发布它，相当于 `git push`。分支已经前进时，服务端会 rebase 这个提交，并且只合入一次。
 - **只有一个待合入的提交。** 工作副本最多有一个已提交、未合入的提交，没有本地分支，也没有本地提交栈。
-- **没有 remote。** 一个工作副本只属于一个服务端的一个仓库。
+- **只有一个 remote。** 一个工作副本只属于一个服务端的一个仓库，即它的 `origin`；`scn remote set-url` 可以换成新地址。
 
 ## 命令对照
 
@@ -27,6 +27,7 @@
 | `git commit --amend` | `scn commit --amend` | 只能修改待合入的提交 |
 | `git reset --soft HEAD~1` | `scn uncommit` | 撤掉待合入的提交，保留它的改动 |
 | `git restore PATH`、`git checkout -- PATH` | `scn restore PATH` | `.` 表示全部；新增的文件会保留（没有 `git clean`） |
+| `git remote -v`、`git remote set-url origin URL` | `scn remote -v`、`scn remote set-url URL` | 服务端的新地址，或有相同提交的另一个仓库（如 fork）；保存前会先检查 |
 | `git push` | `scn land` | 分支已经前进时由服务端 rebase |
 | `git pull --rebase` | `scn sync` | 移到分支最新提交，并 rebase 待合入的提交；没有单独的 `fetch` |
 | `git branch` | `scn branch`（或 `scn branch ls`） | |
@@ -91,5 +92,5 @@ hint: `scn push` is a transitional git-style spelling; use `scn land` instead
 
 - **工作副本**：检出旧版本、`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、部分提交（`add -p`）。
 - **查询**：附注标签、`grep`、`bisect`、`reflog`。
-- **协作**：`remote`、`fetch`。git 客户端目前还不能直接访问 Scion 仓库，这是[路线图](../design/roadmap.md)里的 git 网关。
+- **协作**：`remote add`、`fetch`。git 客户端目前还不能直接访问 Scion 仓库，这是[路线图](../design/roadmap.md)里的 git 网关。
 - **rebase 冲突**：停在冲突上的 sync 没有 `--abort`。它会撤掉待合入的提交，改动作为本地改动留在新的最新提交之上。

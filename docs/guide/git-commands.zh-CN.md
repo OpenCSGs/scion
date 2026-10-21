@@ -21,6 +21,7 @@
 | `git show [REV] [-- PATH]` | 相同 | |
 | `git diff`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH` |
 | `git blame PATH` | `scn blame PATH` | 指定版本用 `scn blame REV:PATH` |
+| `git remote -v`、`git remote get-url origin`、`git remote set-url origin URL` | 相同 | 只有一个 remote，`origin`；`set-url` 会先检查新地址上有工作副本所在的提交 |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`、`--prefix`、`-o FILE` |
 | 版本号：`HEAD`、`@`、`HEAD~1`、`main^2`、`A..B`、40 位 SHA | 相同 | 每个提交都有 git SHA |
 | `.gitignore` | `.gitignore` | 也支持 `.scionignore` |
@@ -60,4 +61,4 @@
 
 ## 尚未支持
 
-`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote` 和 `fetch`。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。
+`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote add` 和 `fetch`。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。

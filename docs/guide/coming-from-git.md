@@ -12,7 +12,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
   - `scn commit` creates a commit on the server that is not on any branch yet.
   - `scn land` publishes it, like `git push`. If the branch moved, the server rebases the commit, and it lands exactly once.
 - **One pending commit.** A working copy has at most one commit that is committed but not landed. There are no local branches or local commit stacks.
-- **No remotes.** A working copy belongs to one server and one repository.
+- **One remote.** A working copy belongs to one server and one repository, its `origin`; `scn remote set-url` points it at a new address.
 
 ## Command map
 
@@ -27,6 +27,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git commit --amend` | `scn commit --amend` | Only the pending commit |
 | `git reset --soft HEAD~1` | `scn uncommit` | Drops the pending commit and keeps its changes |
 | `git restore PATH`, `git checkout -- PATH` | `scn restore PATH` | `.` for everything; added files are kept (no `git clean`) |
+| `git remote -v`, `git remote set-url origin URL` | `scn remote -v`, `scn remote set-url URL` | The server's new address, or another repository with the same commits (a fork); checked before it is saved |
 | `git push` | `scn land` | The server rebases when the branch moved |
 | `git pull --rebase` | `scn sync` | Moves to the branch tip and rebases the pending commit; no separate `fetch` |
 | `git branch` | `scn branch` (or `scn branch ls`) | |
@@ -91,5 +92,5 @@ Suffixes combine as in git, for example `main~2^2`. A branch whose name literall
 
 - **Working copy**: checking out an old revision, `revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
 - **Queries**: annotated tags, `grep`, `bisect`, `reflog`.
-- **Collaboration**: `remote`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
+- **Collaboration**: `remote add`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
 - **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. It drops the pending commit, and its changes stay as local changes on top of the new tip.

@@ -450,6 +450,15 @@ impl WorkingCopy {
         &self.state
     }
 
+    /// Points the working copy at another server address or repository (`scn remote set-url`).
+    /// The caller checks that the new one has the commits the working copy is on.
+    pub fn set_remote(&mut self, endpoint: &str, repo: &str) -> Result<()> {
+        let _lock = self.paths.lock()?;
+        self.state.endpoint = endpoint.to_owned();
+        self.state.repo = repo.to_owned();
+        self.paths.save_state(&self.state)
+    }
+
     /// 稀疏检出的范围。
     pub fn sparse(&self) -> Result<Sparse> {
         Sparse::from_state(self.state.sparse.as_deref())

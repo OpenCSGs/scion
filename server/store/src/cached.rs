@@ -14,9 +14,9 @@ use moka::sync::Cache;
 use scion_object::ObjectId;
 
 use crate::{
-    ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation, PackedObject,
-    PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter, RepoInfo,
-    RepoPatch, Result, TokenRecord,
+    ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, OrgMember, OrgRecord,
+    PackLocation, PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect,
+    RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord,
 };
 
 /// 提交记录在缓存中的最长保留时间。
@@ -235,6 +235,43 @@ impl MetaStore for CachedMeta {
         self.inner.delete_token(id).await
     }
 
+    // Memberships change and are cached by the authorization layer, not here
+    async fn create_org(&self, org: &OrgRecord) -> Result<()> {
+        self.inner.create_org(org).await
+    }
+
+    async fn get_org(&self, name: &str) -> Result<Option<OrgRecord>> {
+        self.inner.get_org(name).await
+    }
+
+    async fn list_orgs(&self) -> Result<Vec<OrgRecord>> {
+        self.inner.list_orgs().await
+    }
+
+    async fn set_org_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        self.inner.set_org_visibility(name, visibility).await
+    }
+
+    async fn delete_org(&self, name: &str) -> Result<bool> {
+        self.inner.delete_org(name).await
+    }
+
+    async fn put_org_member(&self, member: &OrgMember) -> Result<()> {
+        self.inner.put_org_member(member).await
+    }
+
+    async fn delete_org_member(&self, org: &str, subject: &str) -> Result<bool> {
+        self.inner.delete_org_member(org, subject).await
+    }
+
+    async fn list_org_members(&self, org: &str) -> Result<Vec<OrgMember>> {
+        self.inner.list_org_members(org).await
+    }
+
+    async fn list_memberships(&self, subject: &str) -> Result<Vec<OrgMember>> {
+        self.inner.list_memberships(subject).await
+    }
+
     async fn get_setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.inner.get_setting(key).await
     }
@@ -413,6 +450,7 @@ mod tests {
     async fn conformance_leases() {
         testsuite::leases(&cached()).await;
         testsuite::tokens_and_settings(&cached()).await;
+        testsuite::orgs_and_members(&cached()).await;
         testsuite::redactions(&cached()).await;
         testsuite::repo_admin(&cached()).await;
         testsuite::ref_events(&cached()).await;

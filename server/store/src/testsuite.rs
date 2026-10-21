@@ -9,8 +9,9 @@ use bytes::Bytes;
 use scion_object::{ObjectId, ObjectKind};
 
 use crate::{
-    BlobStore, ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
-    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefExpect, RefState,
+    BlobStore, ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, OrgMember,
+    OrgRecord, PackLocation, PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefExpect,
+    RefState,
 };
 
 fn cs(n: u8) -> ObjectId {
@@ -1020,6 +1021,82 @@ fn token(id: &str, subject: &str, created_at_ms: i64) -> crate::TokenRecord {
 }
 
 /// 令牌与全局设置。
+/// Organizations and memberships.
+pub async fn orgs_and_members<S: MetaStore + ?Sized>(s: &S) {
+    let org = |name: &str| OrgRecord {
+        name: name.into(),
+        visibility: "private".into(),
+        created_at_ms: 10,
+        created_by: "root".into(),
+    };
+    let member = |org: &str, subject: &str, role: &str| OrgMember {
+        org: org.into(),
+        subject: subject.into(),
+        role: role.into(),
+        added_at_ms: 20,
+        added_by: "root".into(),
+    };
+    s.create_org(&org("opencsg")).await.expect("create");
+    s.create_org(&org("acme")).await.expect("create");
+    assert_eq!(
+        s.create_org(&org("acme")).await,
+        Err(Error::OrgAlreadyExists("acme".into()))
+    );
+    assert_eq!(s.get_org("opencsg").await.expect("get"), Some(org("opencsg")));
+    assert_eq!(s.get_org("nope").await.expect("get"), None);
+    let names: Vec<String> = s.list_orgs().await.expect("list").into_iter().map(|o| o.name).collect();
+    assert_eq!(names, ["acme", "opencsg"]);
+    assert!(s.set_org_visibility("acme", "internal").await.expect("set"));
+    assert!(!s.set_org_visibility("nope", "internal").await.expect("set"));
+    assert_eq!(
+        s.get_org("acme").await.expect("get").map(|o| o.visibility).as_deref(),
+        Some("internal")
+    );
+
+    s.put_org_member(&member("opencsg", "bob", "developer"))
+        .await
+        .expect("add");
+    s.put_org_member(&member("opencsg", "alice", "owner"))
+        .await
+        .expect("add");
+    s.put_org_member(&member("acme", "alice", "reporter"))
+        .await
+        .expect("add");
+    assert_eq!(
+        s.put_org_member(&member("nope", "alice", "owner")).await,
+        Err(Error::OrgNotFound("nope".into()))
+    );
+    // A role change keeps when and by whom the member was added
+    let mut promoted = member("opencsg", "bob", "maintainer");
+    promoted.added_at_ms = 99;
+    promoted.added_by = "alice".into();
+    s.put_org_member(&promoted).await.expect("role");
+    let members = s.list_org_members("opencsg").await.expect("members");
+    assert_eq!(
+        members,
+        [
+            member("opencsg", "alice", "owner"),
+            member("opencsg", "bob", "maintainer")
+        ]
+    );
+    let mine = s.list_memberships("alice").await.expect("memberships");
+    assert_eq!(
+        mine,
+        [member("acme", "alice", "reporter"), member("opencsg", "alice", "owner")]
+    );
+    assert!(s.delete_org_member("opencsg", "bob").await.expect("remove"));
+    assert!(!s.delete_org_member("opencsg", "bob").await.expect("remove"));
+    assert!(s.delete_org("acme").await.expect("delete"));
+    assert!(!s.delete_org("acme").await.expect("delete"));
+    assert_eq!(
+        s.list_memberships("alice").await.expect("memberships"),
+        [member("opencsg", "alice", "owner")],
+        "memberships go with the organization"
+    );
+    s.create_org(&org("acme")).await.expect("the name can be used again");
+    assert!(s.list_org_members("acme").await.expect("members").is_empty());
+}
+
 pub async fn tokens_and_settings<S: MetaStore + ?Sized>(s: &S) {
     let (t1, t2, t3) = (
         token("t1", "alice", 10),

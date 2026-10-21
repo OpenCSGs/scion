@@ -10,9 +10,9 @@ use scion_object::ObjectId;
 use crate::error::{Error, Result};
 use crate::repo::validate_repo_name;
 use crate::{
-    BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
-    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter,
-    RepoInfo, RepoPatch, TokenRecord, path_within, prefix_upper_bound,
+    BlobStore, ChangesetRecord, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, OrgMember, OrgRecord,
+    PackLocation, PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect,
+    RefState, RepoFilter, RepoInfo, RepoPatch, TokenRecord, path_within, prefix_upper_bound,
 };
 
 #[derive(Clone)]
@@ -56,6 +56,9 @@ struct Inner {
     leases: HashMap<String, Lease>,
     tokens: Vec<TokenRecord>,
     settings: HashMap<String, Vec<u8>>,
+    orgs: BTreeMap<String, OrgRecord>,
+    /// (organization, subject) to the membership.
+    org_members: BTreeMap<(String, String), OrgMember>,
     redactions: BTreeMap<(String, ObjectId), Redaction>,
     redaction_seq: u64,
     ref_events: std::collections::VecDeque<RefEvent>,
@@ -449,6 +452,83 @@ impl MetaStore for MemStore {
         Ok(inner.tokens.len() != before)
     }
 
+    async fn create_org(&self, org: &OrgRecord) -> Result<()> {
+        let mut inner = self.write()?;
+        if inner.orgs.contains_key(&org.name) {
+            return Err(Error::OrgAlreadyExists(org.name.clone()));
+        }
+        inner.orgs.insert(org.name.clone(), org.clone());
+        Ok(())
+    }
+
+    async fn get_org(&self, name: &str) -> Result<Option<OrgRecord>> {
+        Ok(self.read()?.orgs.get(name).cloned())
+    }
+
+    async fn list_orgs(&self) -> Result<Vec<OrgRecord>> {
+        Ok(self.read()?.orgs.values().cloned().collect())
+    }
+
+    async fn set_org_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        Ok(match self.write()?.orgs.get_mut(name) {
+            Some(o) => {
+                visibility.clone_into(&mut o.visibility);
+                true
+            }
+            None => false,
+        })
+    }
+
+    async fn delete_org(&self, name: &str) -> Result<bool> {
+        let mut inner = self.write()?;
+        inner.org_members.retain(|(org, _), _| org != name);
+        Ok(inner.orgs.remove(name).is_some())
+    }
+
+    async fn put_org_member(&self, m: &OrgMember) -> Result<()> {
+        let mut inner = self.write()?;
+        if !inner.orgs.contains_key(&m.org) {
+            return Err(Error::OrgNotFound(m.org.clone()));
+        }
+        // A role change keeps when and by whom the member was added
+        let key = (m.org.clone(), m.subject.clone());
+        match inner.org_members.get_mut(&key) {
+            Some(cur) => m.role.clone_into(&mut cur.role),
+            None => {
+                inner.org_members.insert(key, m.clone());
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_org_member(&self, org: &str, subject: &str) -> Result<bool> {
+        Ok(self
+            .write()?
+            .org_members
+            .remove(&(org.to_owned(), subject.to_owned()))
+            .is_some())
+    }
+
+    async fn list_org_members(&self, org: &str) -> Result<Vec<OrgMember>> {
+        Ok(self
+            .read()?
+            .org_members
+            .values()
+            .filter(|m| m.org == org)
+            .cloned()
+            .collect())
+    }
+
+    async fn list_memberships(&self, subject: &str) -> Result<Vec<OrgMember>> {
+        Ok(self
+            .read()?
+            .org_members
+            .values()
+            .filter(|m| m.subject == subject)
+            .cloned()
+            .collect())
+    }
+
     async fn get_setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.read()?.settings.get(key).cloned())
     }
@@ -800,6 +880,7 @@ mod tests {
     async fn conformance_leases() {
         testsuite::leases(&MemStore::new()).await;
         testsuite::tokens_and_settings(&MemStore::new()).await;
+        testsuite::orgs_and_members(&MemStore::new()).await;
         testsuite::redactions(&MemStore::new()).await;
         testsuite::repo_admin(&MemStore::new()).await;
         testsuite::ref_events(&MemStore::new()).await;

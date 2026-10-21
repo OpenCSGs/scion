@@ -23,6 +23,10 @@ pub enum Error {
         id: scion_object::ObjectId,
         redaction_id: String,
     },
+    #[error("organization {0:?} not found")]
+    OrgNotFound(String),
+    #[error("organization {0:?} already exists")]
+    OrgAlreadyExists(String),
     /// 后端故障（数据库、网络等），通常可重试。
     #[error("storage backend error: {0}")]
     Backend(String),

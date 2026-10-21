@@ -155,6 +155,28 @@ pub(crate) fn redaction_from_row(row: RedactionRow) -> Result<scion_store::Redac
 }
 
 /// tokens 表的一行。
+pub(crate) type OrgRow = (String, String, i64, String);
+pub(crate) type OrgMemberRow = (String, String, String, i64, String);
+
+pub(crate) fn org_from_row((name, visibility, created_at_ms, created_by): OrgRow) -> scion_store::OrgRecord {
+    scion_store::OrgRecord {
+        name,
+        visibility,
+        created_at_ms,
+        created_by,
+    }
+}
+
+pub(crate) fn member_from_row((org, subject, role, added_at_ms, added_by): OrgMemberRow) -> scion_store::OrgMember {
+    scion_store::OrgMember {
+        org,
+        subject,
+        role,
+        added_at_ms,
+        added_by,
+    }
+}
+
 pub(crate) type TokenRow = (String, Vec<u8>, String, String, String, String, i64, Option<i64>);
 
 /// 组名按行保存（组名不能包含换行）。

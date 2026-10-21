@@ -7,9 +7,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use scion_object::ObjectId;
 use scion_store::{
-    ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, PackLocation,
-    PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect, RefState, RepoFilter,
-    RepoInfo, RepoPatch, Result, TokenRecord, prefix_upper_bound, validate_repo_name,
+    ChangesetRecord, Error, IdempotencyRecord, IndexedObject, LandedChange, Lease, MetaStore, OrgMember, OrgRecord,
+    PackLocation, PackedObject, PathChange, PathHistoryEntry, Redaction, RedactionFilter, RefEvent, RefExpect,
+    RefState, RepoFilter, RepoInfo, RepoPatch, Result, TokenRecord, prefix_upper_bound, validate_repo_name,
 };
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
 
@@ -411,6 +411,116 @@ impl MetaStore for SqliteMetaStore {
             .await
             .map_err(|e| backend("delete token", e))?;
         Ok(r.rows_affected() > 0)
+    }
+
+    async fn create_org(&self, org: &OrgRecord) -> Result<()> {
+        let r = sqlx::query(
+            "INSERT INTO orgs (name, visibility, created_at_ms, created_by) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(&org.name)
+        .bind(&org.visibility)
+        .bind(org.created_at_ms)
+        .bind(&org.created_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| backend("create org", e))?;
+        if r.rows_affected() == 0 {
+            return Err(scion_store::Error::OrgAlreadyExists(org.name.clone()));
+        }
+        Ok(())
+    }
+
+    async fn get_org(&self, name: &str) -> Result<Option<OrgRecord>> {
+        let row: Option<crate::common::OrgRow> =
+            sqlx::query_as("SELECT name, visibility, created_at_ms, created_by FROM orgs WHERE name = ?1")
+                .bind(name)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| backend("get org", e))?;
+        Ok(row.map(crate::common::org_from_row))
+    }
+
+    async fn list_orgs(&self) -> Result<Vec<OrgRecord>> {
+        let rows: Vec<crate::common::OrgRow> =
+            sqlx::query_as("SELECT name, visibility, created_at_ms, created_by FROM orgs ORDER BY name")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| backend("list orgs", e))?;
+        Ok(rows.into_iter().map(crate::common::org_from_row).collect())
+    }
+
+    async fn set_org_visibility(&self, name: &str, visibility: &str) -> Result<bool> {
+        let r = sqlx::query("UPDATE orgs SET visibility = ?1 WHERE name = ?2")
+            .bind(visibility)
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("set org visibility", e))?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn delete_org(&self, name: &str) -> Result<bool> {
+        // Members go with the organization (ON DELETE CASCADE)
+        let r = sqlx::query("DELETE FROM orgs WHERE name = ?1")
+            .bind(name)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("delete org", e))?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn put_org_member(&self, m: &OrgMember) -> Result<()> {
+        // A role change keeps when and by whom the member was added
+        let r = sqlx::query(
+            "INSERT INTO org_members (org, subject, role, added_at_ms, added_by) \
+             SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM orgs WHERE name = ?1) \
+             ON CONFLICT (org, subject) DO UPDATE SET role = excluded.role",
+        )
+        .bind(&m.org)
+        .bind(&m.subject)
+        .bind(&m.role)
+        .bind(m.added_at_ms)
+        .bind(&m.added_by)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| backend("put org member", e))?;
+        if r.rows_affected() == 0 {
+            return Err(scion_store::Error::OrgNotFound(m.org.clone()));
+        }
+        Ok(())
+    }
+
+    async fn delete_org_member(&self, org: &str, subject: &str) -> Result<bool> {
+        let r = sqlx::query("DELETE FROM org_members WHERE org = ?1 AND subject = ?2")
+            .bind(org)
+            .bind(subject)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| backend("delete org member", e))?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    async fn list_org_members(&self, org: &str) -> Result<Vec<OrgMember>> {
+        let rows: Vec<crate::common::OrgMemberRow> = sqlx::query_as(
+            "SELECT org, subject, role, added_at_ms, added_by FROM org_members WHERE org = ?1 ORDER BY subject",
+        )
+        .bind(org)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| backend("list org members", e))?;
+        Ok(rows.into_iter().map(crate::common::member_from_row).collect())
+    }
+
+    async fn list_memberships(&self, subject: &str) -> Result<Vec<OrgMember>> {
+        let rows: Vec<crate::common::OrgMemberRow> = sqlx::query_as(
+            "SELECT org, subject, role, added_at_ms, added_by FROM org_members WHERE subject = ?1 ORDER BY org",
+        )
+        .bind(subject)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| backend("list memberships", e))?;
+        Ok(rows.into_iter().map(crate::common::member_from_row).collect())
     }
 
     async fn get_setting(&self, key: &str) -> Result<Option<Vec<u8>>> {
@@ -1485,6 +1595,7 @@ mod tests {
         let (_dir, s) = fresh().await;
         testsuite::leases(&s).await;
         testsuite::tokens_and_settings(&s).await;
+        testsuite::orgs_and_members(&s).await;
         testsuite::redactions(&s).await;
         testsuite::repo_admin(&s).await;
         testsuite::ref_events(&s).await;

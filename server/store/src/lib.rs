@@ -314,6 +314,51 @@ pub trait MetaStore: Send + Sync + 'static {
         Err(unsupported("tokens"))
     }
 
+    /// Creates an organization; [`Error::OrgAlreadyExists`] if the name is taken.
+    async fn create_org(&self, _org: &OrgRecord) -> Result<()> {
+        Err(unsupported("organizations"))
+    }
+
+    async fn get_org(&self, _name: &str) -> Result<Option<OrgRecord>> {
+        Err(unsupported("organizations"))
+    }
+
+    /// Every organization, by name.
+    async fn list_orgs(&self) -> Result<Vec<OrgRecord>> {
+        Err(unsupported("organizations"))
+    }
+
+    /// Changes an organization's visibility; false if there is no such organization.
+    async fn set_org_visibility(&self, _name: &str, _visibility: &str) -> Result<bool> {
+        Err(unsupported("organizations"))
+    }
+
+    /// Deletes an organization and its memberships; false if there was none.
+    async fn delete_org(&self, _name: &str) -> Result<bool> {
+        Err(unsupported("organizations"))
+    }
+
+    /// Adds a member, or changes the role of an existing one; [`Error::OrgNotFound`] if the
+    /// organization does not exist.
+    async fn put_org_member(&self, _member: &OrgMember) -> Result<()> {
+        Err(unsupported("organizations"))
+    }
+
+    /// Removes a member; false if they were not one.
+    async fn delete_org_member(&self, _org: &str, _subject: &str) -> Result<bool> {
+        Err(unsupported("organizations"))
+    }
+
+    /// An organization's members, by subject.
+    async fn list_org_members(&self, _org: &str) -> Result<Vec<OrgMember>> {
+        Err(unsupported("organizations"))
+    }
+
+    /// The organizations `subject` belongs to, by organization.
+    async fn list_memberships(&self, _subject: &str) -> Result<Vec<OrgMember>> {
+        Err(unsupported("organizations"))
+    }
+
     /// 读取全局设置（例如访问控制策略）。
     async fn get_setting(&self, _key: &str) -> Result<Option<Vec<u8>>> {
         Err(unsupported("settings"))
@@ -512,6 +557,26 @@ pub struct TokenRecord {
     pub description: String,
     pub created_at_ms: i64,
     pub expires_at_ms: Option<i64>,
+}
+
+/// An organization (docs/design/authorization.md): it owns the repositories named `NAME/…`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgRecord {
+    pub name: String,
+    /// `private` (only members read) or `internal` (every signed-in user reads).
+    pub visibility: String,
+    pub created_at_ms: i64,
+    pub created_by: String,
+}
+
+/// A member of an organization: `owner`, `maintainer`, `developer` or `reporter`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrgMember {
+    pub org: String,
+    pub subject: String,
+    pub role: String,
+    pub added_at_ms: i64,
+    pub added_by: String,
 }
 
 /// 已创建 changeset 的元数据。

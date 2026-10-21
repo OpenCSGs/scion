@@ -292,6 +292,8 @@ pub fn from_store(err: scion_store::Error) -> Status {
             ]),
         ),
         E::Redacted { id, redaction_id } => redacted(&[(id, redaction_id)]),
+        E::OrgNotFound(org) => Status::not_found(format!("organization {org:?} not found")),
+        E::OrgAlreadyExists(org) => Status::already_exists(format!("organization {org:?} already exists")),
         E::Backend(msg) => {
             tracing::error!(error = %msg, "storage backend error");
             Status::unavailable("storage backend unavailable")

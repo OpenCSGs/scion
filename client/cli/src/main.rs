@@ -18,7 +18,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{FromArgMatches, Parser, Subcommand};
 
 use crate::commands::Ctx;
 use crate::history::DiffOut;
@@ -1131,7 +1131,62 @@ async fn run(cli: Cli) -> ExitCode {
 #[tokio::main]
 async fn main() -> ExitCode {
     // clap 对用法错误以退出码 2 结束，符合约定
-    run(Cli::parse()).await
+    let matches = command().get_matches();
+    run(Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())).await
+}
+
+/// `scn --help` lists the commands by what they are for, like `git --help`.
+const COMMANDS: &str = "\
+Start a working copy:
+  clone      Check out a repository into a new directory
+  sparse     Choose the directories a sparse checkout has
+
+Work on a change:
+  status     Show local changes
+  diff       Show changes: local, of a commit, or between two revisions
+  commit     Commit the local changes (published by land)
+  uncommit   Drop the pending commit, keeping its changes
+  restore    Discard local changes to files
+  resolve    Mark conflicts resolved, or take one side
+
+Share and update:
+  land       Land the pending commit on the branch (git push)
+  sync       Update to the branch tip, rebasing a pending commit (git pull)
+  remote     Show or change the working copy's server and repository
+
+Branches and history:
+  branch     List, create or delete branches
+  tag        List, create or delete tags
+  switch     Move the working copy to another branch
+  merge      Merge another branch into this one
+  log        Show the history
+  show       Show a commit and its changes
+  blame      Show the commit that last changed each line
+
+Read without a working copy:
+  cat        Print a file at a revision
+  ls         List a directory at a revision
+  archive    Download a revision or directory as tar.gz, zip or tar
+
+Repositories, accounts and setup:
+  repo       Create, list, change, delete, restore or fork repositories
+  import     Import the history of a git repository
+  login      Log in, in a browser or with a token
+  logout     Delete the saved credentials
+  whoami     Show who you are logged in as
+  config     Set the default commit author
+  doctor     Check the connection to a server
+  daemon     The local cache daemon
+  version    Print the client and protocol versions
+
+git spellings (add, rm, mv, push, pull, checkout, reset, rebase) work too and say what to use instead.
+`scn help COMMAND` or `scn COMMAND --help` shows a command's options and examples.";
+
+fn command() -> clap::Command {
+    use clap::CommandFactory;
+    Cli::command().help_template(format!(
+        "{{about-with-newline}}\n{{usage-heading}} {{usage}}\n\n{COMMANDS}\n\nOptions:\n{{options}}"
+    ))
 }
 
 #[cfg(test)]
@@ -1142,6 +1197,27 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn help_lists_every_command_once() {
+        let mut listed: Vec<&str> = COMMANDS
+            .lines()
+            .filter_map(|l| l.strip_prefix("  ")?.split_whitespace().next())
+            .collect();
+        let mut visible: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        listed.sort_unstable();
+        visible.sort_unstable();
+        assert_eq!(listed, visible);
+        let help = command().render_help().to_string();
+        assert!(
+            help.contains("Share and update:") && help.contains("--endpoint <URL>"),
+            "{help}"
+        );
     }
 
     #[test]

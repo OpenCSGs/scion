@@ -8,18 +8,18 @@
 
 | git | scn | 说明 |
 |---|---|---|
-| `git clone URL [DIR]` | `scn clone URL [DIR]` | `URL` 为 `http(s)://host[:port]/REPO`；用 `--ref B` 代替 `-b B`。进入克隆目录后，所有命令都不用再写地址 |
+| `git clone URL [DIR] [-b B]` | 相同 | `URL` 为 `http(s)://host[:port]/REPO`；`-b`、`--branch`、`--ref` 都可以指定分支。进入克隆目录后，所有命令都不用再写地址 |
 | `git status` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU` |
-| `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用） |
+| `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用）；多个 `-m` 成为多段说明 |
 | `git commit --amend` | `scn commit --amend` | |
 | `git restore PATH` | `scn restore PATH` | |
 | `git switch B`、`git switch -c B` | `scn switch B`、`scn switch -c B` | |
 | `git merge B`、`git merge --abort` | `scn merge B`、`scn merge --abort` | 之后用 `scn land` 发布 |
 | `git branch`、`git branch NAME [REV]`、`git branch -d NAME` | `scn branch`、`scn branch NAME [REV]`、`scn branch -d NAME` | 分支在服务端 |
 | `git tag`、`git tag NAME [REV]`、`git tag -d NAME` | `scn tag`、`scn tag NAME [REV]`、`scn tag -d NAME` | 轻量标签 |
-| `git log [REV] [-n N] [--oneline] [-- PATH]` | 相同 | |
+| `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | 相同 | |
 | `git show [REV] [-- PATH]` | 相同 | |
-| `git diff`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH` |
+| `git diff [--cached]`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH`；没有暂存区，`--cached` / `--staged` 显示同样的本地改动 |
 | `git blame PATH` | `scn blame PATH` | 指定版本用 `scn blame REV:PATH` |
 | `git remote -v`、`git remote get-url origin`、`git remote set-url origin URL` | 相同 | 只有一个 remote，`origin`；`set-url` 会先检查新地址上有工作副本所在的提交 |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`、`--prefix`、`-o FILE` |

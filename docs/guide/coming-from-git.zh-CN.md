@@ -19,7 +19,7 @@
 | git | scn | 说明 |
 |---|---|---|
 | `git init` | `scn repo create NAME` | 仓库在服务端 |
-| `git clone URL [DIR]` | `scn clone URL [DIR] [--ref B]`，或 `scn --endpoint SERVER clone REPO` | `URL` 为 `http(s)://host[:port]/REPO`。下载快照，不下载历史；进入工作副本后命令不用再写地址 |
+| `git clone URL [DIR]` | `scn clone URL [DIR] [-b B]`，或 `scn --endpoint SERVER clone REPO` | `URL` 为 `http(s)://host[:port]/REPO`。下载快照，不下载历史；进入工作副本后命令不用再写地址 |
 | `git clone --sparse` + `git sparse-checkout set` | `scn clone REPO --sparse src --sparse docs`，`scn sparse set/add/rm/disable` | 按目录；也可以写 `--sparse a,b` |
 | `git status` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU` |
 | `git add`、`git rm`、`git mv` | 不需要 | 直接改文件 |

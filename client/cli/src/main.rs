@@ -69,8 +69,14 @@ enum Command {
         repo: String,
         /// The directory to create (default: the repository name's last part).
         dir: Option<PathBuf>,
-        /// The branch to check out.
-        #[arg(long = "ref", value_name = "BRANCH", default_value = "main")]
+        /// The branch to check out (git's `-b` / `--branch` work too).
+        #[arg(
+            long = "ref",
+            short = 'b',
+            visible_alias = "branch",
+            value_name = "BRANCH",
+            default_value = "main"
+        )]
         reference: String,
         /// Sparse checkout: only these directories (comma-separated) and the files at the root.
         /// Can be repeated: `--sparse src --sparse docs`.
@@ -141,9 +147,10 @@ enum Command {
         scn commit                         # finish a sync or merge that stopped on conflicts")]
     Commit {
         /// Required, except with --amend (keeps the old message) or when finishing a sync or
-        /// merge that stopped on conflicts (keeps that commit's message).
+        /// merge that stopped on conflicts (keeps that commit's message). Several -m become
+        /// separate paragraphs, as in git.
         #[arg(short, long)]
-        message: Option<String>,
+        message: Vec<String>,
         /// Replace the pending (not yet landed) commit, adding the current local changes.
         #[arg(long)]
         amend: bool,
@@ -173,6 +180,9 @@ enum Command {
         /// Abandon a merge that stopped on conflicts.
         #[arg(long, conflicts_with_all = ["message", "author"])]
         abort: bool,
+        /// Accepted for git compatibility: scn always makes a merge commit.
+        #[arg(long = "no-ff")]
+        no_ff: bool,
         /// git's `merge --continue`: transitional spelling of `scn commit`.
         #[arg(long = "continue", hide = true, conflicts_with = "abort")]
         cont: bool,
@@ -364,6 +374,10 @@ enum Command {
         /// Only the changed files' names and status (A / M / D).
         #[arg(long, conflicts_with = "name_only")]
         name_status: bool,
+        /// Accepted for git compatibility: scn has no staging area, so every local change is
+        /// staged and plain `scn diff` shows them all.
+        #[arg(long, visible_alias = "staged")]
+        cached: bool,
         /// `-- PATH`, as in git.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
@@ -600,6 +614,46 @@ fn transitional(git: &str, scn: &str) {
     eprintln!("hint: `scn {git}` is a transitional git-style spelling; use `scn {scn}` instead");
 }
 
+/// Several `-m` make one message of paragraphs, as in git.
+fn paragraphs(messages: &[String]) -> Option<String> {
+    (!messages.is_empty()).then(|| messages.join("\n\n"))
+}
+
+/// git's `log -5` is `log -n 5`.
+fn git_count_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let args: Vec<std::ffi::OsString> = args.into_iter().collect();
+    // The subcommand: the first word that is not an option or a global option's value
+    let mut i = 1;
+    while let Some(a) = args.get(i).and_then(|a| a.to_str()) {
+        match a {
+            "--endpoint" | "--repo" => i += 2,
+            a if a.starts_with('-') => i += 1,
+            _ => break,
+        }
+    }
+    if args.get(i).and_then(|a| a.to_str()) != Some("log") {
+        return args;
+    }
+    let mut out: Vec<std::ffi::OsString> = Vec::with_capacity(args.len() + 1);
+    let mut rest = args.into_iter();
+    out.extend(rest.by_ref().take(i + 1));
+    for a in rest.by_ref() {
+        match a.to_str() {
+            Some("--") => {
+                out.push(a);
+                break;
+            }
+            Some(s) if s.len() > 1 && s.starts_with('-') && s[1..].bytes().all(|b| b.is_ascii_digit()) => {
+                out.push("-n".into());
+                out.push(s[1..].into());
+            }
+            _ => out.push(a),
+        }
+    }
+    out.extend(rest);
+    out
+}
+
 /// `scn login`'s arguments, in either order: the one that is an http(s) URL is the server, the
 /// other the token.
 fn login_args(args: &[String]) -> Result<(Option<&str>, Option<&str>), CliError> {
@@ -803,9 +857,12 @@ async fn run(cli: Cli) -> ExitCode {
             amend: true,
             author,
             ..
-        } => emit(commands::amend(&ctx, message.as_deref(), author.as_deref()).await, json),
+        } => emit(
+            commands::amend(&ctx, paragraphs(&message).as_deref(), author.as_deref()).await,
+            json,
+        ),
         Command::Commit { message, author, .. } => emit(
-            commands::commit(&ctx, message.as_deref(), author.as_deref()).await,
+            commands::commit(&ctx, paragraphs(&message).as_deref(), author.as_deref()).await,
             json,
         ),
         Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
@@ -1031,6 +1088,7 @@ async fn run(cli: Cli) -> ExitCode {
             name_only,
             name_status,
             paths,
+            ..
         } => match one_path(path, paths) {
             Ok(path) => emit(
                 history::diff(&ctx, &revisions, path.as_deref(), name_only || name_status)
@@ -1131,7 +1189,7 @@ async fn run(cli: Cli) -> ExitCode {
 #[tokio::main]
 async fn main() -> ExitCode {
     // clap 对用法错误以退出码 2 结束，符合约定
-    let matches = command().get_matches();
+    let matches = command().get_matches_from(git_count_args(std::env::args_os()));
     run(Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit())).await
 }
 
@@ -1197,6 +1255,35 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn git_spellings_of_options() {
+        let os = |a: &[&str]| a.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            git_count_args(os(&["scn", "log", "-5", "main"])),
+            os(&["scn", "log", "-n", "5", "main"])
+        );
+        assert_eq!(
+            git_count_args(os(&["scn", "--repo", "log", "log", "-3", "--", "-4"])),
+            os(&["scn", "--repo", "log", "log", "-n", "3", "--", "-4"])
+        );
+        assert_eq!(git_count_args(os(&["scn", "diff", "-5"])), os(&["scn", "diff", "-5"]));
+        assert_eq!(git_count_args(os(&["scn", "log", "-"])), os(&["scn", "log", "-"]));
+        assert_eq!(git_count_args(os(&["scn", "-q"])), os(&["scn", "-q"]));
+        assert_eq!(paragraphs(&[]), None);
+        assert_eq!(paragraphs(&["a".into(), "b".into()]).as_deref(), Some("a\n\nb"));
+        let cli = Cli::try_parse_from(["scn", "clone", "r", "-b", "dev"]).expect("parse");
+        assert!(matches!(cli.command, Command::Clone { ref reference, .. } if reference == "dev"));
+        let cli = Cli::try_parse_from(["scn", "clone", "r", "--branch", "dev"]).expect("parse");
+        assert!(matches!(cli.command, Command::Clone { ref reference, .. } if reference == "dev"));
+        for args in [
+            &["scn", "diff", "--cached"][..],
+            &["scn", "diff", "--staged"],
+            &["scn", "merge", "--no-ff", "x"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
+        }
     }
 
     #[test]
@@ -1280,18 +1367,16 @@ mod tests {
         let cli = Cli::try_parse_from(["scn", "sparse", "disable"]).expect("parse");
         assert!(matches!(cli.command, Command::Sparse(SparseCmd::Disable)));
         let cli = Cli::try_parse_from(["scn", "commit", "-m", "msg", "--author", "A <a@b>"]).expect("parse");
-        assert!(
-            matches!(cli.command, Command::Commit { ref message, amend: false, .. } if message.as_deref() == Some("msg"))
-        );
+        assert!(matches!(cli.command, Command::Commit { ref message, amend: false, .. } if message == &["msg"]));
         assert!(Cli::try_parse_from(["scn", "commit"]).is_ok(), "checked at run time");
         let cli = Cli::try_parse_from(["scn", "commit", "--amend"]).expect("parse");
         assert!(matches!(
             cli.command,
             Command::Commit {
-                message: None,
+                ref message,
                 amend: true,
                 ..
-            }
+            } if message.is_empty()
         ));
         assert!(Cli::try_parse_from(["scn", "restore"]).is_err(), "paths required");
         let cli = Cli::try_parse_from(["scn", "restore", "src", "a.txt"]).expect("parse");
@@ -1310,9 +1395,7 @@ mod tests {
         let cli = Cli::try_parse_from(["scn", "show", "main^2", "--", "a"]).expect("parse");
         assert!(matches!(cli.command, Command::Show { revision: Some(_), ref paths, .. } if paths.len() == 1));
         let cli = Cli::try_parse_from(["scn", "commit", "-am", "msg"]).expect("parse");
-        assert!(
-            matches!(cli.command, Command::Commit { all: true, ref message, .. } if message.as_deref() == Some("msg"))
-        );
+        assert!(matches!(cli.command, Command::Commit { all: true, ref message, .. } if message == &["msg"]));
         let cli = Cli::try_parse_from(["scn", "clone", "r", "--sparse", "a,b", "--sparse", "c"]).expect("parse");
         assert!(matches!(cli.command, Command::Clone { sparse: Some(ref d), .. } if d.len() == 3));
         for (args, want) in [

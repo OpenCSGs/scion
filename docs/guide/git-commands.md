@@ -8,18 +8,18 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 
 | git | scn | Notes |
 |---|---|---|
-| `git clone URL [DIR]` | `scn clone URL [DIR]` | `URL` is `http(s)://host[:port]/REPO`; `--ref B` instead of `-b B`. Inside the clone, no command needs the address again |
+| `git clone URL [DIR] [-b B]` | the same | `URL` is `http(s)://host[:port]/REPO`; `-b`, `--branch` and `--ref` all name the branch. Inside the clone, no command needs the address again |
 | `git status` | `scn status` | git's long format; `-s` gives `A ` / `M ` / `D ` (every change is staged) and `UU` for conflicts |
-| `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | Takes every local change (`-a` is accepted and changes nothing) |
+| `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | Takes every local change (`-a` is accepted and changes nothing); several `-m` become paragraphs |
 | `git commit --amend` | `scn commit --amend` | |
 | `git restore PATH` | `scn restore PATH` | |
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | |
 | `git merge B`, `git merge --abort` | `scn merge B`, `scn merge --abort` | Then `scn land` to publish |
 | `git branch`, `git branch NAME [REV]`, `git branch -d NAME` | `scn branch`, `scn branch NAME [REV]`, `scn branch -d NAME` | Branches live on the server |
 | `git tag`, `git tag NAME [REV]`, `git tag -d NAME` | `scn tag`, `scn tag NAME [REV]`, `scn tag -d NAME` | Lightweight tags |
-| `git log [REV] [-n N] [--oneline] [-- PATH]` | the same | |
+| `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | the same | |
 | `git show [REV] [-- PATH]` | the same | |
-| `git diff`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH` |
+| `git diff [--cached]`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH`; with no staging area, `--cached` / `--staged` show the same local changes |
 | `git blame PATH` | `scn blame PATH` | `scn blame REV:PATH` for a revision |
 | `git remote -v`, `git remote get-url origin`, `git remote set-url origin URL` | the same | One remote, `origin`; `set-url` checks the new URL has the working copy's commits |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`, `--prefix`, `-o FILE` |

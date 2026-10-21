@@ -326,7 +326,7 @@ async fn clone_commit_land_sync_workflow() {
             ],
         ));
         std::fs::write(wc.join("src/extra2.rs"), "y").expect("add");
-        let out = scn_in(&wc, &["commit", "--amend", "-m", "extra files\n\nbody"]);
+        let out = scn_in(&wc, &["commit", "--amend", "-m", "extra files", "-m", "body"]);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(text.starts_with("[main c1"), "{text}");
         assert!(
@@ -765,6 +765,8 @@ async fn log_and_diff_commands() {
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "-n", "1"]).stdout).to_string();
         assert!(text.contains("second") && !text.contains("first"), "{text}");
         assert!(text.starts_with("commit c1") && text.contains("\nDate:   "), "{text}");
+        let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline", "-1"]).stdout).to_string();
+        assert_eq!(text.lines().count(), 1, "git's -N: {text}");
         let text = String::from_utf8_lossy(&scn_in(&wc, &["log", "--oneline"]).stdout).to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert!(

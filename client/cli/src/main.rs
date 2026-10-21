@@ -28,17 +28,23 @@ use crate::output::{CliError, Render, error_out, render, version_out};
 #[command(name = "scn", version, about = "Scion command line client")]
 struct Cli {
     /// Server address; defaults to the working copy's, then http://127.0.0.1:7080.
-    #[arg(long, global = true, env = "SCION_ENDPOINT")]
+    #[arg(
+        long,
+        global = true,
+        env = "SCION_ENDPOINT",
+        value_name = "URL",
+        help_heading = "Global options"
+    )]
     endpoint: Option<String>,
     /// Repository, for commands run outside a working copy: a name, or its URL
     /// http(s)://host[:port]/REPOSITORY (whose server then replaces --endpoint).
-    #[arg(long, global = true, env = "SCION_REPO")]
+    #[arg(long, global = true, env = "SCION_REPO", help_heading = "Global options")]
     repo: Option<String>,
     /// Print JSON (with a schema field) for agents and scripts.
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help_heading = "Global options")]
     json: bool,
     /// No progress or notes on standard error (errors are still printed).
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, help_heading = "Global options")]
     quiet: bool,
     #[command(subcommand)]
     command: Command,
@@ -54,11 +60,17 @@ enum Command {
     /// Print the client and protocol versions.
     Version,
     /// Check out a repository into a local directory.
+    #[command(after_help = "Examples:\n  scn clone http://scion.example.com:7080/org/app\n  \
+        scn clone http://scion.example.com:7080/org/app app-dev --ref dev\n  \
+        scn clone http://scion.example.com:7080/org/app --sparse src,docs\n  \
+        scn --endpoint http://scion.example.com:7080 clone org/app")]
     Clone {
         /// A repository name, or its URL: http(s)://host[:port]/REPOSITORY.
         repo: String,
+        /// The directory to create (default: the repository name's last part).
         dir: Option<PathBuf>,
-        #[arg(long = "ref", default_value = "main")]
+        /// The branch to check out.
+        #[arg(long = "ref", value_name = "BRANCH", default_value = "main")]
         reference: String,
         /// Sparse checkout: only these directories (comma-separated) and the files at the root.
         /// Can be repeated: `--sparse src --sparse docs`.
@@ -67,6 +79,8 @@ enum Command {
     },
     /// The working copy's server and repository, git-style: `scn remote [-v]`, `scn remote get-url`,
     /// `scn remote set-url URL`. A working copy has one remote, named origin.
+    #[command(after_help = "Examples:\n  scn remote -v\n  scn remote get-url\n  \
+        scn remote set-url http://192.168.1.11:7080/org/app     # the server's new address")]
     Remote {
         /// Show the URL too.
         #[arg(short, long)]
@@ -83,11 +97,14 @@ enum Command {
     /// Branches: list, create, delete (of the working copy's repository, or --repo).
     /// git-style forms also work: `scn branch` (list), `scn branch NAME [REV]`, `scn branch -d NAME`.
     #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_help = "Examples:\n  scn branch\n  scn branch feature main~2\n  scn branch -d feature")]
     Branch {
         #[command(subcommand)]
         cmd: Option<BranchCmd>,
-        /// Create this branch (at REV, default the current ref).
+        /// Create this branch.
         name: Option<String>,
+        /// Where the new branch starts (default: the current branch).
+        #[arg(value_name = "REV")]
         revision: Option<String>,
         /// Delete this branch.
         #[arg(
@@ -101,9 +118,14 @@ enum Command {
     },
     /// Tags: fixed names for commits. `scn tag` lists, `scn tag NAME [REV]` creates (default
     /// HEAD), `scn tag -d NAME` deletes. A tag name works as a revision (`scn log v1.0`).
+    #[command(after_help = "Examples:\n  scn tag\n  scn tag v1.0\n  scn tag v0.9 main~5\n  scn tag -d v0.9")]
     Tag {
+        /// Create this tag.
         name: Option<String>,
+        /// The commit to tag (default: HEAD in a working copy, else the default branch).
+        #[arg(value_name = "REV")]
         revision: Option<String>,
+        /// Delete this tag.
         #[arg(short = 'd', long = "delete", value_name = "NAME", conflicts_with = "name")]
         delete: Option<String>,
     },
@@ -114,6 +136,9 @@ enum Command {
         short: bool,
     },
     /// Commit the local changes (not landed yet; see `scn land`).
+    #[command(after_help = "Examples:\n  scn commit -m \"Fix the parser\"\n  \
+        scn commit --amend                 # fold new changes into the pending commit\n  \
+        scn commit                         # finish a sync or merge that stopped on conflicts")]
     Commit {
         /// Required, except with --amend (keeps the old message) or when finishing a sync or
         /// merge that stopped on conflicts (keeps that commit's message).
@@ -132,7 +157,10 @@ enum Command {
     },
     /// Move the working copy to another branch (-c creates it at the current snapshot).
     Switch {
+        /// The branch to switch to.
+        #[arg(value_name = "BRANCH")]
         reference: String,
+        /// Create the branch at the current snapshot first.
         #[arg(short = 'c', long)]
         create: bool,
     },
@@ -140,7 +168,7 @@ enum Command {
     /// On conflicts the files get conflict markers; see `scn resolve`.
     Merge {
         /// The branch to merge (not needed with --abort).
-        #[arg(required_unless_present_any = ["abort", "cont"])]
+        #[arg(required_unless_present_any = ["abort", "cont"], value_name = "BRANCH")]
         reference: Option<String>,
         /// Abandon a merge that stopped on conflicts.
         #[arg(long, conflicts_with_all = ["message", "author"])]
@@ -148,6 +176,7 @@ enum Command {
         /// git's `merge --continue`: transitional spelling of `scn commit`.
         #[arg(long = "continue", hide = true, conflicts_with = "abort")]
         cont: bool,
+        /// Message for the merge commit (default: "Merge BRANCH into THIS").
         #[arg(short, long)]
         message: Option<String>,
         /// Author as "Name <email>"; defaults like `scn commit`.
@@ -203,10 +232,19 @@ enum Command {
     Mv { from: PathBuf, to: PathBuf },
     /// Mark conflicted files resolved (after editing out the markers), or take one side's
     /// version. Without PATHS, lists the conflicts. `.` means all.
+    #[command(
+        after_help = "Examples:\n  scn resolve                # list the conflicted files\n  \
+        scn resolve src/lib.rs     # after editing out the markers\n  \
+        scn resolve --theirs .     # take the other side for every file"
+    )]
     Resolve {
+        /// Conflicted files, relative to the current directory.
+        #[arg(value_name = "PATH")]
         paths: Vec<String>,
+        /// Take your version of each file.
         #[arg(long, conflicts_with = "theirs")]
         ours: bool,
+        /// Take the other side's version (the branch's tip, or the merged branch).
         #[arg(long)]
         theirs: bool,
         /// Accept files that still contain conflict markers.
@@ -217,7 +255,8 @@ enum Command {
     Uncommit,
     /// Discard local changes to tracked files under PATHS (`.` for everything). Added files are kept.
     Restore {
-        #[arg(required = true)]
+        /// Files or directories, relative to the current directory.
+        #[arg(required = true, value_name = "PATH")]
         paths: Vec<String>,
     },
     /// User settings: the default commit author (`user.name`, `user.email`).
@@ -227,13 +266,29 @@ enum Command {
     Land,
     /// Update to the branch tip, rebasing a pending commit onto it.
     Sync,
-    /// Print a file: [REV:]PATH.
-    Cat { spec: String },
-    /// List a directory: [REV:][DIR].A bare revision lists its root (`scn ls main`); `:DIR` forces a path.
-    Ls { spec: Option<String> },
-    /// Download an archive of [REV:][DIR] (default: the whole current branch); no working copy needed.A bare revision works too
-    /// (`scn archive main`); `:DIR` forces a path.
+    /// Print a file; no working copy needed.
+    #[command(after_help = "Examples:\n  scn cat README.md\n  scn cat main~1:src/lib.rs\n  \
+        scn cat v1.0:Cargo.toml --repo http://scion.example.com:7080/org/app")]
+    Cat {
+        /// The file, optionally at a revision (default: the current branch).
+        #[arg(value_name = "[REV:]PATH")]
+        spec: String,
+    },
+    /// List a directory; no working copy needed.
+    #[command(after_help = "Examples:\n  scn ls\n  scn ls src\n  scn ls main~3:docs\n  \
+        scn ls main            # a bare revision lists its root; `:DIR` forces a path")]
+    Ls {
+        /// The directory, optionally at a revision (default: the root of the current branch).
+        #[arg(value_name = "[REV:][DIR]")]
+        spec: Option<String>,
+    },
+    /// Download an archive of a revision or a directory; no working copy needed.
+    #[command(after_help = "Examples:\n  scn archive -o mono.tar.gz\n  \
+        scn archive v1.0:src --format zip --prefix src-v1.0/ -o src.zip\n  \
+        scn archive main | tar -x            # to standard output")]
     Archive {
+        /// What to archive (default: the whole current branch); a bare revision works too.
+        #[arg(value_name = "[REV:][DIR]")]
         spec: Option<String>,
         /// tar.gz, zip or tar.
         #[arg(long, default_value = "tar.gz")]
@@ -242,17 +297,23 @@ enum Command {
         #[arg(long, default_value = "")]
         prefix: String,
         /// Output file; standard output when omitted.
-        #[arg(short = 'o', long)]
+        #[arg(short = 'o', long, value_name = "FILE")]
         output: Option<PathBuf>,
     },
     /// History from REV (default: the current branch), newest first.
+    #[command(
+        after_help = "Examples:\n  scn log\n  scn log --oneline -n 50\n  scn log v1.0 -- src\n  \
+        scn log main --repo http://scion.example.com:7080/org/app"
+    )]
     Log {
+        /// Where to start (default: the current branch).
+        #[arg(value_name = "REV")]
         revision: Option<String>,
-        /// Only commits that changed this path.Same as `-- PATH`.
+        /// Only commits that changed this path. Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
         /// At most this many commits.
-        #[arg(short = 'n', long = "max-count", default_value_t = 20)]
+        #[arg(short = 'n', long = "max-count", value_name = "N", default_value_t = 20)]
         max_count: usize,
         /// One line per commit: its short id and subject.
         #[arg(long)]
@@ -263,6 +324,8 @@ enum Command {
     },
     /// Show a commit (default HEAD) and the changes it introduced, like `git show`.
     Show {
+        /// The commit (default: HEAD in a working copy, else the default branch).
+        #[arg(value_name = "REV")]
         revision: Option<String>,
         /// Only the changed files' names.
         #[arg(long)]
@@ -274,13 +337,25 @@ enum Command {
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
     },
-    /// The commit that last changed each line: [REV:]PATH.
-    Blame { spec: String },
+    /// The commit that last changed each line of a file.
+    Blame {
+        /// The file, optionally at a revision (default: the current branch).
+        #[arg(value_name = "[REV:]PATH")]
+        spec: String,
+    },
     /// Changes: without revisions, the uncommitted local changes; with one, what that commit introduced; with two, the difference between them.
     /// Revisions may be `A B`, `A..B` or `A...B` (from their common ancestor), as in git.
+    #[command(
+        after_help = "Examples:\n  scn diff                  # uncommitted local changes\n  \
+        scn diff main             # what the tip of main changed\n  \
+        scn diff v1.0 main        # or v1.0..main; v1.0...main diffs from their common ancestor\n  \
+        scn diff HEAD~3 HEAD --name-status -- src"
+    )]
     Diff {
+        /// None, one or two revisions: `A`, `A B`, `A..B` or `A...B`.
+        #[arg(value_name = "REV")]
         revisions: Vec<String>,
-        /// Only this path.Same as `-- PATH`.
+        /// Only this path. Same as `-- PATH`.
         #[arg(long)]
         path: Option<String>,
         /// Only the changed files' names.
@@ -351,11 +426,14 @@ enum RemoteCmd {
 enum RepoCmd {
     /// Create a repository.
     Create {
+        /// The name (such as org/app), or the repository's URL.
+        #[arg(value_name = "NAME | URL")]
         name: String,
         /// Default branch (main if omitted).
-        #[arg(long)]
+        #[arg(long, value_name = "BRANCH")]
         default_branch: Option<String>,
-        #[arg(long, default_value = "")]
+        /// A one-line description.
+        #[arg(long, value_name = "TEXT", default_value = "")]
         description: String,
     },
     /// List the repositories you can see.
@@ -366,25 +444,49 @@ enum RepoCmd {
         /// List deleted repositories that are not purged yet.
         #[arg(long)]
         deleted: bool,
-        #[arg(long, default_value_t = repos::DEFAULT_LIST_LIMIT)]
+        /// At most this many.
+        #[arg(long, value_name = "N", default_value_t = repos::DEFAULT_LIST_LIMIT)]
         limit: usize,
     },
     /// Show a repository's settings (also for deleted repositories).
-    Info { name: String },
+    Info {
+        /// The name, or the repository's URL.
+        #[arg(value_name = "NAME | URL")]
+        name: String,
+    },
     /// Change the default branch or the description.
     Set {
+        /// The name, or the repository's URL.
+        #[arg(value_name = "NAME | URL")]
         name: String,
-        #[arg(long)]
+        /// The new default branch (it must exist).
+        #[arg(long, value_name = "BRANCH")]
         default_branch: Option<String>,
-        #[arg(long)]
+        /// The new description.
+        #[arg(long, value_name = "TEXT")]
         description: Option<String>,
     },
     /// Delete a repository (restorable during the grace period).
-    Rm { name: String },
+    Rm {
+        /// The name, or the repository's URL.
+        #[arg(value_name = "NAME | URL")]
+        name: String,
+    },
     /// Restore a deleted repository.
-    Restore { name: String },
+    Restore {
+        /// The name, or the repository's URL.
+        #[arg(value_name = "NAME | URL")]
+        name: String,
+    },
     /// Fork: copy all history and branches into a new repository.
-    Fork { source: String, target: String },
+    #[command(after_help = "Example:\n  scn repo fork org/app me/app\n  \
+        scn repo fork http://scion.example.com:7080/org/app http://scion.example.com:7080/me/app")]
+    Fork {
+        /// The repository to copy (name or URL).
+        source: String,
+        /// The new repository (name or URL, on the same server).
+        target: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -392,21 +494,44 @@ enum ConfigCmd {
     /// Print every setting.
     List,
     /// Print one setting.
-    Get { key: String },
+    Get {
+        /// user.name or user.email.
+        key: String,
+    },
     /// Change one setting.
-    Set { key: String, value: String },
+    #[command(
+        after_help = "Examples:\n  scn config set user.name \"Ada Lovelace\"\n  scn config set user.email ada@example.com"
+    )]
+    Set {
+        /// user.name or user.email.
+        key: String,
+        /// The new value.
+        value: String,
+    },
     /// Remove one setting.
-    Unset { key: String },
+    Unset {
+        /// user.name or user.email.
+        key: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum BranchCmd {
-    /// List branches (* marks the default branch).
+    /// List branches (* marks the current branch; outside a working copy, the default branch).
     Ls,
-    /// Create a branch at REV (default: the current branch).
-    Create { name: String, revision: Option<String> },
+    /// Create a branch.
+    Create {
+        /// The new branch.
+        name: String,
+        /// Where it starts (default: the current branch).
+        #[arg(value_name = "REV")]
+        revision: Option<String>,
+    },
     /// Delete a branch (not the default branch).
-    Rm { name: String },
+    Rm {
+        /// The branch to delete.
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -415,17 +540,20 @@ pub(crate) enum SparseCmd {
     Ls,
     /// Set the directories (turns a full checkout into a sparse one).
     Set {
-        #[arg(required = true)]
+        /// Directories, relative to the repository root.
+        #[arg(required = true, value_name = "DIR")]
         dirs: Vec<String>,
     },
     /// Add directories and check them out.
     Add {
-        #[arg(required = true)]
+        /// Directories, relative to the repository root.
+        #[arg(required = true, value_name = "DIR")]
         dirs: Vec<String>,
     },
     /// Remove directories and their files (needs no uncommitted changes).
     Rm {
-        #[arg(required = true)]
+        /// Directories, relative to the repository root.
+        #[arg(required = true, value_name = "DIR")]
         dirs: Vec<String>,
     },
     /// Go back to a full checkout.
@@ -452,14 +580,17 @@ enum DaemonCmd {
 #[derive(Debug, Subcommand)]
 enum ImportCmd {
     /// Import the history of a local git repository into the --repo repository.
+    #[command(after_help = "Examples:\n  scn import git ~/src/app --repo org/app\n  \
+        scn import git ~/src/app --repo http://scion.example.com:7080/org/app --git-ref dev --ref dev\n  \
+        scn import git ~/src/app --repo org/app --git-ref v1.0 --ref tags/v1.0")]
     Git {
         /// The git repository directory.
         path: PathBuf,
         /// The git ref to import.
-        #[arg(long, default_value = "main")]
+        #[arg(long, value_name = "REF", default_value = "main")]
         git_ref: String,
         /// The Scion ref to update after importing.
-        #[arg(long = "ref", default_value = "main")]
+        #[arg(long = "ref", value_name = "REF", default_value = "main")]
         reference: String,
     },
 }
@@ -1011,6 +1142,26 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn every_argument_is_described() {
+        fn walk(cmd: &clap::Command, path: &str, missing: &mut Vec<String>) {
+            for a in cmd.get_arguments() {
+                if !a.is_hide_set() && a.get_help().is_none() && !["help", "version"].contains(&a.get_id().as_str()) {
+                    missing.push(format!("{path} {}", a.get_id()));
+                }
+            }
+            for sub in cmd
+                .get_subcommands()
+                .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+            {
+                walk(sub, &format!("{path} {}", sub.get_name()), missing);
+            }
+        }
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "scn", &mut missing);
+        assert!(missing.is_empty(), "arguments without help: {missing:?}");
     }
 
     #[test]

@@ -382,7 +382,8 @@ async fn clone_commit_land_sync_workflow() {
             &["commit", "-m", "m4", "--author", "Ada <ada@example.com>", "--json"],
         ));
         json_of(&scn_in(&wc, &["land", "--json"]));
-        let out = scn_in(&wc, &["merge", "topic"]);
+        // An explicit author: without one configured (as on CI) a hint comes first
+        let out = scn_in(&wc, &["merge", "topic", "--author", "Ada <ada@example.com>"]);
         assert_eq!(out.status.code(), Some(3), "{out:?}");
         assert!(
             String::from_utf8_lossy(&out.stderr).starts_with(

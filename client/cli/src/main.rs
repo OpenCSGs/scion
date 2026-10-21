@@ -270,8 +270,29 @@ enum Command {
         paths: Vec<String>,
     },
     /// User settings: the default commit author (`user.name`, `user.email`).
-    #[command(subcommand)]
-    Config(ConfigCmd),
+    /// git-style forms also work: `scn config KEY [VALUE]`, `--list`, `--unset KEY`.
+    #[command(
+        args_conflicts_with_subcommands = true,
+        after_help = "Examples:\n  scn config user.name \"Ada Lovelace\"\n  scn config user.email ada@example.com\n  \
+            scn config --list\n  scn config --unset user.email"
+    )]
+    Config {
+        #[command(subcommand)]
+        cmd: Option<ConfigCmd>,
+        /// user.name or user.email: print it, or set it to VALUE.
+        key: Option<String>,
+        /// The new value.
+        value: Option<String>,
+        /// Print every setting.
+        #[arg(short = 'l', long, conflicts_with_all = ["key", "unset"])]
+        list: bool,
+        /// Remove this setting.
+        #[arg(long, value_name = "KEY", conflicts_with = "key")]
+        unset: Option<String>,
+        /// Accepted for git compatibility: scn's settings are always per user.
+        #[arg(long)]
+        global: bool,
+    },
     /// Land the pending commit on the branch.
     Land,
     /// Update to the branch tip, rebasing a pending commit onto it.
@@ -1019,8 +1040,18 @@ async fn run(cli: Cli) -> ExitCode {
             emit(commands::resolve(&ctx, &paths, side, force).await, json)
         }
         Command::Restore { paths } => emit(commands::restore(&ctx, &paths).await, json),
-        Command::Config(cmd) => {
+        Command::Config {
+            cmd, key, value, unset, ..
+        } => {
             let path = config::path(|k| std::env::var(k).ok());
+            let cmd = match (cmd, key, value, unset) {
+                (Some(cmd), ..) => cmd,
+                (None, _, _, Some(key)) => ConfigCmd::Unset { key },
+                (None, Some(key), Some(value), None) => ConfigCmd::Set { key, value },
+                (None, Some(key), None, None) => ConfigCmd::Get { key },
+                // `--list`, or nothing at all
+                _ => ConfigCmd::List,
+            };
             emit(
                 match cmd {
                     ConfigCmd::List => config::list(&path),

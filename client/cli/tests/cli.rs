@@ -291,6 +291,21 @@ async fn clone_commit_land_sync_workflow() {
             iso(&["config", "set", "core.editor", "vi"], true).status.code(),
             Some(2)
         );
+        // git's spellings: config KEY [VALUE], --list, --unset, --global
+        let text = |args: &[&str]| String::from_utf8_lossy(&iso(args, true).stdout).into_owned();
+        assert!(
+            iso(&["config", "--global", "user.email", "ada@example.com"], true)
+                .status
+                .success()
+        );
+        assert_eq!(text(&["config", "user.email"]), "ada@example.com\n");
+        assert!(
+            text(&["config", "--list"]).contains("user.email=ada@example.com"),
+            "list"
+        );
+        assert!(text(&["config"]).contains("user.name=Ada"), "bare config lists");
+        assert!(iso(&["config", "--unset", "user.email"], true).status.success());
+        assert!(!text(&["config", "-l"]).contains("user.email"));
 
         // restore (paths relative to the current directory), uncommit, commit --amend
         std::fs::write(wc.join("src/lib.rs"), "broken").expect("edit");

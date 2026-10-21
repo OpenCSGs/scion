@@ -10,6 +10,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 |---|---|---|
 | `git clone URL [DIR] [-b B]` | the same | `URL` is `http(s)://host[:port]/REPO`; `-b`, `--branch` and `--ref` all name the branch. Inside the clone, no command needs the address again |
 | `git status` | `scn status` | git's long format; `-s` gives `A ` / `M ` / `D ` (every change is staged) and `UU` for conflicts |
+| `git config user.name NAME`, `git config --list`, `--unset` | the same | Only `user.name` and `user.email`; settings are per user (`--global` is accepted) |
 | `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | Takes every local change (`-a` is accepted and changes nothing); several `-m` become paragraphs |
 | `git commit --amend` | `scn commit --amend` | |
 | `git restore PATH` | `scn restore PATH` | |

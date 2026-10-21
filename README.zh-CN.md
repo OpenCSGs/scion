@@ -64,6 +64,8 @@ flowchart LR
     server --> blobs[("本地目录 / S3")]
 ```
 
+提交在服务端创建和 rebase；客户端只拉检出的文件；查历史不用克隆。另外支持 `scn import git`（保留 git SHA）、按仓库/ref/路径的访问控制，以及 redaction。
+
 ## 快速开始
 
 ```sh

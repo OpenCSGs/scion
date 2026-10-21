@@ -64,6 +64,8 @@ flowchart LR
     server --> blobs[("Local dir / S3")]
 ```
 
+Commits are created and rebased on the server; clients fetch only the files they check out; history needs no clone. Also: `scn import git` with git SHAs kept, ACLs by repository, ref and path, and redaction.
+
 ## Quick start
 
 ```sh

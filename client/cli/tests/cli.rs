@@ -524,7 +524,14 @@ async fn clone_commit_land_sync_workflow() {
             &wc,
             &[&["commit", "-m", "old", "--json"][..], &author].concat(),
         ));
-        hinted(&scn_in(&wc, &["push"]), "land");
+        assert_eq!(scn_in(&wc, &["push", "--force"]).status.code(), Some(2));
+        assert_eq!(scn_in(&wc, &["push", "upstream"]).status.code(), Some(2));
+        assert_eq!(
+            scn_in(&wc, &["push", "origin", "main"]).status.code(),
+            Some(2),
+            "on legacy"
+        );
+        hinted(&scn_in(&wc, &["push", "-u", "origin", "legacy"]), "land");
         hinted(
             &scn_in(&wc, &["mv", "old.txt", "src"]),
             "commit (after moving the files yourself)",
@@ -543,11 +550,13 @@ async fn clone_commit_land_sync_workflow() {
         assert_eq!(std::fs::read_to_string(wc.join("old.txt")).expect("old"), "o");
         std::fs::write(wc.join("old.txt"), "changed again").expect("edit");
         json_of(&scn_in(&wc, &[&["commit", "-m", "c", "--json"][..], &author].concat()));
+        let out = scn_in(&wc, &["pull", "--ff-only"]);
+        assert_eq!(out.status.code(), Some(2), "a pending commit: {out:?}");
         hinted(&scn_in(&wc, &["reset", "--soft", "HEAD~1"]), "uncommit");
         let v = json_of(&scn_in(&wc, &["status", "--json"]));
         assert_eq!(v["modified"], serde_json::json!(["old.txt"]));
         hinted(&scn_in(&wc, &["checkout", "old.txt"]), "restore PATH");
-        hinted(&scn_in(&wc, &["pull", "--rebase"]), "sync");
+        hinted(&scn_in(&wc, &["pull", "--rebase", "origin", "legacy"]), "sync");
         hinted(&scn_in(&wc, &["checkout", "main"]), "switch BRANCH");
         assert_eq!(scn_in(&wc, &["reset", "--hard", "HEAD~3"]).status.code(), Some(2));
         assert_eq!(scn_in(&wc, &["rebase", "--abort"]).status.code(), Some(2));

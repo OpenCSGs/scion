@@ -213,11 +213,28 @@ enum Command {
     },
     // ---- Transitional git spellings: run the scn command and print a hint (hidden from --help)
     #[command(hide = true)]
-    Push,
+    Push {
+        /// `[origin [BRANCH]]`: the only remote, and the working copy's branch.
+        #[arg(num_args = 0..=2)]
+        args: Vec<String>,
+        /// Accepted: the branch is always the server's.
+        #[arg(short = 'u', long = "set-upstream")]
+        set_upstream: bool,
+        /// Refused: landing never rewrites a branch.
+        #[arg(short, long, alias = "force-with-lease")]
+        force: bool,
+    },
     #[command(hide = true)]
     Pull {
-        #[arg(long)]
+        /// `[origin [BRANCH]]`: the only remote, and the working copy's branch.
+        #[arg(num_args = 0..=2)]
+        args: Vec<String>,
+        /// Accepted: a pending commit is always rebased.
+        #[arg(long, alias = "no-rebase")]
         rebase: bool,
+        /// Refuse to rebase a pending commit.
+        #[arg(long = "ff-only")]
+        ff_only: bool,
     },
     #[command(hide = true)]
     Checkout {
@@ -653,6 +670,21 @@ fn transitional(git: &str, scn: &str) {
     eprintln!("hint: `scn {git}` is a transitional git-style spelling; use `scn {scn}` instead");
 }
 
+/// `git push origin main` / `git pull origin main`: the remote must be origin and the branch the
+/// working copy's (land and sync work on that one).
+fn remote_and_branch(ctx: &Ctx, args: &[String]) -> Result<(), CliError> {
+    remote::check_name(args.first().map(String::as_str))?;
+    if let Some(branch) = args.get(1) {
+        let current = scion_wc::WorkingCopy::open(&ctx.cwd)?.state().reference.clone();
+        if *branch != current {
+            return Err(CliError::Usage(format!(
+                "the working copy is on {current}; `scn switch {branch}` first"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Several `-m` make one message of paragraphs, as in git.
 fn paragraphs(messages: &[String]) -> Option<String> {
     (!messages.is_empty()).then(|| messages.join("\n\n"))
@@ -933,11 +965,29 @@ async fn run(cli: Cli) -> ExitCode {
             transitional("merge --continue", "commit");
             emit(commands::commit(&ctx, None, None).await, json)
         }
-        Command::Push => {
+        Command::Push { force: true, .. } => fail(
+            &CliError::Usage(
+                "scn land never rewrites a branch, so there is no force push; \
+                 `scn uncommit` or `scn commit --amend` change a commit before it lands"
+                    .into(),
+            ),
+            json,
+        ),
+        Command::Push { args, .. } => {
+            arg!(remote_and_branch(&ctx, &args));
             transitional("push", "land");
             emit(commands::land(&ctx).await, json)
         }
-        Command::Pull { .. } => {
+        Command::Pull { args, ff_only, .. } => {
+            arg!(remote_and_branch(&ctx, &args));
+            if ff_only && scion_wc::WorkingCopy::open(&ctx.cwd).is_ok_and(|w| w.state().head.is_some()) {
+                return fail(
+                    &CliError::Usage(
+                        "not possible to fast-forward: you have a pending commit, which `scn sync` would rebase".into(),
+                    ),
+                    json,
+                );
+            }
             transitional("pull", "sync");
             emit(commands::sync(&ctx).await, json)
         }

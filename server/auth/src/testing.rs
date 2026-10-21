@@ -154,6 +154,33 @@ async fn gh_user(State(st): State<St>, uri: Uri, headers: HeaderMap) -> Response
     }
 }
 
+/// GitHub organization lists: `opencsg` has octocat (spelled Octocat) and alice, and a team `core`
+/// with octocat; `big` has 150 members, u0 to u149, served in pages.
+async fn gh_list(State(st): State<St>, uri: Uri, headers: HeaderMap) -> Response {
+    let q: HashMap<&str, &str> = uri
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .collect();
+    count(&st, &uri);
+    if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer ght") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let users = |names: &[&str]| names.iter().map(|n| json!({"login": n})).collect::<Vec<_>>();
+    let all: Vec<Value> = match uri.path() {
+        "/gh/orgs/opencsg/members" => users(&["Octocat", "alice"]),
+        "/gh/orgs/opencsg/teams" => vec![json!({"slug": "core"})],
+        "/gh/orgs/opencsg/teams/core/members" => users(&["octocat"]),
+        "/gh/orgs/big/members" => (0..150).map(|i| json!({"login": format!("u{i}")})).collect(),
+        "/gh/orgs/big/teams" => Vec::new(),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let num = |k: &str, d: usize| q.get(k).and_then(|v| v.parse().ok()).unwrap_or(d);
+    let (per, page) = (num("per_page", 30), num("page", 1));
+    Json(all.into_iter().skip(per * (page - 1)).take(per).collect::<Vec<_>>()).into_response()
+}
+
 async fn introspect(
     State(st): State<St>,
     uri: Uri,
@@ -211,6 +238,9 @@ impl FakeIdp {
             .route("/gh/login/device/code", post(gh_device))
             .route("/gh/login/oauth/access_token", post(gh_token))
             .route("/gh/user", get(gh_user))
+            .route("/gh/orgs/{org}/members", get(gh_list))
+            .route("/gh/orgs/{org}/teams", get(gh_list))
+            .route("/gh/orgs/{org}/teams/{team}/members", get(gh_list))
             .route("/status-500", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
             .route("/not-json", post(|| async { "plain text" }))
             .route(

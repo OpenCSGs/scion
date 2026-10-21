@@ -140,6 +140,8 @@ pub struct Guard {
     orgs: Option<OrgCache>,
     oidc: Option<Oidc>,
     github: Option<crate::github::GitHub>,
+    /// GitHub organization and team memberships as groups.
+    teams: Option<crate::github::Teams>,
     policy: RwLock<PolicyState>,
 }
 
@@ -198,6 +200,7 @@ impl Guard {
             orgs: None,
             oidc: None,
             github: None,
+            teams: None,
             policy: RwLock::new(PolicyState::Unset),
         }
     }
@@ -253,6 +256,10 @@ impl Guard {
             .map(|i| ExternalIssuer::new(i, http(), &*lookup).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
         let orgs = chain.contains(&Decider::Orgs).then(OrgCache::new);
+        let teams = match &config.auth.github {
+            Some(g) => crate::github::Teams::new(g, http(), &*lookup)?,
+            None => None,
+        };
         Ok(Arc::new(Self {
             required: config.required,
             orgs,
@@ -265,6 +272,7 @@ impl Guard {
                 .introspection
                 .map(|c| Introspection::new(c, http(), lookup.clone())),
             webhooks,
+            teams,
             github: config.auth.github.map(|c| crate::github::GitHub::new(c, http())),
             oidc: config.auth.oidc.map(|c| Oidc::new(c, http(), lookup)),
             policy: RwLock::new(PolicyState::Unloaded),
@@ -586,6 +594,12 @@ impl Guard {
                 p.to_mut().groups.extend(groups.iter().cloned());
             }
         }
+        if let (Some(teams), true) = (&self.teams, p.authenticated) {
+            let groups = teams.groups(&p.subject).await;
+            if !groups.is_empty() {
+                p.to_mut().groups.extend(groups);
+            }
+        }
         // No copy on the hot path when there are no groups to add
         Ok(match self.current_policy()? {
             Some(pol) if pol.has_groups() => std::borrow::Cow::Owned(pol.with_groups(&p)),
@@ -831,6 +845,44 @@ bearer = "opa"
             no_key.poll_device_login("x").await,
             Err(AuthError::Unavailable(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn github_teams_reach_the_policy() {
+        let idp = FakeIdp::start().await;
+        let text = format!(
+            "[github]\nclient_id = \"gh-app\"\napi_url = \"{gh}\"\norgs = [\"opencsg\"]\ntoken_env = \"GITHUB_TOKEN\"",
+            gh = idp.url("/gh")
+        );
+        let config = GuardConfig {
+            required: true,
+            auth: AuthConfig::parse(&text).expect("config"),
+            signing_key_pem: None,
+        };
+        assert!(
+            Guard::build(config.clone(), Arc::new(MemStore::new()), lookup()).is_err(),
+            "GITHUB_TOKEN unset"
+        );
+        let g = Guard::build(
+            config,
+            Arc::new(MemStore::new()),
+            Arc::new(|k: &str| (k == "GITHUB_TOKEN").then(|| "ght".to_string())),
+        )
+        .expect("build");
+        g.set_policy("[[rule]]\nsubjects = [\"group:github:opencsg/core\"]\nrepos = [\"mono\"]\nactions = [\"land\"]")
+            .await
+            .expect("policy");
+        let land = Request::repo("mono", Action::Land);
+        assert!(
+            g.check(&Principal::user("octocat", vec![]), &land)
+                .await
+                .expect("check")
+        );
+        assert!(
+            !g.check(&Principal::user("alice", vec![]), &land).await.expect("check"),
+            "not in core"
+        );
+        assert!(!g.check(&Principal::anonymous(), &land).await.expect("check"));
     }
 
     #[tokio::test]

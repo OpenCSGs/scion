@@ -286,6 +286,26 @@ scion admin org rm acme
 
 3. **登录。** 执行 `scn login http://scion.example.com:7080` 后会显示一个代码，到 github.com/login/device 输入即可。服务端用 GitHub 的令牌读出用户名，再签发自己的刷新令牌和访问令牌；GitHub 的令牌不保存。
 
+**把 GitHub 组织和 team 作为组。** 配置 `orgs`，并给一个能读取这些组织成员的令牌（带 `read:org` 的 PAT 或 app 令牌）后，这些组织的成员得到 `github:ORG` 组，各个 team 的成员再得到 `github:ORG/TEAM` 组。成员列表保存在内存里，每隔 `refresh`（默认 5 分钟）在后台重新拉取，期间继续用上一次的结果；拉取失败时保留原来的组。之后策略里就可以引用这些组：
+
+```toml
+[github]
+client_id = "Ov23li…"
+orgs = ["opencsg"]
+token_env = "GITHUB_TOKEN"
+# refresh = "5m"
+```
+
+```toml
+# 策略
+[[rule]]
+subjects = ["group:github:opencsg/core"]
+repos    = ["opencsg/*"]
+actions  = ["land"]
+```
+
+只要 subject 是带 `subject_prefix` 的 GitHub 用户名，就会得到这些组，不论是用哪种方式登录的。
+
 subject 就是 GitHub 用户名，所以策略、组织和个人命名空间（`user/LOGIN/…`）都直接用它。设置 `subject_prefix` 时，要让 subject 仍是合法的名字段（字母、数字、`-`、`_`、`.`），个人命名空间才能用。`[github]` 和 `[oidc]` 二选一。
 
 ## 接入 starhub-server

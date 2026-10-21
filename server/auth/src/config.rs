@@ -61,6 +61,11 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     }
 }
 
+/// For `#[serde(deserialize_with)]` outside this module.
+pub(crate) fn duration_opt<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
+    duration(d)
+}
+
 fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
     let s: Option<String> = Option::deserialize(d)?;
     s.map(|s| parse_duration(&s).map_err(serde::de::Error::custom))

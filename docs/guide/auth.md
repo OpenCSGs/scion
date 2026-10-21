@@ -286,6 +286,26 @@ People can sign in with their GitHub accounts. This is the easiest setup for ope
 
 3. **Sign in.** `scn login http://scion.example.com:7080` shows a code to enter at github.com/login/device. The server reads the GitHub login with GitHub's token, then issues its own refresh and access tokens; GitHub's token is not kept.
 
+**GitHub organizations and teams as groups.** With `orgs` and a token that can read their members (a PAT or app token with `read:org`), members of those organizations get the group `github:ORG`, and members of each team also get `github:ORG/TEAM`. The members are kept in memory and fetched again every `refresh` (5 minutes by default), in the background, while the previous answer is served. If a fetch fails, the previous groups stay. Policies can then name the groups:
+
+```toml
+[github]
+client_id = "Ov23li…"
+orgs = ["opencsg"]
+token_env = "GITHUB_TOKEN"
+# refresh = "5m"
+```
+
+```toml
+# policy
+[[rule]]
+subjects = ["group:github:opencsg/core"]
+repos    = ["opencsg/*"]
+actions  = ["land"]
+```
+
+The groups apply to subjects that are a GitHub login with the `subject_prefix`, whichever way they signed in.
+
 The subject is the GitHub login, so policies, organizations and personal namespaces (`user/LOGIN/…`) use it directly. A `subject_prefix` must keep the subject a valid name segment (letters, digits, `-`, `_`, `.`) for personal namespaces to work. `[github]` and `[oidc]` are alternatives: set one of them.
 
 ## Connecting starhub-server

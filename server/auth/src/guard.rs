@@ -95,6 +95,37 @@ enum Decider {
     Grants,
     /// The webhook at this index of `Guard::webhooks`.
     Webhook(usize),
+    /// Organization roles.
+    Orgs,
+    /// Personal namespaces.
+    Personal,
+}
+
+/// How long organization memberships and visibility are cached; changes made on another node take
+/// effect within this (changes made through this node at once).
+const ORG_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Organization data the chain reads, cached.
+struct OrgCache {
+    /// subject to its `org:ORG:ROLE` groups.
+    memberships: moka::future::Cache<String, Arc<Vec<String>>>,
+    /// organization to its visibility (None: no such organization).
+    visibility: moka::future::Cache<String, Option<String>>,
+}
+
+impl OrgCache {
+    fn new() -> Self {
+        Self {
+            memberships: moka::future::Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(ORG_CACHE_TTL)
+                .build(),
+            visibility: moka::future::Cache::builder()
+                .max_capacity(100_000)
+                .time_to_live(ORG_CACHE_TTL)
+                .build(),
+        }
+    }
 }
 
 pub struct Guard {
@@ -105,6 +136,8 @@ pub struct Guard {
     externals: Vec<ExternalIssuer>,
     introspection: Option<Introspection>,
     webhooks: Vec<AuthzWebhook>,
+    /// Set when `orgs` is in the chain.
+    orgs: Option<OrgCache>,
     oidc: Option<Oidc>,
     policy: RwLock<PolicyState>,
 }
@@ -161,6 +194,7 @@ impl Guard {
             externals: Vec::new(),
             introspection: None,
             webhooks: Vec::new(),
+            orgs: None,
             oidc: None,
             policy: RwLock::new(PolicyState::Unset),
         }
@@ -190,6 +224,8 @@ impl Guard {
             .map(|e| match e {
                 ChainEntry::Policy => Ok(Decider::Policy),
                 ChainEntry::Grants => Ok(Decider::Grants),
+                ChainEntry::Orgs => Ok(Decider::Orgs),
+                ChainEntry::Personal => Ok(Decider::Personal),
                 ChainEntry::Webhook(name) => webhooks
                     .iter()
                     .position(|w| w.name() == name)
@@ -210,8 +246,10 @@ impl Guard {
             .into_iter()
             .map(|i| ExternalIssuer::new(i, http(), &*lookup).map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
+        let orgs = chain.contains(&Decider::Orgs).then(OrgCache::new);
         Ok(Arc::new(Self {
             required: config.required,
+            orgs,
             chain,
             meta: Some(meta),
             issuer,
@@ -514,21 +552,76 @@ impl Guard {
             },
             Decider::Grants => yes(!admin && grants_allow(p, req)),
             Decider::Webhook(i) => self.webhook_decides(&self.webhooks[i], p, req).await?,
+            Decider::Orgs => match (&self.orgs, crate::orgs::org_of(req.repo)) {
+                (Some(orgs), Some(org)) if !admin => {
+                    let visibility = self.org_visibility(orgs, org).await?;
+                    yes(crate::orgs::orgs_allow(p, req, visibility.as_deref()))
+                }
+                _ => Decision::Abstain,
+            },
+            Decider::Personal => yes(!admin && crate::orgs::personal_allow(p, req.repo)),
         })
     }
 
-    /// `p` with the policy's `[groups]` added: every decider sees them.
-    fn expand<'p>(&self, p: &'p Principal) -> Result<std::borrow::Cow<'p, Principal>, AuthError> {
+    /// `p` with its organization memberships (`org:ORG:ROLE`) and then the policy's `[groups]`
+    /// added: every decider sees them.
+    async fn expand<'p>(&self, p: &'p Principal) -> Result<std::borrow::Cow<'p, Principal>, AuthError> {
+        let mut p = std::borrow::Cow::Borrowed(p);
+        if let (Some(orgs), true) = (&self.orgs, p.authenticated) {
+            let groups = self.memberships(orgs, &p.subject).await?;
+            if !groups.is_empty() {
+                p.to_mut().groups.extend(groups.iter().cloned());
+            }
+        }
+        // No copy on the hot path when there are no groups to add
         Ok(match self.current_policy()? {
-            // No copy on the hot path when there are no groups to add
-            Some(pol) if pol.has_groups() => std::borrow::Cow::Owned(pol.with_groups(p)),
-            _ => std::borrow::Cow::Borrowed(p),
+            Some(pol) if pol.has_groups() => std::borrow::Cow::Owned(pol.with_groups(&p)),
+            _ => p,
         })
+    }
+
+    async fn memberships(&self, orgs: &OrgCache, subject: &str) -> Result<Arc<Vec<String>>, AuthError> {
+        if let Some(hit) = orgs.memberships.get(subject).await {
+            return Ok(hit);
+        }
+        let groups: Vec<String> = self
+            .meta()?
+            .list_memberships(subject)
+            .await?
+            .into_iter()
+            .filter_map(|m| crate::orgs::Role::parse(&m.role).map(|r| crate::orgs::membership_group(&m.org, r)))
+            .collect();
+        let groups = Arc::new(groups);
+        orgs.memberships.insert(subject.to_owned(), groups.clone()).await;
+        Ok(groups)
+    }
+
+    async fn org_visibility(&self, orgs: &OrgCache, org: &str) -> Result<Option<String>, AuthError> {
+        if let Some(hit) = orgs.visibility.get(org).await {
+            return Ok(hit);
+        }
+        let v = self.meta()?.get_org(org).await?.map(|o| o.visibility);
+        orgs.visibility.insert(org.to_owned(), v.clone()).await;
+        Ok(v)
+    }
+
+    /// Drops cached memberships and visibility after a change through this node, so it takes
+    /// effect at once here (other nodes within [`ORG_CACHE_TTL`]).
+    pub async fn forget_org_changes(&self, org: Option<&str>, subject: Option<&str>) {
+        if let Some(orgs) = &self.orgs {
+            if let Some(o) = org {
+                orgs.visibility.invalidate(o).await;
+            }
+            match subject {
+                Some(s) => orgs.memberships.invalidate(s).await,
+                None => orgs.memberships.invalidate_all(),
+            }
+        }
     }
 
     /// Runs the chain: the first decider that allows or denies settles it; all abstaining denies.
     async fn run_chain(&self, p: &Principal, req: &Request<'_>, admin: bool) -> Result<bool, AuthError> {
-        let p = &*self.expand(p)?;
+        let p = &*self.expand(p).await?;
         for d in &self.chain {
             match self.decide(*d, p, req, admin).await? {
                 Decision::Allow => return Ok(true),
@@ -552,9 +645,10 @@ impl Guard {
         if !self.required {
             return Ok(true);
         }
+        let expanded = self.expand(p).await?;
         if self
             .current_policy()?
-            .is_some_and(|pol| pol.allows_any(&pol.with_groups(p), repo, action))
+            .is_some_and(|pol| pol.allows_any(&expanded, repo, action))
         {
             return Ok(true);
         }
@@ -593,9 +687,10 @@ impl Guard {
         {
             return Ok(true);
         }
+        let expanded = self.expand(p).await?;
         Ok(self
             .current_policy()?
-            .is_some_and(|pol| pol.path_visible(&pol.with_groups(p), repo, path)))
+            .is_some_and(|pol| pol.path_visible(&expanded, repo, path)))
     }
 
     /// 是否有系统管理权限（策略、令牌）。
@@ -673,6 +768,97 @@ bearer = "opa"
             "opa, last in the chain"
         );
         assert!(!g.is_admin(&Principal::user("alice", vec![])).await.expect("admin"));
+    }
+
+    #[tokio::test]
+    async fn organizations_and_personal_namespaces() {
+        use scion_store::{OrgMember, OrgRecord};
+        let meta = Arc::new(MemStore::new());
+        let g = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::parse("[authorization]\nchain = [\"policy\", \"orgs\", \"personal\"]")
+                    .expect("config"),
+                signing_key_pem: None,
+            },
+            meta.clone(),
+            lookup(),
+        )
+        .expect("build");
+        g.set_policy("[[rule]]\nsubjects = [\"group:org:acme:owner\"]\nrepos = [\"shared\"]\nactions = [\"land\"]")
+            .await
+            .expect("policy");
+        let org = |name: &str, visibility: &str| OrgRecord {
+            name: name.into(),
+            visibility: visibility.into(),
+            created_at_ms: 0,
+            created_by: "root".into(),
+        };
+        let member = |org: &str, subject: &str, role: &str| OrgMember {
+            org: org.into(),
+            subject: subject.into(),
+            role: role.into(),
+            added_at_ms: 0,
+            added_by: "root".into(),
+        };
+        meta.create_org(&org("acme", "private")).await.expect("org");
+        meta.create_org(&org("open", "internal")).await.expect("org");
+        meta.put_org_member(&member("acme", "alice", "owner"))
+            .await
+            .expect("member");
+        meta.put_org_member(&member("acme", "bob", "developer"))
+            .await
+            .expect("member");
+        meta.put_org_member(&member("acme", "carl", "nonsense"))
+            .await
+            .expect("member");
+        let (alice, bob, eve) = (
+            Principal::user("alice", vec![]),
+            Principal::user("bob", vec![]),
+            Principal::user("eve", vec![]),
+        );
+        let can = |p: &Principal, repo: &str, action| {
+            let (p, repo) = (p.clone(), repo.to_owned());
+            let g = g.clone();
+            async move { g.check(&p, &Request::repo(&repo, action)).await.expect("check") }
+        };
+        assert!(
+            can(&alice, "acme/new", Action::Admin).await,
+            "an owner creates repositories"
+        );
+        assert!(can(&bob, "acme/app", Action::Write).await);
+        assert!(!can(&bob, "acme/app", Action::Land).await);
+        assert!(!can(&eve, "acme/app", Action::Read).await, "private");
+        assert!(can(&eve, "open/app", Action::Read).await && !can(&eve, "open/app", Action::Write).await);
+        assert!(
+            !can(&Principal::user("carl", vec![]), "acme/app", Action::Read).await,
+            "unknown role"
+        );
+        assert!(
+            can(&alice, "shared", Action::Land).await,
+            "policies can name membership groups"
+        );
+        assert!(g.check_any(&alice, "shared", Action::Land).await.expect("any"));
+        assert!(
+            !g.is_admin(&alice).await.expect("admin"),
+            "an owner is not a system administrator"
+        );
+        assert!(can(&alice, "user/alice/notes", Action::Admin).await);
+        assert!(!can(&alice, "user/bob/notes", Action::Read).await);
+        // Changes through this node take effect at once once forgotten
+        meta.put_org_member(&member("acme", "bob", "maintainer"))
+            .await
+            .expect("role");
+        assert!(!can(&bob, "acme/app", Action::Land).await, "still cached");
+        g.forget_org_changes(Some("acme"), Some("bob")).await;
+        assert!(can(&bob, "acme/app", Action::Land).await);
+        meta.set_org_visibility("acme", "internal").await.expect("visibility");
+        g.forget_org_changes(Some("acme"), None).await;
+        assert!(can(&eve, "acme/app", Action::Read).await);
+        assert!(can(&Principal::user("x", vec![]), "acme/app", Action::Read).await);
+        assert!(!can(&Principal::anonymous(), "acme/app", Action::Read).await);
+        // Without orgs in the chain, memberships are not looked up
+        Guard::disabled().forget_org_changes(Some("acme"), None).await;
     }
 
     #[tokio::test]

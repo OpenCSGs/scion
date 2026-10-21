@@ -213,7 +213,7 @@ name = "opa"
 url = "http://opa:8181/v1/data/scion/allow"
 ```
 
-Each webhook takes the same `bearer`, `bearer_env`, `cache_ttl`, `timeout` and `on_error` as `[authz_webhook]`. When one is unavailable, `on_error = "open"` makes it have no opinion, so the next decider is asked. An `[authz_webhook]` can stay; in a chain it is called `webhook`. The design is in [authorization](../design/authorization.md).
+Two built-in deciders can join the chain. `orgs` lets organization members do what their role covers in `ORG/…` (owner: admin, maintainer: land, developer: write, reporter: read) and adds their `org:ORG:ROLE` groups, which policies can name. `personal` gives every signed-in user `user/SUBJECT/…`. Each webhook takes the same `bearer`, `bearer_env`, `cache_ttl`, `timeout` and `on_error` as `[authz_webhook]`. When one is unavailable, `on_error = "open"` makes it have no opinion, so the next decider is asked. An `[authz_webhook]` can stay; in a chain it is called `webhook`. The design is in [authorization](../design/authorization.md).
 
 ## Connecting starhub-server
 

@@ -213,7 +213,7 @@ name = "opa"
 url = "http://opa:8181/v1/data/scion/allow"
 ```
 
-每个回调都支持和 `[authz_webhook]` 相同的 `bearer`、`bearer_env`、`cache_ttl`、`timeout`、`on_error`。回调不可用时，`on_error = "open"` 让它不表态，转而询问下一个判定器。原来的 `[authz_webhook]` 可以保留，在链里叫 `webhook`。设计见[授权](../design/authorization.zh-CN.md)。
+链里还可以加两个内置判定器。`orgs` 让组织成员在 `ORG/…` 下做角色允许的事（owner：admin，maintainer：land，developer：write，reporter：read），并为成员补上 `org:ORG:ROLE` 组，策略里可以引用。`personal` 让每个登录用户拥有 `user/SUBJECT/…`。每个回调都支持和 `[authz_webhook]` 相同的 `bearer`、`bearer_env`、`cache_ttl`、`timeout`、`on_error`。回调不可用时，`on_error = "open"` 让它不表态，转而询问下一个判定器。原来的 `[authz_webhook]` 可以保留，在链里叫 `webhook`。设计见[授权](../design/authorization.zh-CN.md)。
 
 ## 接入 starhub-server
 

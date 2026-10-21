@@ -275,6 +275,10 @@ pub struct WebhookConfig {
 pub enum ChainEntry {
     Policy,
     Grants,
+    /// Organization roles (and `org:ORG:ROLE` groups).
+    Orgs,
+    /// `user/SUBJECT/*` for each signed-in user.
+    Personal,
     /// The webhook with this name.
     Webhook(String),
 }
@@ -407,12 +411,14 @@ fn authorization(raw: RawAuthorization, legacy: bool) -> Result<AuthorizationCon
                 let entry = match n.as_str() {
                     "policy" => ChainEntry::Policy,
                     "grants" => ChainEntry::Grants,
+                    "orgs" => ChainEntry::Orgs,
+                    "personal" => ChainEntry::Personal,
                     "webhook" if legacy => ChainEntry::Webhook("webhook".into()),
                     w => match w.strip_prefix("webhook:") {
                         Some(name) if webhooks.iter().any(|x| x.name == name) => ChainEntry::Webhook(name.into()),
                         _ => {
                             return Err(ConfigError::Invalid(format!(
-                                "authorization.chain: unknown decider {n:?} (policy, grants, webhook:NAME)"
+                                "authorization.chain: unknown decider {n:?} (policy, grants, orgs, personal, webhook:NAME)"
                             )));
                         }
                     },
@@ -616,7 +622,7 @@ client_id = "scn"
 url = "http://opa/allow"
 
 [authorization]
-chain = ["webhook:starhub", "policy", "webhook", "grants"]
+chain = ["webhook:starhub", "policy", "webhook", "grants", "orgs", "personal"]
 
 [[authorization.webhook]]
 name = "starhub"
@@ -633,7 +639,9 @@ cache_ttl = "10s"
                 ChainEntry::Webhook("starhub".into()),
                 ChainEntry::Policy,
                 ChainEntry::Webhook("webhook".into()),
-                ChainEntry::Grants
+                ChainEntry::Grants,
+                ChainEntry::Orgs,
+                ChainEntry::Personal
             ]
         );
         let names: Vec<&str> = c.webhooks().map(|w| w.name.as_str()).collect();

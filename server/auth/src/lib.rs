@@ -4,6 +4,7 @@ pub mod config;
 pub mod external;
 pub mod guard;
 pub mod oidc;
+pub mod orgs;
 pub mod policy;
 pub mod remote;
 pub mod token;

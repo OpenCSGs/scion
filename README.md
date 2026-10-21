@@ -107,14 +107,14 @@ Several nodes behind a load balancer share one database and bucket ([clusters](d
 
 ### Tokens
 
-Each user or CI job signs in once with `scn login SERVER --token scn_pat_…` (or sets `SCION_TOKEN`). An administrator creates tokens with `scion admin token create --subject NAME`, adding `--group admins` for another administrator or `--ttl 90d` for expiry:
+Each user or CI job signs in once with `scn login SERVER scn_pat_…` (or sets `SCION_TOKEN`). An administrator creates tokens with `scion admin token create --subject alice`, where `alice` is the user's name as commands and policies see it, adding `--group admins` for another administrator or `--ttl 90d` for expiry:
 
 | Deployment | Command |
 |---|---|
-| install script, Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject NAME` |
-| install script, macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject NAME` |
-| Docker, one node | `docker exec scion scion admin token create --lite --subject NAME` |
-| Docker Compose or production | `docker compose exec scion scion admin token create --subject NAME` |
+| install script, Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject alice` |
+| install script, macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject alice` |
+| Docker, one node | `docker exec scion scion admin token create --lite --subject alice` |
+| Docker Compose or production | `docker compose exec scion scion admin token create --subject alice` |
 
 With an OIDC provider configured, people sign in with `scn login SERVER` in a browser instead. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details.
 

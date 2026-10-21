@@ -107,14 +107,14 @@ docker exec scion scion admin token create --subject admin --group admins
 
 ### 令牌
 
-每个用户或 CI 任务登录一次：`scn login 服务端地址 --token scn_pat_…`（或设置 `SCION_TOKEN`）。管理员用 `scion admin token create --subject 用户名` 签发令牌，加 `--group admins` 是另一个管理员，加 `--ttl 90d` 按期过期：
+每个用户或 CI 任务登录一次：`scn login 服务端地址 scn_pat_…`（或设置 `SCION_TOKEN`）。管理员用 `scion admin token create --subject alice` 签发令牌（`alice` 换成实际用户名，命令和策略里看到的就是它），加 `--group admins` 是另一个管理员，加 `--ttl 90d` 按期过期：
 
 | 部署方式 | 命令 |
 |---|---|
-| 安装脚本，Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject 用户名` |
-| 安装脚本，macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject 用户名` |
-| Docker 单节点 | `docker exec scion scion admin token create --lite --subject 用户名` |
-| Docker Compose 或生产环境 | `docker compose exec scion scion admin token create --subject 用户名` |
+| 安装脚本，Linux | `sudo -u scion scion admin token create --lite --data-dir /var/lib/scion --subject alice` |
+| 安装脚本，macOS | `scion admin token create --lite --data-dir ~/Library/Application\ Support/scion --subject alice` |
+| Docker 单节点 | `docker exec scion scion admin token create --lite --subject alice` |
+| Docker Compose 或生产环境 | `docker compose exec scion scion admin token create --subject alice` |
 
 配置了 OIDC 时，用户直接 `scn login 服务端地址`，在浏览器里登录。详见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
 

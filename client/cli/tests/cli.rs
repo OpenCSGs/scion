@@ -769,10 +769,17 @@ async fn log_and_diff_commands() {
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         assert!(text.contains("-two") && text.contains("+three"), "{text}");
         assert!(text.contains("Binary files /dev/null and b/b.bin differ"), "{text}");
+        let out = scn_in(&wc, &["diff", "--stat"]);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            " a.txt | 2 +-\n b.bin | Bin 0 -> 3 bytes\n 2 files changed, 1 insertion(+), 1 deletion(-)\n"
+        );
         let out = scn_in(&wc, &["diff", "--name-status"]);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "M\ta.txt\nA\tb.bin\n");
         let out = scn_in(&wc, &["show", "--name-status"]);
         assert!(out.status.success(), "{out:?}");
+        let out = scn_in(&wc, &["show", "--stat"]);
+        assert!(String::from_utf8_lossy(&out.stdout).contains(" a.txt | "), "{out:?}");
         let v = json_of(&scn_in(&wc, &["diff", "--name-only", "--json"]));
         assert_eq!(v["files"].as_array().expect("files").len(), 2);
         let v = json_of(&scn_in(&wc, &["diff", "--path", "a.txt", "--json"]));

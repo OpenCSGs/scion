@@ -40,8 +40,8 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git add` after fixing a conflict | `scn resolve PATH`, `--ours` / `--theirs` | Refuses leftover markers unless `--force`; no paths lists conflicts |
 | `git rebase --continue`, `git merge --continue` | `scn commit` | `-m` is optional; it keeps the original message |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | git's format (default 20 commits); `--path PATH` also works |
-| `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status] [-- PATH]` | |
-| `git diff`, `git diff A B`, `A..B`, `A...B` | `scn diff`, `scn diff A B`, `A..B`, `A...B` | `--name-only`, `--name-status`, `-- PATH` |
+| `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status | --stat] [-- PATH]` | |
+| `git diff`, `git diff A B`, `A..B`, `A...B` | `scn diff`, `scn diff A B`, `A..B`, `A...B` | `--name-only`, `--name-status`, `--stat`, `-- PATH` |
 | `git blame [REV] -- PATH` | `scn blame [REV:]PATH` | |
 | `git show REV:PATH` | `scn cat REV:PATH` | No working copy needed |
 | `git ls-tree REV DIR` | `scn ls REV:DIR`, or `scn ls REV` for the root | A bare argument that is not a revision is a directory; `:DIR` forces a directory |

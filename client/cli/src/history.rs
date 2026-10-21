@@ -324,6 +324,9 @@ pub struct DiffFile {
     pub binary: bool,
     /// unified diff；`--name-only` 或二进制文件时为 None。
     pub patch: Option<String>,
+    /// Sizes of the old and new contents, when they were read (for `--stat` on binary files).
+    #[serde(skip)]
+    pub sizes: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -337,6 +340,82 @@ pub struct DiffOut {
     /// `--name-status`.
     #[serde(skip)]
     pub name_status: bool,
+    /// `--stat`.
+    #[serde(skip)]
+    pub stat: bool,
+}
+
+/// Lines added and removed by a unified diff (its hunks, not its `---` / `+++` header).
+fn line_counts(patch: &str) -> (usize, usize) {
+    patch
+        .lines()
+        .skip_while(|l| !l.starts_with("@@"))
+        .fold((0, 0), |(add, del), l| match l.as_bytes().first() {
+            Some(b'+') => (add + 1, del),
+            Some(b'-') => (add, del + 1),
+            _ => (add, del),
+        })
+}
+
+/// The widest `+++---` bar `--stat` draws; longer ones are scaled down.
+const STAT_BAR: usize = 50;
+
+/// git's `--stat`: ` PATH | N ++--` per file, then ` N files changed, X insertions(+), Y deletions(-)`.
+fn diffstat(files: &[DiffFile]) -> String {
+    let counts: Vec<(usize, usize)> = files
+        .iter()
+        .map(|f| f.patch.as_deref().map_or((0, 0), line_counts))
+        .collect();
+    let most = counts.iter().map(|(a, d)| a + d).max().unwrap_or(0);
+    let scale = |n: usize| {
+        if most <= STAT_BAR || n == 0 {
+            n
+        } else {
+            (n * STAT_BAR / most).max(1)
+        }
+    };
+    let name_width = files.iter().map(|f| f.path.chars().count()).max().unwrap_or(0);
+    // As in git, binary files' "Bin" does not widen the count column
+    let count_width = counts
+        .iter()
+        .zip(files)
+        .filter(|(_, f)| !f.binary)
+        .map(|((a, d), _)| (a + d).to_string().len())
+        .max()
+        .unwrap_or(1);
+    let mut out: Vec<String> = files
+        .iter()
+        .zip(&counts)
+        .map(|(f, (add, del))| {
+            let what = if f.binary {
+                match f.sizes {
+                    Some((old, new)) => format!("Bin {old} -> {new} bytes"),
+                    None => "Bin".to_owned(),
+                }
+            } else {
+                format!(
+                    "{:>count_width$} {}{}",
+                    add + del,
+                    "+".repeat(scale(*add)),
+                    "-".repeat(scale(*del))
+                )
+            };
+            format!(" {:<name_width$} | {}", f.path, what.trim_end())
+        })
+        .collect();
+    let (add, del) = counts.iter().fold((0, 0), |(a, d), (x, y)| (a + x, d + y));
+    let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut summary = format!(" {}", plural(files.len(), "file changed", "files changed"));
+    if add > 0 {
+        summary.push_str(&format!(", {}", plural(add, "insertion(+)", "insertions(+)")));
+    }
+    if del > 0 {
+        summary.push_str(&format!(", {}", plural(del, "deletion(-)", "deletions(-)")));
+    }
+    if !files.is_empty() {
+        out.push(summary);
+    }
+    out.join("\n")
 }
 
 /// A mode name in JSON (`file`, `executable`, `symlink`) as git's octal mode.
@@ -352,6 +431,9 @@ fn git_mode(name: &str) -> &'static str {
 /// `--name-status` adds the status letter; no differences print nothing.
 impl Render for DiffOut {
     fn text(&self) -> String {
+        if self.stat {
+            return diffstat(&self.files);
+        }
         if self.name_only || self.name_status {
             return self
                 .files
@@ -419,6 +501,10 @@ fn mode_name(m: Mode) -> &'static str {
 
 fn entry_mode_name(m: scion_client::EntryMode) -> &'static str {
     crate::commands::kind(m)
+}
+
+fn size(b: Option<&[u8]>) -> u64 {
+    b.map_or(0, |b| b.len() as u64)
 }
 
 fn is_binary(b: &[u8]) -> bool {
@@ -498,10 +584,12 @@ async fn remote_files(
     let mut files = Vec::with_capacity(changes.len());
     for c in changes {
         let (old_id, new_id) = (c.old.as_ref().map(|e| e.id), c.new.as_ref().map(|e| e.id));
+        let mut sizes = None;
         let (binary, patch) = if name_only {
             (false, None)
         } else {
             let (o, n) = (fetch(client, old_id).await?, fetch(client, new_id).await?);
+            sizes = Some((size(o.as_deref()), size(n.as_deref())));
             render_patch(&c.path, o.as_deref(), n.as_deref())
         };
         files.push(DiffFile {
@@ -512,6 +600,7 @@ async fn remote_files(
             new_mode: c.new.as_ref().map(|e| entry_mode_name(e.mode)),
             binary,
             patch,
+            sizes,
             path: c.path,
         });
     }
@@ -574,6 +663,7 @@ pub async fn diff(ctx: &Ctx, revs: &[String], path: Option<&str>, name_only: boo
         to,
         name_only,
         name_status: false,
+        stat: false,
     })
 }
 
@@ -624,6 +714,7 @@ pub async fn show(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, name_on
             to: id,
             name_only,
             name_status: false,
+            stat: false,
         },
         commit: log_line(entry),
     })
@@ -644,11 +735,14 @@ async fn local_diff(ctx: &Ctx, path: Option<&str>, name_only: bool) -> Result<Di
     changes.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     let mut files = Vec::with_capacity(changes.len());
     for c in changes {
+        let mut sizes = None;
         let (binary, patch) = if name_only {
             (false, None)
         } else {
             let old = fetch(&client, c.old.map(|(_, id)| id)).await?;
-            render_patch(&c.path, old.as_deref(), c.new.as_ref().map(|(_, b)| b.as_ref()))
+            let new = c.new.as_ref().map(|(_, b)| b.as_ref());
+            sizes = Some((size(old.as_deref()), size(new)));
+            render_patch(&c.path, old.as_deref(), new)
         };
         files.push(DiffFile {
             status: status_of(c.old.is_some(), c.new.is_some()),
@@ -658,6 +752,7 @@ async fn local_diff(ctx: &Ctx, path: Option<&str>, name_only: bool) -> Result<Di
             new_mode: c.new.as_ref().map(|(m, _)| mode_name(*m)),
             binary,
             patch,
+            sizes,
             path: c.path,
         });
     }
@@ -669,6 +764,7 @@ async fn local_diff(ctx: &Ctx, path: Option<&str>, name_only: bool) -> Result<Di
         files,
         name_only,
         name_status: false,
+        stat: false,
     })
 }
 
@@ -706,6 +802,7 @@ mod tests {
             files: vec![],
             name_only: true,
             name_status: false,
+            stat: false,
         };
         let text = ShowOut {
             schema: "s",
@@ -803,7 +900,47 @@ mod tests {
             new_mode: new,
             binary,
             patch: Some("@@ -1 +1 @@\n".into()),
+            sizes: None,
         }
+    }
+
+    #[test]
+    fn diffstat_like_git() {
+        let patch = |p: &str| DiffFile {
+            patch: Some(p.into()),
+            ..file("M", Some("file"), Some("file"), false)
+        };
+        let files = vec![
+            DiffFile {
+                path: "src/lib.rs".into(),
+                ..patch("--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n+four\n")
+            },
+            DiffFile {
+                path: "b.bin".into(),
+                sizes: Some((0, 12)),
+                ..file("A", None, Some("file"), true)
+            },
+            DiffFile {
+                path: "x".into(),
+                patch: None,
+                ..file("M", Some("file"), Some("executable"), false)
+            },
+        ];
+        assert_eq!(
+            diffstat(&files),
+            " src/lib.rs | 3 ++-\n b.bin      | Bin 0 -> 12 bytes\n x          | 0\n \
+             3 files changed, 2 insertions(+), 1 deletion(-)"
+        );
+        let big = vec![patch(&format!("@@ -1 +1 @@\n{}", "+x\n".repeat(200)))];
+        let text = diffstat(&big);
+        assert!(
+            text.starts_with(&format!(" p | 200 {}\n", "+".repeat(STAT_BAR))),
+            "{text}"
+        );
+        assert!(text.ends_with(" 1 file changed, 200 insertions(+)"), "{text}");
+        let bin = vec![file("M", Some("file"), Some("file"), true)];
+        assert_eq!(diffstat(&bin), " p | Bin\n 1 file changed");
+        assert_eq!(diffstat(&[]), "");
     }
 
     #[test]
@@ -815,6 +952,7 @@ mod tests {
             files: vec![],
             name_only: false,
             name_status: false,
+            stat: false,
         };
         assert_eq!(out.text(), "");
         let out = DiffOut {
@@ -849,6 +987,7 @@ mod tests {
             files: vec![ids],
             name_only: false,
             name_status: false,
+            stat: false,
             ..names
         }
         .text();

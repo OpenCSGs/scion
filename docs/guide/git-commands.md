@@ -20,7 +20,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git tag [-l]`, `git tag NAME [REV]`, `git tag -d NAME` | the same | Lightweight tags |
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | the same | |
 | `git show [REV] [-- PATH]` | the same | |
-| `git diff [--cached]`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH`; with no staging area, `--cached` / `--staged` show the same local changes |
+| `git diff [--cached]`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `--stat`, `-- PATH`; with no staging area, `--cached` / `--staged` show the same local changes |
 | `git blame [-L N,M] PATH` | `scn blame [-L N,M] PATH` | `scn blame REV:PATH` for a revision |
 | `git remote -v`, `git remote get-url origin`, `git remote set-url origin URL` | the same | One remote, `origin`; `set-url` checks the new URL has the working copy's commits |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`, `--prefix`, `-o FILE` |

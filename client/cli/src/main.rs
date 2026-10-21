@@ -437,6 +437,9 @@ enum Command {
         /// Only the changed files' names and status (A / M / D).
         #[arg(long, conflicts_with = "name_only")]
         name_status: bool,
+        /// Per-file counts of changed lines, and totals, as git's `--stat`.
+        #[arg(long, conflicts_with_all = ["name_only", "name_status"])]
+        stat: bool,
         /// `-- PATH`: only changes under this path.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
@@ -475,6 +478,9 @@ enum Command {
         /// Only the changed files' names and status (A / M / D).
         #[arg(long, conflicts_with = "name_only")]
         name_status: bool,
+        /// Per-file counts of changed lines, and totals, as git's `--stat`.
+        #[arg(long, conflicts_with_all = ["name_only", "name_status"])]
+        stat: bool,
         /// Accepted for git compatibility: scn has no staging area, so every local change is
         /// staged and plain `scn diff` shows them all.
         #[arg(long, visible_alias = "staged")]
@@ -1293,6 +1299,7 @@ async fn run(cli: Cli) -> ExitCode {
             revision,
             name_only,
             name_status,
+            stat,
             paths,
         } => match one_path(None, paths) {
             Ok(path) => emit(
@@ -1300,6 +1307,7 @@ async fn run(cli: Cli) -> ExitCode {
                     .await
                     .map(|mut s| {
                         s.diff.name_status = name_status;
+                        s.diff.stat = stat;
                         s
                     }),
                 json,
@@ -1312,13 +1320,14 @@ async fn run(cli: Cli) -> ExitCode {
             path,
             name_only,
             name_status,
+            stat,
             paths,
             ..
         } => match one_path(path, paths) {
             Ok(path) => emit(
                 history::diff(&ctx, &revisions, path.as_deref(), name_only || name_status)
                     .await
-                    .map(|d| DiffOut { name_status, ..d }),
+                    .map(|d| DiffOut { name_status, stat, ..d }),
                 json,
             ),
             Err(e) => fail(&e, json),

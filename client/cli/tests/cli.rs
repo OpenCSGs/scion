@@ -385,7 +385,10 @@ async fn clone_commit_land_sync_workflow() {
         let out = scn_in(&wc, &["merge", "topic"]);
         assert_eq!(out.status.code(), Some(3), "{out:?}");
         assert!(
-            String::from_utf8_lossy(&out.stderr).contains("conflict in src/lib.rs"),
+            String::from_utf8_lossy(&out.stderr).starts_with(
+                "CONFLICT (content): Merge conflict in src/lib.rs\n\
+                 scn: automatic merge failed; fix conflicts and then commit the result\n"
+            ),
             "{out:?}"
         );
         let out = scn_in(&wc, &["status", "--short"]);
@@ -397,7 +400,13 @@ async fn clone_commit_land_sync_workflow() {
         json_of(&scn_in(&wc, &["merge", "--abort", "--json"]));
         let v = json_of(&scn_in(&wc, &["status", "--json"]));
         assert_eq!(v["conflicted"], serde_json::json!([]));
-        assert_eq!(scn_in(&wc, &["merge", "topic"]).status.code(), Some(3));
+        let out = scn_in(&wc, &["merge", "topic", "--json"]);
+        assert_eq!(out.status.code(), Some(3));
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("json");
+        assert_eq!(
+            v["conflicts"],
+            serde_json::json!([{"path": "src/lib.rs", "kind": "content"}])
+        );
         let out = scn_in(&wc, &["resolve", "src/lib.rs"]);
         assert_eq!(out.status.code(), Some(1), "markers remain: {out:?}");
         assert_eq!(

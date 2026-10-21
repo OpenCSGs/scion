@@ -8,7 +8,7 @@ use scion_client::{Client, EntryMode};
 use scion_wc::{Progress, Sparse, Status, SyncOutcome, WorkingCopy};
 use serde::Serialize;
 
-use crate::output::{CliError, DoctorOut, Render, doctor_out};
+use crate::output::{CliError, ConflictOut, DoctorOut, Render, doctor_out};
 use crate::progress::Meter;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:7080";
@@ -834,7 +834,8 @@ pub async fn merge(ctx: &Ctx, other: &str, message: Option<&str>, author: Option
             message,
             author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())),
         )
-        .await?;
+        .await
+        .map_err(|e| conflicted(&wc, true, e))?;
     Ok(match o {
         scion_wc::MergeOutcome::UpToDate => MergeOut {
             schema: "scion.cli.merge/v1",
@@ -849,6 +850,27 @@ pub async fn merge(ctx: &Ctx, other: &str, message: Option<&str>, author: Option
             removed,
         },
     })
+}
+
+/// A sync or merge that stopped on conflicts, with each path's kind from the saved state.
+fn conflicted(wc: &WorkingCopy, merge: bool, e: scion_wc::Error) -> CliError {
+    let scion_wc::Error::Conflict(paths) = e else {
+        return e.into();
+    };
+    let kinds = wc.state().conflict.as_ref().map(|c| &c.paths);
+    CliError::Conflicted {
+        merge,
+        reference: wc.state().reference.clone(),
+        conflicts: paths
+            .into_iter()
+            .map(|path| ConflictOut {
+                kind: kinds
+                    .and_then(|k| k.get(&path))
+                    .map_or_else(|| "content".to_owned(), |s| s.kind.clone()),
+                path,
+            })
+            .collect(),
+    }
 }
 
 /// `--author`, else the configured author (scn config, then git); a hint when there is none.
@@ -1008,7 +1030,7 @@ pub fn sync_out(wc: &WorkingCopy, old: Option<String>, o: &SyncOutcome) -> SyncO
 pub async fn sync(ctx: &Ctx) -> Result<SyncOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
     let old = wc.state().base.clone();
-    let o = wc.sync(&client).await?;
+    let o = wc.sync(&client).await.map_err(|e| conflicted(&wc, false, e))?;
     Ok(sync_out(&wc, old, &o))
 }
 

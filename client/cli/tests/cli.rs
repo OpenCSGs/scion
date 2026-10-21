@@ -367,7 +367,7 @@ async fn clone_commit_land_sync_workflow() {
         assert!(v["changeset"].is_string());
         json_of(&scn_in(&wc, &["land", "--json"]));
         let out = scn_in(&wc, &["merge", "topic"]);
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "already up to date");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Already up to date.\n");
         json_of(&scn_in(&wc, &["switch", "topic", "--json"]));
         std::fs::write(wc.join("src/lib.rs"), "pub fn f() -> u8 { 3 }\n").expect("edit");
         json_of(&scn_in(

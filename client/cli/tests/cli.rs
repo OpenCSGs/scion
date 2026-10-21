@@ -582,7 +582,10 @@ async fn clone_commit_land_sync_workflow() {
         assert!(v["base"].is_string());
         std::fs::write(wc.join("src/lib.rs"), "pub fn f() -> u8 { 1 }\n").expect("edit");
         json_of(&scn_in(&wc, &["commit", "-m", "edit", "--json"]));
-        json_of(&scn_in(&wc, &["land", "--json"]));
+        let out = scn_in(&wc, &["land"]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.starts_with(&format!("To {u}/team/app\n   c1")), "{text}");
+        assert!(text.ends_with("  main -> main\n"), "{text}");
         let v = json_of(&scn_in(&root.join("second"), &["sync", "--json"]));
         assert_eq!(v["outcome"], "updated");
         assert_eq!(

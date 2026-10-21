@@ -111,12 +111,15 @@ fn percent(done: u64, total: u64) -> u64 {
 
 /// One progress line, as git draws it.
 fn line(title: &str, done: u64, total: Option<u64>, bytes: Option<u64>, elapsed: Duration) -> String {
-    let mut s = match total {
-        Some(t) => format!("{title}: {:>3}% ({done}/{t})", percent(done, t)),
-        None => format!("{title}: {done}"),
+    let mut s = match (total, bytes) {
+        (Some(t), Some(_)) => format!("{title}: {:>3}% ({done}/{t}), ", percent(done, t)),
+        (Some(t), None) => format!("{title}: {:>3}% ({done}/{t})", percent(done, t)),
+        // Only a size: `Receiving archive: 1.20 MiB`
+        (None, Some(_)) => format!("{title}: "),
+        (None, None) => format!("{title}: {done}"),
     };
     if let Some(b) = bytes {
-        s.push_str(&format!(", {}", human(b)));
+        s.push_str(&human(b));
         let secs = elapsed.as_secs_f64();
         if secs >= 0.5 {
             s.push_str(&format!(" | {}/s", human((b as f64 / secs) as u64)));
@@ -175,6 +178,10 @@ mod tests {
         assert_eq!(
             line("Importing commits", 0, Some(0), None, ms(0)),
             "Importing commits: 100% (0/0)"
+        );
+        assert_eq!(
+            line("Receiving archive", 0, None, Some(1 << 20), ms(1000)),
+            "Receiving archive: 1.00 MiB | 1.00 MiB/s"
         );
         assert_eq!(human(10), "10 bytes");
         assert_eq!(human(1536), "1.50 KiB");

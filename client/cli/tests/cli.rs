@@ -223,7 +223,7 @@ async fn clone_commit_land_sync_workflow() {
                 zip.to_str().expect("path"),
             ],
         );
-        assert!(String::from_utf8_lossy(&out.stdout).starts_with("wrote "), "{out:?}");
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
         let listed = std::process::Command::new("unzip")
             .arg("-Z1")
             .arg(&zip)

@@ -1190,14 +1190,30 @@ pub struct ArchiveOut {
     pub output: Option<String>,
 }
 
+/// Silent, like `git archive -o FILE`.
 impl Render for ArchiveOut {
     fn text(&self) -> String {
-        format!(
-            "wrote {} ({} bytes, {})",
-            self.output.as_deref().unwrap_or("-"),
-            self.bytes,
-            short(&self.changeset)
-        )
+        String::new()
+    }
+}
+
+/// Passes writes through, showing how many bytes went by.
+struct Counting<'a, W> {
+    inner: W,
+    bytes: u64,
+    meter: &'a Meter,
+}
+
+impl<W: std::io::Write> std::io::Write for Counting<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes += n as u64;
+        self.meter.update("Receiving archive", 0, None, Some(self.bytes));
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -1215,11 +1231,16 @@ pub async fn archive(
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_tree_spec(&client, ctx, spec.unwrap_or(""), &default_rev).await?;
     let (rev, path) = (rev.as_str(), path.as_str());
+    let meter = Meter::stderr(ctx.chatty);
     let (changeset, bytes) = match output {
         Some(file) => {
             let f =
                 std::fs::File::create(file).map_err(|e| CliError::Usage(format!("create {}: {e}", file.display())))?;
-            let mut w = std::io::BufWriter::new(f);
+            let mut w = Counting {
+                inner: std::io::BufWriter::new(f),
+                bytes: 0,
+                meter: &meter,
+            };
             let r = client.archive(rev, path, fmt, prefix, &mut w).await;
             let flushed = std::io::Write::flush(&mut w);
             if r.is_err() {
@@ -1230,8 +1251,16 @@ pub async fn archive(
             flushed.map_err(|e| CliError::Usage(format!("write {}: {e}", file.display())))?;
             r
         }
-        None => client.archive(rev, path, fmt, prefix, out).await?,
+        None => {
+            let mut w = Counting {
+                inner: out,
+                bytes: 0,
+                meter: &meter,
+            };
+            client.archive(rev, path, fmt, prefix, &mut w).await?
+        }
     };
+    meter.done();
     Ok(ArchiveOut {
         schema: "scion.cli.archive/v1",
         revision: rev.to_owned(),

@@ -83,7 +83,7 @@ Runs under systemd on Linux (data in `/var/lib/scion`) or launchd on macOS (data
 ### Option 2: Docker, one node (SQLite and a local directory)
 
 ```sh
-docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest
+docker run -d --name scion -p 7080:7080 -v scion-data:/data opencsghq/scion:latest
 docker exec scion scion admin token create --lite --subject admin --group admins   # shown only once
 
 scn login http://localhost:7080 --token scn_pat_…
@@ -99,7 +99,7 @@ docker run -d --name scion -p 7080:7080 \
   -e SCION_META=postgres://scion:PASSWORD@db:5432/scion \
   -e SCION_BLOBS=s3://scion-objects -e SCION_S3_ENDPOINT=https://s3.example.com \
   -e SCION_S3_ACCESS_KEY_ID=… -e SCION_S3_SECRET_ACCESS_KEY=… \
-  opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
+  opencsghq/scion:latest --log-format json server --listen 0.0.0.0:7080 --auth-required
 docker exec scion scion admin token create --subject admin --group admins
 ```
 

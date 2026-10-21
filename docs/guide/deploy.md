@@ -58,7 +58,7 @@ On macOS, use `shasum -a 256 --check --ignore-missing SHA256SUMS`. The binaries 
 
 The `Dockerfile` at the repository root builds an image with `scion` (the server, the regional cache and the admin commands) and `scn` (the client). It runs as an unprivileged user (uid 10001).
 
-The prebuilt image is `opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion` (tags `latest` and a version such as `0.1.1`), for `linux/amd64` and `linux/arm64`: it runs on Linux servers and in Docker Desktop on Macs, Apple silicon and Intel alike. The release workflow pushes it for every release tag. A multi-arch build of your own cross-compiles on the build machine's architecture, without QEMU emulation:
+The prebuilt image is `opencsghq/scion` on Docker Hub (tags `latest` and a version such as `0.1.1`), for `linux/amd64` and `linux/arm64`: it runs on Linux servers and in Docker Desktop on Macs, Apple silicon and Intel alike. The release workflow pushes it for every release tag. A multi-arch build of your own cross-compiles on the build machine's architecture, without QEMU emulation:
 
 ```sh
 docker buildx build --platform linux/amd64,linux/arm64 -t <registry>/scion:latest --push .

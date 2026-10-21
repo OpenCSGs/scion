@@ -275,6 +275,22 @@ enum Command {
     },
     #[command(hide = true)]
     Mv { from: PathBuf, to: PathBuf },
+    /// git commands scn does without: they say what to do instead.
+    #[command(hide = true)]
+    Init {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(hide = true)]
+    Fetch {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(hide = true)]
+    Stash {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Mark conflicted files resolved (after editing out the markers), or take one side's
     /// version. Without PATHS, lists the conflicts. `.` means all.
     #[command(
@@ -478,6 +494,17 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum RemoteCmd {
+    /// Same as `scn remote -v`.
+    Show {
+        /// origin (the only remote).
+        name: Option<String>,
+    },
+    /// Not supported: a working copy has one remote (see set-url).
+    #[command(hide = true, alias = "remove", alias = "rm", alias = "rename")]
+    Add {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print the URL: http(s)://host[:port]/REPOSITORY.
     GetUrl {
         /// origin (the only remote).
@@ -845,6 +872,18 @@ async fn run(cli: Cli) -> ExitCode {
                 ),
                 json,
             ),
+            Some(RemoteCmd::Show { name }) => {
+                arg!(remote::check_name(name.as_deref()));
+                emit(remote::show(&ctx, remote::Show::Verbose), json)
+            }
+            Some(RemoteCmd::Add { .. }) => fail(
+                &CliError::Usage(
+                    "a working copy has one remote, origin; point it elsewhere with `scn remote set-url URL`, \
+                     or clone the other repository"
+                        .into(),
+                ),
+                json,
+            ),
             Some(RemoteCmd::GetUrl { name }) => {
                 arg!(remote::check_name(name.as_deref()));
                 emit(remote::show(&ctx, remote::Show::Url), json)
@@ -1066,6 +1105,22 @@ async fn run(cli: Cli) -> ExitCode {
             eprintln!("note: there is no staging area; `scn commit` takes every local change");
             ExitCode::SUCCESS
         }
+        Command::Init { .. } => fail(
+            &CliError::Usage("repositories live on the server: `scn repo create NAME`, then `scn clone URL`".into()),
+            json,
+        ),
+        Command::Fetch { .. } => fail(
+            &CliError::Usage("there is no local history to fetch into; `scn sync` updates the working copy".into()),
+            json,
+        ),
+        Command::Stash { .. } => fail(
+            &CliError::Usage(
+                "there is no stash; keep the changes in a pending commit (`scn commit`, later `scn uncommit`), \
+                 or on a branch (`scn switch -c NAME`)"
+                    .into(),
+            ),
+            json,
+        ),
         Command::Rm { paths, recursive } => {
             transitional("rm", "commit (after deleting the files yourself)");
             let mut first_error = None;

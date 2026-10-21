@@ -62,4 +62,4 @@
 
 ## 尚未支持
 
-`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote add` 和 `fetch`。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。
+`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote add` 和 `fetch`。`scn init`、`fetch`、`stash`、`remote add` 会提示该改用什么。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。

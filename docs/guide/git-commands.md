@@ -62,4 +62,4 @@ Commands that read history also work outside a working copy with `--repo URL`, f
 
 ## Not available yet
 
-`revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote add` and `fetch`. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).
+`revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote add` and `fetch`. `scn init`, `fetch`, `stash` and `remote add` say what to use instead. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).

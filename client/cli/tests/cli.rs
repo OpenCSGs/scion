@@ -1301,6 +1301,21 @@ async fn repository_urls_name_the_server() {
             format!("origin\t{repo_url} (fetch)\norigin\t{repo_url} (push)\n")
         );
         assert_eq!(text(&["remote", "get-url", "origin"]), format!("{repo_url}\n"));
+        assert_eq!(text(&["remote", "show", "origin"]), text(&["remote", "-v"]));
+        // git commands scn does without explain themselves
+        for args in [
+            &["remote", "add", "up", "http://x:1/y"][..],
+            &["init"],
+            &["fetch", "origin"],
+            &["stash", "pop"],
+        ] {
+            let out = scn_in(&wc, args);
+            assert_eq!(out.status.code(), Some(2), "{args:?}");
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains('`'),
+                "says what to use: {out:?}"
+            );
+        }
         assert_eq!(scn_in(&wc, &["remote", "get-url", "upstream"]).status.code(), Some(2));
         assert_eq!(scn_in(&wc, &["remote", "set-url", "not-a-url"]).status.code(), Some(2));
         assert_eq!(

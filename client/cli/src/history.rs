@@ -293,32 +293,73 @@ pub struct DiffOut {
     pub files: Vec<DiffFile>,
     #[serde(skip)]
     pub name_only: bool,
+    /// `--name-status`.
+    #[serde(skip)]
+    pub name_status: bool,
 }
 
+/// A mode name in JSON (`file`, `executable`, `symlink`) as git's octal mode.
+fn git_mode(name: &str) -> &'static str {
+    match name {
+        "executable" => "100755",
+        "symlink" => "120000",
+        _ => "100644",
+    }
+}
+
+/// Like `git diff`: `diff --git` headers and unified diffs; `--name-only` lists paths and
+/// `--name-status` adds the status letter; no differences print nothing.
 impl Render for DiffOut {
     fn text(&self) -> String {
-        if self.files.is_empty() {
-            return "no differences".to_owned();
-        }
-        if self.name_only {
+        if self.name_only || self.name_status {
             return self
                 .files
                 .iter()
-                .map(|f| format!("{} {}", f.status, f.path))
+                .map(|f| {
+                    if self.name_status {
+                        format!("{}\t{}", f.status, f.path)
+                    } else {
+                        f.path.clone()
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
         }
         let mut out = String::new();
         for f in &self.files {
-            out.push_str(&format!("diff --scion a/{0} b/{0}\n", f.path));
+            out.push_str(&format!("diff --git a/{0} b/{0}\n", f.path));
             match (f.old_mode, f.new_mode) {
-                (None, Some(m)) => out.push_str(&format!("new file ({m})\n")),
-                (Some(m), None) => out.push_str(&format!("deleted file ({m})\n")),
-                (Some(a), Some(b)) if a != b => out.push_str(&format!("mode change {a} => {b}\n")),
+                (None, Some(m)) => out.push_str(&format!("new file mode {}\n", git_mode(m))),
+                (Some(m), None) => out.push_str(&format!("deleted file mode {}\n", git_mode(m))),
+                (Some(a), Some(b)) if a != b => {
+                    out.push_str(&format!("old mode {}\nnew mode {}\n", git_mode(a), git_mode(b)));
+                }
                 _ => {}
             }
+            if f.old_id.is_some() || f.new_id.is_some() {
+                let id = |i: &Option<String>| {
+                    i.as_deref()
+                        .map_or("000000000000", |i| &i[..i.len().min(12)])
+                        .to_owned()
+                };
+                let mode = match (f.old_mode, f.new_mode) {
+                    (Some(a), Some(b)) if a == b => format!(" {}", git_mode(a)),
+                    _ => String::new(),
+                };
+                out.push_str(&format!("index {}..{}{mode}\n", id(&f.old_id), id(&f.new_id)));
+            }
             if f.binary {
-                out.push_str(&format!("Binary files a/{0} and b/{0} differ\n", f.path));
+                let a = if f.old_mode.is_some() {
+                    format!("a/{}", f.path)
+                } else {
+                    "/dev/null".to_owned()
+                };
+                let b = if f.new_mode.is_some() {
+                    format!("b/{}", f.path)
+                } else {
+                    "/dev/null".to_owned()
+                };
+                out.push_str(&format!("Binary files {a} and {b} differ\n"));
             } else if let Some(p) = &f.patch {
                 out.push_str(p);
             }
@@ -368,6 +409,7 @@ fn diff_algorithm(old: &[u8], new: &[u8]) -> similar::Algorithm {
 }
 
 pub fn render_patch(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> (bool, Option<String>) {
+    let (old_present, new_present) = (old.is_some(), new.is_some());
     let (old, new) = (old.unwrap_or_default(), new.unwrap_or_default());
     if is_binary(old) || is_binary(new) {
         return (true, None);
@@ -376,10 +418,17 @@ pub fn render_patch(path: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> (bool
     let diff = similar::TextDiff::configure()
         .algorithm(diff_algorithm(a.as_bytes(), b.as_bytes()))
         .diff_lines(a.as_ref(), b.as_ref());
+    let side = |present: bool, prefix: &str| {
+        if present {
+            format!("{prefix}/{path}")
+        } else {
+            "/dev/null".to_owned()
+        }
+    };
     let patch = diff
         .unified_diff()
         .context_radius(3)
-        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .header(&side(old_present, "a"), &side(new_present, "b"))
         .to_string();
     (false, Some(patch))
 }
@@ -483,6 +532,7 @@ pub async fn diff(ctx: &Ctx, revs: &[String], path: Option<&str>, name_only: boo
         from,
         to,
         name_only,
+        name_status: false,
     })
 }
 
@@ -532,6 +582,7 @@ pub async fn show(ctx: &Ctx, revision: Option<&str>, path: Option<&str>, name_on
             from,
             to: id,
             name_only,
+            name_status: false,
         },
         commit: log_line(entry),
     })
@@ -576,6 +627,7 @@ async fn local_diff(ctx: &Ctx, path: Option<&str>, name_only: bool) -> Result<Di
         to: "working copy".to_owned(),
         files,
         name_only,
+        name_status: false,
     })
 }
 
@@ -612,6 +664,7 @@ mod tests {
             to: "x".into(),
             files: vec![],
             name_only: true,
+            name_status: false,
         };
         let text = ShowOut {
             schema: "s",
@@ -720,24 +773,45 @@ mod tests {
             to: "t".into(),
             files: vec![],
             name_only: false,
+            name_status: false,
         };
-        assert_eq!(out.text(), "no differences");
+        assert_eq!(out.text(), "");
         let out = DiffOut {
             files: vec![
                 file("A", None, Some("file"), false),
-                file("D", Some("file"), None, false),
+                file("D", Some("symlink"), None, false),
                 file("M", Some("file"), Some("executable"), false),
                 file("M", Some("file"), Some("file"), true),
+                file("A", None, Some("file"), true),
             ],
             ..out
         };
         let t = out.text();
-        assert!(t.contains("new file (file)"));
-        assert!(t.contains("deleted file (file)"));
-        assert!(t.contains("mode change file => executable"));
-        assert!(t.contains("Binary files a/p and b/p differ"));
+        assert!(t.starts_with("diff --git a/p b/p\nnew file mode 100644\n"), "{t}");
+        assert!(t.contains("deleted file mode 120000\n"), "{t}");
+        assert!(t.contains("old mode 100644\nnew mode 100755\n"), "{t}");
+        assert!(t.contains("Binary files a/p and b/p differ"), "{t}");
+        assert!(t.ends_with("Binary files /dev/null and b/p differ"), "{t}");
         let names = DiffOut { name_only: true, ..out };
-        assert_eq!(names.text(), "A p\nD p\nM p\nM p");
+        assert_eq!(names.text(), "p\np\np\np\np");
+        let names = DiffOut {
+            name_status: true,
+            ..names
+        };
+        assert_eq!(names.text(), "A\tp\nD\tp\nM\tp\nM\tp\nA\tp");
+        let ids = DiffFile {
+            old_id: Some("b1oldoldoldoldold".into()),
+            new_id: Some("b1newnewnewnewnew".into()),
+            ..file("M", Some("file"), Some("file"), false)
+        };
+        let t = DiffOut {
+            files: vec![ids],
+            name_only: false,
+            name_status: false,
+            ..names
+        }
+        .text();
+        assert!(t.contains("\nindex b1oldoldoldo..b1newnewnewn 100644\n"), "{t}");
     }
 
     #[test]

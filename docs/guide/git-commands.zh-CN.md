@@ -19,7 +19,7 @@
 | `git tag`、`git tag NAME [REV]`、`git tag -d NAME` | `scn tag`、`scn tag NAME [REV]`、`scn tag -d NAME` | 轻量标签 |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | 相同 | |
 | `git show [REV] [-- PATH]` | 相同 | |
-| `git diff`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`-- PATH` |
+| `git diff`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH` |
 | `git blame PATH` | `scn blame PATH` | 指定版本用 `scn blame REV:PATH` |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`、`--prefix`、`-o FILE` |
 | 版本号：`HEAD`、`@`、`HEAD~1`、`main^2`、`A..B`、40 位 SHA | 相同 | 每个提交都有 git SHA |

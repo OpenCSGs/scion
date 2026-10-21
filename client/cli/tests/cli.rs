@@ -794,7 +794,7 @@ async fn log_and_diff_commands() {
         assert_eq!(commits[0], first_id);
         assert_ne!(commits[1], first_id);
         let text = String::from_utf8_lossy(&scn_in(&wc, &["blame", "main:a.txt"]).stdout).to_string();
-        assert!(text.contains("| three"), "{text}");
+        assert!(text.contains(" 2) three"), "{text}");
         let out = scn_in(&wc, &["diff", "a", "b", "c"]);
         assert_eq!(out.status.code(), Some(2));
     })

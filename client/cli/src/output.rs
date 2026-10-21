@@ -17,6 +17,12 @@ pub enum CliError {
     Wc(scion_wc::Error),
     Import(scion_gitimport::Error),
     Usage(String),
+    /// A sync (`merge: false`) or merge stopped on conflicts; the files hold conflict markers.
+    Conflicted {
+        merge: bool,
+        reference: String,
+        conflicts: Vec<ConflictOut>,
+    },
 }
 
 impl From<scion_gitimport::Error> for CliError {
@@ -50,6 +56,13 @@ impl std::fmt::Display for CliError {
             CliError::Wc(e) => e.fmt(f),
             CliError::Import(e) => e.fmt(f),
             CliError::Usage(m) => f.write_str(m),
+            CliError::Conflicted { merge: true, .. } => {
+                f.write_str("automatic merge failed; fix conflicts and then commit the result")
+            }
+            CliError::Conflicted { reference, .. } => write!(
+                f,
+                "could not rebase your commit onto {reference}; fix conflicts and then commit the result"
+            ),
         }
     }
 }
@@ -66,7 +79,8 @@ impl CliError {
     pub fn exit_code(&self) -> u8 {
         match self {
             CliError::Usage(_) | CliError::Wc(scion_wc::Error::Sparse(_)) => EXIT_USAGE,
-            CliError::Wc(
+            CliError::Conflicted { .. }
+            | CliError::Wc(
                 scion_wc::Error::Conflict(_) | scion_wc::Error::MergeConflicts(_) | scion_wc::Error::Unresolved(_),
             ) => EXIT_CONFLICT,
             CliError::Wc(_) | CliError::Import(_) => EXIT_GENERAL,
@@ -124,7 +138,7 @@ impl CliError {
             CliError::Import(scion_gitimport::Error::Diverged { .. }) => {
                 Some("the git history was rewritten; import into a new ref with --ref")
             }
-            CliError::Wc(scion_wc::Error::Conflict(_)) => Some(
+            CliError::Conflicted { .. } | CliError::Wc(scion_wc::Error::Conflict(_)) => Some(
                 "the files now hold conflict markers: fix them, then `scn resolve PATH` \
                  (or --ours / --theirs), then `scn commit`; `scn merge --abort` undoes a merge",
             ),
@@ -152,7 +166,7 @@ pub struct ErrorOut {
     pub conflicts: Vec<ConflictOut>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConflictOut {
     pub path: String,
     pub kind: String,
@@ -166,19 +180,33 @@ pub fn error_out(err: &CliError) -> ErrorOut {
         retryable: err.client().is_some_and(|e| e.is_retryable()),
         exit_code: err.exit_code(),
         hint: err.hint(),
-        conflicts: err
-            .client()
-            .and_then(|e| e.merge_conflict())
-            .map(|c| {
-                c.paths
-                    .into_iter()
-                    .map(|p| ConflictOut {
-                        path: p.path,
-                        kind: p.kind,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        conflicts: match err {
+            CliError::Conflicted { conflicts, .. } => conflicts.clone(),
+            _ => err
+                .client()
+                .and_then(|e| e.merge_conflict())
+                .map(|c| {
+                    c.paths
+                        .into_iter()
+                        .map(|p| ConflictOut {
+                            path: p.path,
+                            kind: p.kind,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+    }
+}
+
+/// git's name for a conflict kind, as in `CONFLICT (content): Merge conflict in PATH`.
+pub fn git_conflict_kind(kind: &str) -> &str {
+    match kind {
+        "add_add" => "add/add",
+        "modify_delete" | "delete_modify" => "modify/delete",
+        "path" => "file/directory",
+        "binary" | "too_large" | "symlink" => "content",
+        other => other,
     }
 }
 
@@ -463,6 +491,40 @@ mod tests {
         );
         assert!(conflict.hint().expect("hint").contains("land again"));
         assert!(serde_json::to_string(&e).expect("json").contains("\"conflicts\""));
+    }
+
+    #[test]
+    fn local_conflicts() {
+        let c = |merge| CliError::Conflicted {
+            merge,
+            reference: "main".into(),
+            conflicts: vec![ConflictOut {
+                path: "a".into(),
+                kind: "add_add".into(),
+            }],
+        };
+        assert_eq!(
+            c(true).to_string(),
+            "automatic merge failed; fix conflicts and then commit the result"
+        );
+        assert!(
+            c(false)
+                .to_string()
+                .starts_with("could not rebase your commit onto main;")
+        );
+        let e = error_out(&c(false));
+        assert_eq!((e.exit_code, e.conflicts.len()), (EXIT_CONFLICT, 1));
+        assert!(e.hint.expect("hint").contains("scn resolve"));
+        for (kind, git) in [
+            ("content", "content"),
+            ("add_add", "add/add"),
+            ("modify_delete", "modify/delete"),
+            ("delete_modify", "modify/delete"),
+            ("path", "file/directory"),
+            ("binary", "content"),
+        ] {
+            assert_eq!(git_conflict_kind(kind), git);
+        }
     }
 
     #[test]

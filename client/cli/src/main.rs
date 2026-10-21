@@ -455,10 +455,15 @@ fn fail(e: &CliError, json: bool) -> ExitCode {
     if json {
         println!("{}", serde_json::to_string(&out).unwrap_or_default());
     } else {
-        eprintln!("scn: {}", out.error);
+        // Like git, the conflicts come first
         for c in &out.conflicts {
-            eprintln!("  conflict ({}): {}", c.kind, c.path);
+            eprintln!(
+                "CONFLICT ({}): Merge conflict in {}",
+                output::git_conflict_kind(&c.kind),
+                c.path
+            );
         }
+        eprintln!("scn: {}", out.error);
         if let Some(h) = out.hint {
             eprintln!("hint: {h}");
         }

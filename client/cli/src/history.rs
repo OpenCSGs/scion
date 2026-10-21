@@ -204,17 +204,19 @@ pub struct BlameOut {
     pub lines: Vec<BlameLineOut>,
 }
 
+/// Like `git blame`: `ID (AUTHOR DATE LINE) CONTENT`, authors padded to the longest.
 impl Render for BlameOut {
     fn text(&self) -> String {
         let width = self.lines.last().map_or(1, |l| l.line.to_string().len());
+        let author_width = self.lines.iter().map(|l| l.author.chars().count()).max().unwrap_or(0);
         self.lines
             .iter()
             .map(|l| {
-                let date = &format_time(l.time_ms, l.tz_offset_minutes)[..10];
-                let author: String = l.author.chars().take(16).collect();
                 format!(
-                    "{} ({author:<16} {date}) {:>width$}| {}",
-                    &l.commit[..12],
+                    "{} ({:<author_width$} {} {:>width$}) {}",
+                    &l.commit[..12.min(l.commit.len())],
+                    l.author,
+                    blame_time(l.time_ms, l.tz_offset_minutes),
                     l.line,
                     l.content
                 )
@@ -222,6 +224,13 @@ impl Render for BlameOut {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// `2023-11-15 06:13:20 +0800`, as `git blame` prints dates.
+fn blame_time(time_ms: i64, tz_offset_minutes: i32) -> String {
+    let t = format_time(time_ms, tz_offset_minutes);
+    let secs = time_ms.div_euclid(1000).rem_euclid(60);
+    format!("{}:{secs:02}{}", &t[..16], &t[16..])
 }
 
 /// 按行切分，与服务端一致：保留换行符，末尾没有换行的最后一行也算一行。
@@ -837,12 +846,12 @@ mod tests {
             path: "f".into(),
             lines: vec![l(1, "Ada"), l(10, "A very long author name")],
         };
-        let t = out.text();
-        assert!(
-            t.starts_with("c1abcdefabcd (Ada              1970-01-01)  1| code"),
-            "{t}"
+        assert_eq!(
+            out.text(),
+            "c1abcdefabcd (Ada                     1970-01-01 00:00:00 +0000  1) code\n\
+             c1abcdefabcd (A very long author name 1970-01-01 00:00:00 +0000 10) code"
         );
-        assert!(t.contains("(A very long auth 1970-01-01) 10| code"), "{t}");
+        assert_eq!(blame_time(1_700_000_000_000, 480), "2023-11-15 06:13:20 +0800");
     }
 
     #[test]

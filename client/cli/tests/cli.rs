@@ -466,7 +466,9 @@ async fn clone_commit_land_sync_workflow() {
         json_of(&scn_in(&wc, &["branch", "old", "HEAD~1", "--json"]));
         let out = scn_in(&wc, &["branch"]);
         assert!(String::from_utf8_lossy(&out.stdout).contains("old"), "{out:?}");
-        json_of(&scn_in(&wc, &["branch", "-d", "old", "--json"]));
+        let out = scn_in(&wc, &["branch", "-d", "old"]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.starts_with("Deleted branch old (was c1") && text.ends_with(").\n"), "{text}");
         assert!(!String::from_utf8_lossy(&scn_in(&wc, &["branch"]).stdout).contains("old"));
         std::fs::write(wc.join("am.txt"), "am").expect("write");
         json_of(&scn_in(
@@ -1143,7 +1145,7 @@ async fn repo_and_branch_commands() {
         );
         let out = scn_in(&wc, &["branch", "ls"]);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(text.contains("* main") && text.contains("  dev"), "{text}");
+        assert_eq!(text, "  dev\n* main\n");
         assert_eq!(
             scn_in(&wc, &["branch", "rm", "main"]).status.code(),
             Some(1),

@@ -28,7 +28,7 @@ scn clone mono && cd mono          # 检出（默认 ref 为 main；空仓库也
 # scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # 支持 .gitignore 和 .scionignore（gitignore 语法）
-scn status                          # A .gitignore, A README.md
+scn status                          # git 的长格式；`scn status -s`：A  .gitignore、A  README.md
 scn commit -m "add readme"          # 或者 --author "Ada <ada@example.com>"
 scn restore src/main.rs             # 丢弃已跟踪文件的本地改动（`.` 表示全部）；新增的文件会保留
 scn commit --amend                  # 把更多本地改动并入待合入的提交（保留提交说明和作者）
@@ -38,7 +38,7 @@ scn sync                            # 拉取别人的改动；待合入的提交
 scn tag v1.0                        # 给当前提交打标签；`scn tag` 列出标签，`scn log v1.0` 可以直接用它
 scn switch -c feature               # 在当前快照上建分支并切换过去；`scn switch main` 切回来
 scn merge feature                   # 把一个分支合并成待合入的合并提交（三方、按行合并）；然后 `scn land`
-# 有冲突时（scn sync 或 scn merge），文件里会出现 <<<<<<< / >>>>>>> 标记，`scn status` 显示 C：
+# 有冲突时（scn sync 或 scn merge），文件里会出现 <<<<<<< / >>>>>>> 标记，`scn status` 把它们列在 Unmerged paths 下（`-s` 显示 UU）：
 scn resolve src/main.rs             # 删掉冲突标记之后执行；或者用 --ours / --theirs 直接取一边
 scn commit                          # 完成合并，沿用原来的提交说明；`scn merge --abort` 撤销合并
 scn cat main:README.md              # 不需要工作副本就能读文件（在工作副本外加 --repo）

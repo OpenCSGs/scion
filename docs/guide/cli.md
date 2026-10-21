@@ -28,7 +28,7 @@ scn clone mono && cd mono          # check out (ref main by default; empty repos
 # scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
-scn status                          # A .gitignore, A README.md
+scn status                          # git's long format; `scn status -s`: A  .gitignore, A  README.md
 scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
 scn restore src/main.rs             # discard local changes to tracked files (`.` for all); added files are kept
 scn commit --amend                  # fold more local changes into the pending commit (keeps message and author)
@@ -38,7 +38,7 @@ scn sync                            # pull others' changes; rebases a pending co
 scn tag v1.0                        # tag the current commit; `scn tag` lists, `scn log v1.0` uses it
 scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
 scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`
-# On conflicts (scn sync or scn merge) files get <<<<<<< / >>>>>>> markers and `scn status` shows C:
+# On conflicts (scn sync or scn merge) files get <<<<<<< / >>>>>>> markers and `scn status` lists them under Unmerged paths (`-s`: UU):
 scn resolve src/main.rs             # after editing out the markers; or --ours / --theirs to take one side
 scn commit                          # finishes it, reusing the original message; `scn merge --abort` undoes a merge
 scn cat main:README.md              # read files without a working copy (add --repo outside one)

@@ -96,8 +96,12 @@ enum Command {
         #[arg(short = 'd', long = "delete", value_name = "NAME", conflicts_with = "name")]
         delete: Option<String>,
     },
-    /// Show local changes.
-    Status,
+    /// Show local changes, like `git status`.
+    Status {
+        /// git's short format: `XY PATH` per change (every change is staged in scn).
+        #[arg(short, long)]
+        short: bool,
+    },
     /// Commit the local changes (not landed yet; see `scn land`).
     Commit {
         /// Required, except with --amend (keeps the old message) or when finishing a sync or
@@ -576,7 +580,7 @@ async fn run(cli: Cli) -> ExitCode {
             (None, Some(name)) => emit(repos::delete_tag(&ctx, &name).await, json),
             (None, None) => emit(repos::tags(&ctx).await, json),
         },
-        Command::Status => emit(commands::status(&ctx), json),
+        Command::Status { short } => emit(commands::status(&ctx, short), json),
         Command::Commit {
             message,
             amend: true,

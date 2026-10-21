@@ -9,7 +9,7 @@
 | git | scn | 说明 |
 |---|---|---|
 | `git clone URL [DIR]` | `scn clone URL [DIR]` | `URL` 为 `http(s)://host[:port]/REPO`；用 `--ref B` 代替 `-b B`。进入克隆目录后，所有命令都不用再写地址 |
-| `git status` | `scn status` | `A` / `M` / `D`，冲突是 `C` |
+| `git status` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU` |
 | `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 提交所有本地改动（接受 `-a`，但没有作用） |
 | `git commit --amend` | `scn commit --amend` | |
 | `git restore PATH` | `scn restore PATH` | |

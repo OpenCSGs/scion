@@ -323,7 +323,7 @@ pub async fn sparse(ctx: &Ctx, cmd: crate::SparseCmd) -> Result<SparseOut, CliEr
 
 // ---------- status ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StatusOut {
     pub schema: &'static str,
     #[serde(rename = "ref")]
@@ -336,32 +336,129 @@ pub struct StatusOut {
     pub deleted: Vec<String>,
     /// Paths with unresolved conflicts (see `scn resolve`).
     pub conflicted: Vec<String>,
+    /// Conflict kind of each conflicted path.
+    #[serde(skip)]
+    pub kinds: std::collections::BTreeMap<String, String>,
+    /// Finishing a merge (true) or a sync (false) that stopped on conflicts.
+    #[serde(skip)]
+    pub merging: Option<bool>,
+    /// `scn status -s`.
+    #[serde(skip)]
+    pub short: bool,
+    /// The current directory inside the working copy (`/`-separated, empty at the root): text
+    /// output shows paths relative to it, like git.
+    #[serde(skip)]
+    pub cwd: String,
 }
 
+/// `path` (relative to the working copy root) as seen from `cwd` (also relative to the root).
+fn relative_to(cwd: &str, path: &str) -> String {
+    let (mut from, mut to): (Vec<&str>, Vec<&str>) = (
+        cwd.split('/').filter(|s| !s.is_empty()).collect(),
+        path.split('/').collect(),
+    );
+    while !from.is_empty() && to.len() > 1 && from[0] == to[0] {
+        from.remove(0);
+        to.remove(0);
+    }
+    let mut parts = vec![".."; from.len()];
+    parts.extend(to);
+    parts.join("/")
+}
+
+/// git's label and `--short` code for a conflict kind.
+fn conflict_label(kind: &str) -> (&'static str, &'static str) {
+    match kind {
+        "add_add" | "path" => ("both added", "AA"),
+        "modify_delete" => ("deleted by them", "UD"),
+        "delete_modify" => ("deleted by us", "DU"),
+        _ => ("both modified", "UU"),
+    }
+}
+
+/// `git status`'s long format, or with `-s` its short one (`XY PATH`; scn has no staging area,
+/// so every change shows as staged).
 impl Render for StatusOut {
     fn text(&self) -> String {
-        let mut lines = Vec::new();
-        lines.extend(self.conflicted.iter().map(|p| format!("C {p}")));
-        lines.extend(self.added.iter().map(|p| format!("A {p}")));
-        lines.extend(self.modified.iter().map(|p| format!("M {p}")));
-        lines.extend(self.deleted.iter().map(|p| format!("D {p}")));
-        if lines.is_empty() {
-            lines.push("nothing to commit".to_owned());
+        let unmerged: Vec<(String, &str, &str)> = self
+            .conflicted
+            .iter()
+            .map(|p| {
+                let (label, code) = conflict_label(self.kinds.get(p).map_or("content", String::as_str));
+                (relative_to(&self.cwd, p), label, code)
+            })
+            .collect();
+        let is_unmerged = |p: &String| self.conflicted.contains(p);
+        let changes: Vec<(&str, &str, String)> = [
+            ("new file:", "A ", &self.added),
+            ("modified:", "M ", &self.modified),
+            ("deleted:", "D ", &self.deleted),
+        ]
+        .into_iter()
+        .flat_map(|(label, code, paths)| {
+            paths
+                .iter()
+                .filter(|p| !is_unmerged(p))
+                .map(move |p| (label, code, relative_to(&self.cwd, p)))
+        })
+        .collect();
+        if self.short {
+            let mut lines: Vec<String> = unmerged.iter().map(|(p, _, code)| format!("{code} {p}")).collect();
+            lines.extend(changes.iter().map(|(_, code, p)| format!("{code} {p}")));
+            return lines.join("\n");
         }
-        if let Some(p) = &self.pending {
-            lines.push(format!("committed, not landed: {} (run `scn land`)", short(p)));
+        let mut head = vec![format!("On branch {}", self.reference)];
+        match (&self.pending, &self.base) {
+            (Some(p), _) => head.push(format!(
+                "Your commit {} is not landed yet.\n  (use \"scn land\" to publish your commit)",
+                short(p)
+            )),
+            (None, None) => head.push("\nNo commits yet".to_owned()),
+            _ => {}
         }
-        if !self.conflicted.is_empty() {
-            lines.push(
-                "fix the conflicted files, then `scn resolve PATH` (or --ours / --theirs), then `scn commit`"
+        match (self.merging, unmerged.is_empty()) {
+            (Some(true), false) => head.push(
+                "You have unmerged paths.\n  (fix conflicts and run \"scn commit\")\n  \
+                 (use \"scn merge --abort\" to abort the merge)"
                     .to_owned(),
-            );
+            ),
+            (Some(true), true) => head.push(
+                "All conflicts fixed but you are still merging.\n  (use \"scn commit\" to conclude merge)".to_owned(),
+            ),
+            (Some(false), false) => head.push(format!(
+                "You are currently rebasing your commit onto {}.\n  (fix conflicts and then run \"scn commit\")",
+                self.reference
+            )),
+            (Some(false), true) => head.push(format!(
+                "You are currently rebasing your commit onto {}.\n  (all conflicts fixed: run \"scn commit\")",
+                self.reference
+            )),
+            (None, _) => {}
         }
-        lines.join("\n")
+        let mut blocks = vec![head.join("\n")];
+        if !changes.is_empty() {
+            let mut b = "Changes to be committed:\n  (use \"scn restore <file>...\" to discard changes)".to_owned();
+            for (label, _, p) in &changes {
+                b.push_str(&format!("\n\t{label:<12}{p}"));
+            }
+            blocks.push(b);
+        }
+        if !unmerged.is_empty() {
+            let mut b = "Unmerged paths:\n  (use \"scn resolve <file>...\" to mark resolution)".to_owned();
+            for (p, label, _) in &unmerged {
+                b.push_str(&format!("\n\t{:<17}{p}", format!("{label}:")));
+            }
+            blocks.push(b);
+        }
+        if changes.is_empty() && unmerged.is_empty() {
+            blocks.push("nothing to commit, working tree clean".to_owned());
+        }
+        blocks.join("\n\n")
     }
 }
 
 pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
+    let conflict = wc.state().conflict.as_ref();
     StatusOut {
         schema: "scion.cli.status/v1",
         reference: wc.state().reference.clone(),
@@ -371,13 +468,29 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
         modified: s.modified,
         deleted: s.deleted,
         conflicted: s.conflicted,
+        kinds: conflict
+            .map(|c| {
+                c.paths
+                    .iter()
+                    .map(|(p, sides)| (p.clone(), sides.kind.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        merging: conflict.map(|c| c.merge.is_some()),
+        short: false,
+        cwd: String::new(),
     }
 }
 
-pub fn status(ctx: &Ctx) -> Result<StatusOut, CliError> {
+pub fn status(ctx: &Ctx, short: bool) -> Result<StatusOut, CliError> {
     let wc = WorkingCopy::open(&ctx.cwd)?;
     let s = wc.status()?;
-    Ok(status_out(&wc, s))
+    let cwd = wc_relative(wc.root(), &ctx.cwd, &[".".to_owned()])?.remove(0);
+    Ok(StatusOut {
+        short,
+        cwd: if cwd == "." { String::new() } else { cwd },
+        ..status_out(&wc, s)
+    })
 }
 
 // ---------- conflicts ----------
@@ -1192,38 +1305,97 @@ mod tests {
             modified: vec![],
             deleted: vec![],
             conflicted: vec![],
+            kinds: Default::default(),
+            merging: None,
+            short: false,
+            cwd: String::new(),
         };
-        assert_eq!(s.text(), "nothing to commit");
-        let c = StatusOut {
-            conflicted: vec!["x".into()],
-            modified: vec!["x".into()],
-            ..StatusOut {
-                schema: "s",
-                reference: "main".into(),
-                base: None,
-                pending: None,
-                added: vec![],
-                modified: vec![],
-                deleted: vec![],
-                conflicted: vec![],
-            }
-        };
-        assert!(
-            c.text().starts_with("C x\nM x\nfix the conflicted files"),
-            "{}",
-            c.text()
+        assert_eq!(
+            s.text(),
+            "On branch main\n\nNo commits yet\n\nnothing to commit, working tree clean"
         );
+        assert_eq!(
+            StatusOut {
+                short: true,
+                ..s.clone()
+            }
+            .text(),
+            ""
+        );
+        let c = StatusOut {
+            base: Some("c1base".into()),
+            conflicted: vec!["x".into(), "y".into(), "z".into(), "w".into()],
+            modified: vec!["x".into(), "y".into()],
+            added: vec!["w".into()],
+            kinds: [("y", "modify_delete"), ("z", "delete_modify"), ("w", "add_add")]
+                .into_iter()
+                .map(|(p, k)| (p.to_owned(), k.to_owned()))
+                .collect(),
+            merging: Some(true),
+            ..s.clone()
+        };
+        assert_eq!(
+            c.text(),
+            "On branch main\nYou have unmerged paths.\n  (fix conflicts and run \"scn commit\")\n  \
+             (use \"scn merge --abort\" to abort the merge)\n\nUnmerged paths:\n  \
+             (use \"scn resolve <file>...\" to mark resolution)\n\tboth modified:   x\n\tdeleted by them: y\n\t\
+             deleted by us:   z\n\tboth added:      w"
+        );
+        assert_eq!(
+            StatusOut {
+                short: true,
+                ..c.clone()
+            }
+            .text(),
+            "UU x\nUD y\nDU z\nAA w"
+        );
+        for (merging, want) in [
+            (Some(true), "All conflicts fixed but you are still merging."),
+            (Some(false), "(all conflicts fixed: run \"scn commit\")"),
+        ] {
+            let done = StatusOut {
+                conflicted: vec![],
+                merging,
+                ..c.clone()
+            };
+            assert!(done.text().contains(want), "{}", done.text());
+        }
+        let rebasing = StatusOut {
+            merging: Some(false),
+            ..c.clone()
+        };
+        assert!(rebasing.text().contains("(fix conflicts and then run \"scn commit\")"));
         let s = StatusOut {
             added: vec!["a".into()],
             modified: vec!["m".into()],
             deleted: vec!["d".into()],
+            base: Some("c1base".into()),
             pending: Some("c1pending0000".into()),
             ..s
         };
         assert_eq!(
             s.text(),
-            "A a\nM m\nD d\ncommitted, not landed: c1pending000 (run `scn land`)"
+            "On branch main\nYour commit c1pending000 is not landed yet.\n  (use \"scn land\" to publish your commit)\n\n\
+             Changes to be committed:\n  (use \"scn restore <file>...\" to discard changes)\n\tnew file:   a\n\t\
+             modified:   m\n\tdeleted:    d"
         );
+        assert_eq!(
+            StatusOut {
+                short: true,
+                ..s.clone()
+            }
+            .text(),
+            "A  a\nM  m\nD  d"
+        );
+        let nested = StatusOut {
+            short: true,
+            cwd: "src/x".into(),
+            added: vec!["src/x/a".into(), "src/b".into(), "c".into(), "src".into()],
+            modified: vec![],
+            deleted: vec![],
+            ..s
+        };
+        assert_eq!(nested.text(), "A  a\nA  ../b\nA  ../../c\nA  ../../src");
 
         assert_eq!(
             CommitOut {
@@ -1427,7 +1599,7 @@ mod tests {
         assert!(matches!(cat(&ctx, "main:a").await, Err(CliError::Usage(_))));
         assert!(matches!(ls(&ctx, None).await, Err(CliError::Usage(_))));
         assert!(matches!(
-            status(&ctx),
+            status(&ctx, false),
             Err(CliError::Wc(scion_wc::Error::NotAWorkingCopy(_)))
         ));
         assert!(matches!(

@@ -904,26 +904,39 @@ pub struct LandOut {
     pub version: u64,
     /// 服务端是否 rebase 了提交（ref 在提交之后前进过）。
     pub rebased: bool,
+    /// For the text: the repository's URL, the branch's commit before (None: a new branch), and
+    /// whether the commit was already on the branch.
+    #[serde(skip)]
+    pub url: String,
+    #[serde(skip)]
+    pub old: Option<String>,
+    #[serde(skip)]
+    pub up_to_date: bool,
 }
 
+/// Like `git push`: `To URL`, then `   old..new  main -> main`.
 impl Render for LandOut {
     fn text(&self) -> String {
+        if self.up_to_date {
+            return "Everything up-to-date".to_owned();
+        }
+        let r = &self.reference;
+        let update = match &self.old {
+            Some(old) => format!("   {}..{}  {r} -> {r}", short(old), short(&self.tip)),
+            None => format!(" * [new branch]      {r} -> {r}"),
+        };
         let rebased = if self.rebased {
-            format!(", rebased onto the latest {}", self.reference)
+            format!(" (rebased onto the latest {r})")
         } else {
             String::new()
         };
-        format!(
-            "landed {} on {} (version {}{rebased})",
-            short(&self.tip),
-            self.reference,
-            self.version
-        )
+        format!("To {}\n{update}{rebased}", self.url)
     }
 }
 
 pub async fn land(ctx: &Ctx) -> Result<LandOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
+    let old = wc.state().base.clone();
     let landed = wc.land(&client).await?;
     Ok(LandOut {
         schema: "scion.cli.land/v1",
@@ -931,6 +944,13 @@ pub async fn land(ctx: &Ctx) -> Result<LandOut, CliError> {
         tip: landed.tip.to_string(),
         version: landed.version,
         rebased: landed.rebased(),
+        url: format!(
+            "{}/{}",
+            ctx.endpoint_or(Some(&wc)).trim_end_matches('/'),
+            wc.state().repo
+        ),
+        old,
+        up_to_date: landed.landed.is_empty(),
     })
 }
 
@@ -1502,28 +1522,31 @@ mod tests {
             ..c
         };
         assert_eq!(one.text(), "[dev c1abcdefghij] s\n 1 file changed");
-        assert!(
-            LandOut {
-                schema: "s",
-                reference: "main".into(),
-                tip: "c1t".into(),
-                version: 3,
-                rebased: false,
-            }
-            .text()
-            .contains("version 3)")
+        let land = LandOut {
+            schema: "s",
+            reference: "main".into(),
+            tip: "c1tipabcdefghij".into(),
+            version: 3,
+            rebased: false,
+            url: "http://h:7080/mono".into(),
+            old: None,
+            up_to_date: false,
+        };
+        assert_eq!(land.text(), "To http://h:7080/mono\n * [new branch]      main -> main");
+        let land = LandOut {
+            old: Some("c1oldabcdefghij".into()),
+            rebased: true,
+            ..land
+        };
+        assert_eq!(
+            land.text(),
+            "To http://h:7080/mono\n   c1oldabcdefg..c1tipabcdefg  main -> main (rebased onto the latest main)"
         );
-        assert!(
-            LandOut {
-                schema: "s",
-                reference: "main".into(),
-                tip: "c1t".into(),
-                version: 4,
-                rebased: true,
-            }
-            .text()
-            .contains("rebased onto the latest main")
-        );
+        let land = LandOut {
+            up_to_date: true,
+            ..land
+        };
+        assert_eq!(land.text(), "Everything up-to-date");
 
         let mut so = SyncOut {
             schema: "s",

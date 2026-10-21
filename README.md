@@ -149,7 +149,10 @@ With an OIDC provider configured, people sign in with `scn login SERVER` in a br
 
 ## Status
 
-M1–M4 are complete: the write path and working copy, history queries, server-side rebase and landing, clusters, and the regional cache and local daemon. M5, production hardening, is in progress; authentication, redaction, observability, ref events, packs and repack are done, and the YugabyteDB tier, Helm and release builds remain. See [milestones](docs/design/milestones.md) for the details and the [roadmap](docs/design/roadmap.md) for larger tasks planned for later.
+- [x] M1–M4: write path, working copy, history, server-side landing, clusters, caches
+- [ ] M5, production hardening: auth, redaction, observability, events, packs and release builds done; YugabyteDB and Helm remain
+
+Details: [milestones](docs/design/milestones.md) · [roadmap](docs/design/roadmap.md)
 
 ## Development
 

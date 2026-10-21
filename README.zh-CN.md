@@ -149,7 +149,10 @@ docker exec scion scion admin token create --subject admin --group admins
 
 ## 进度
 
-M1–M4 已完成：写入路径与工作副本、历史查询、服务端 rebase 与合入、集群，以及区域缓存和本机 daemon。M5 生产化进行中：认证、redaction、可观测性、ref 事件、打包与 repack 已完成，还剩 YugabyteDB 档、Helm 和发布构建。详情见[里程碑](docs/design/milestones.md)（英文），后续的大任务见[路线图](docs/design/roadmap.md)（英文）。
+- [x] M1–M4：写入与工作区、历史查询、服务端合入、多节点、缓存
+- [ ] M5 生产化：认证、redaction、可观测性、事件、打包和发布构建已完成；还剩 YugabyteDB 和 Helm
+
+详见：[里程碑](docs/design/milestones.md) · [路线图](docs/design/roadmap.md)
 
 ## 开发
 

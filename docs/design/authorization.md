@@ -130,19 +130,32 @@ Within the policy, deny wins over allow. Across deciders, the chain order decide
   - Object reads by id already need repository read and are cached per token in caches and the daemon, so nothing new happens per object.
 - **Webhooks keep their current caches.** Allows are cached for `cache_ttl` and denials for 5 s, per webhook. A webhook with a `repos` filter is never called for other repositories.
 
+## Personal namespaces
+
+Every signed-in user owns `user/SUBJECT/*`, as personal accounts do on GitHub: they can create, delete and fork repositories there and are `owner` of each. The `personal` decider allows this; it abstains for every other repository. Subjects that are not a valid repository name segment (letters, digits, `-`, `_`, `.`) get no personal namespace.
+
+## GitHub
+
+Open-source users mostly have GitHub accounts, so the first version supports GitHub as an identity provider and as a membership source.
+
+- **Login.** `[github]` names an OAuth app (`client_id`). `scn login` runs GitHub's device flow when the server offers it, the server reads `GET /user`, and the subject is the GitHub login (with an optional `subject_prefix`). The server then issues its own refresh and access tokens, as with OIDC.
+- **Teams as groups.** With `orgs = ["opencsg"]` and a server token that can read them (`token_env`), the server keeps the members of those organizations and their teams in memory, refreshed every `refresh` (default 5 minutes). A login gets the groups `github:ORG` and `github:ORG/TEAM`, so policies and organizations can name them: `subjects = ["group:github:opencsg/core"]`.
+
 ## Rollout
 
 Each step is one commit with tests, and none of them changes behaviour until it is configured:
 
-1. A `Decider` trait with allow, deny and abstain. Today's three sources move behind it, and `Guard::check` runs the chain, defaulting to today's order.
+1. A decider chain behind `Guard::check`, with allow, deny and abstain. Today's three sources become deciders, in today's order. (Done.)
 2. `[authorization]` in `auth.toml`: the chain order, several named webhooks with `decides` and `repos`, and the old `[authz_webhook]` still accepted.
 3. `effect = "deny"` rules and `[groups]` in the policy.
-4. The `orgs` and `org_members` tables (SQLite and PostgreSQL migrations), with the `orgs` membership source and decider.
+4. The `orgs` and `org_members` tables (SQLite and PostgreSQL migrations), the `orgs` membership source and decider, and the `personal` decider.
 5. `OrgService` and `scion admin org`.
 6. `scn org`.
-7. Documentation in `docs/guide/auth.md` and an end-to-end test with three namespaces handled by policy, orgs and a webhook.
+7. GitHub login through the device flow.
+8. GitHub organizations and teams as groups.
+9. Documentation in `docs/guide/auth.md` and an end-to-end test with namespaces handled by policy, orgs, personal namespaces and a webhook.
 
-## Open questions
+## Decisions
 
-- Should creating a top-level repository with no organization stay a system-administrator action, or should any signed-in user be able to create `user/NAME/*` repositories, as personal namespaces on GitHub?
-- Should a GitHub teams adapter come with the first version, or wait for a deployment that needs it?
+- Personal namespaces `user/SUBJECT/*` are part of the first version.
+- GitHub login and GitHub teams as groups are part of the first version, so open-source deployments can use GitHub accounts.

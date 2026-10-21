@@ -130,19 +130,32 @@ actions  = ["read"]
   - 按 id 读对象本来就只要求仓库读权限，而且在缓存和 daemon 里按令牌缓存，所以每个对象都不会多一次查询。
 - **回调保持现有的缓存方式。** 每个回调单独缓存：允许缓存 `cache_ttl`，拒绝缓存 5 秒。配置了 `repos` 的回调，不会被问到其他仓库。
 
+## 个人命名空间
+
+每个登录用户拥有 `user/SUBJECT/*`，和 GitHub 的个人账号一样：可以在里面建库、删库、fork，并且是每个仓库的 `owner`。由 `personal` 判定器负责这一点，其他仓库它一律弃权。subject 不是合法的仓库名段（字母、数字、`-`、`_`、`.`）时，没有个人命名空间。
+
+## GitHub
+
+开源用户大多有 GitHub 账号，所以第一版就支持把 GitHub 作为身份来源和成员关系来源。
+
+- **登录。** `[github]` 里填一个 OAuth app 的 `client_id`。服务端提供 GitHub 登录时，`scn login` 走 GitHub 的 device flow，服务端读取 `GET /user`，subject 就是 GitHub 用户名（可选加 `subject_prefix`）。之后服务端签发自己的刷新令牌和访问令牌，和 OIDC 登录一样。
+- **team 作为组。** 配置 `orgs = ["opencsg"]`，以及能读取这些组织的服务端令牌（`token_env`）后，服务端在内存里维护这些组织及其 team 的成员，每隔 `refresh`（默认 5 分钟）刷新一次。用户登录后得到 `github:ORG` 和 `github:ORG/TEAM` 两类组，策略和组织都可以引用，例如 `subjects = ["group:github:opencsg/core"]`。
+
 ## 分步实现
 
 每一步一个提交，带测试；在配置之前，每一步都不改变现有行为：
 
-1. 定义 `Decider` trait（允许、拒绝、弃权），把现有三个来源接到它后面，`Guard::check` 改为执行这条链，默认顺序与现在一致。
+1. 在 `Guard::check` 后面建判定器链，支持允许、拒绝、弃权。现有三个来源接成判定器，顺序和现在一致。（已完成）
 2. `auth.toml` 增加 `[authorization]`：链的顺序、多个带名字的回调（含 `decides` 和 `repos`），旧的 `[authz_webhook]` 继续可用。
 3. 策略支持 `effect = "deny"` 规则和 `[groups]`。
-4. `orgs` 和 `org_members` 两张表（SQLite 与 PostgreSQL 迁移），以及 `orgs` 成员关系来源和判定器。
+4. `orgs` 和 `org_members` 两张表（SQLite 与 PostgreSQL 迁移），`orgs` 成员关系来源和判定器，以及 `personal` 判定器。
 5. `OrgService` 和 `scion admin org`。
 6. `scn org`。
-7. 更新 `docs/guide/auth.md`，并加一个端到端测试：三个命名空间分别由策略、组织和回调管理。
+7. 通过 device flow 用 GitHub 登录。
+8. GitHub 组织和 team 作为组。
+9. 更新 `docs/guide/auth.md`，并加一个端到端测试：几个命名空间分别由策略、组织、个人命名空间和回调管理。
 
-## 待定问题
+## 已定事项
 
-- 建一个不属于任何组织的顶层仓库，仍只允许系统管理员吗？还是像 GitHub 的个人命名空间那样，允许任何登录用户建 `user/NAME/*`？
-- GitHub team 适配器要放进第一版，还是等有部署需要时再做？
+- 个人命名空间 `user/SUBJECT/*` 放进第一版。
+- GitHub 登录和 GitHub team 作为组放进第一版，方便开源部署直接用 GitHub 账号。

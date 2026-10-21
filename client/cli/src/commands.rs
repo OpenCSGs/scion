@@ -963,23 +963,32 @@ pub struct SyncOut {
     pub pending: Option<String>,
     pub written: usize,
     pub removed: usize,
+    /// For the text: the branch, and the commit the working copy was on before.
+    #[serde(skip)]
+    pub reference: String,
+    #[serde(skip)]
+    pub old: Option<String>,
 }
 
+/// Like `git pull`: `Already up to date.`, `Updating a..b` / `Fast-forward`, or for a pending
+/// commit `git pull --rebase`'s `Successfully rebased and updated main.`
 impl Render for SyncOut {
     fn text(&self) -> String {
-        let base = self.base.as_deref().map(short).unwrap_or("-");
+        let n = self.written + self.removed;
+        let stat = format!(" {n} file{} changed", if n == 1 { "" } else { "s" });
+        let updating = match (&self.old, &self.base) {
+            (Some(old), Some(new)) => format!("Updating {}..{}\n", short(old), short(new)),
+            _ => String::new(),
+        };
         match self.outcome {
-            "up_to_date" => "already up to date".to_owned(),
-            "rebased" => format!(
-                "rebased your change onto {base} ({} written, {} removed); run `scn land`",
-                self.written, self.removed
-            ),
-            _ => format!("updated to {base} ({} written, {} removed)", self.written, self.removed),
+            "up_to_date" => "Already up to date.".to_owned(),
+            "rebased" => format!("{updating}{stat}\nSuccessfully rebased and updated {}.", self.reference),
+            _ => format!("{updating}Fast-forward\n{stat}"),
         }
     }
 }
 
-pub fn sync_out(wc: &WorkingCopy, o: &SyncOutcome) -> SyncOut {
+pub fn sync_out(wc: &WorkingCopy, old: Option<String>, o: &SyncOutcome) -> SyncOut {
     let (outcome, written, removed) = match o {
         SyncOutcome::UpToDate => ("up_to_date", 0, 0),
         SyncOutcome::Updated { written, removed, .. } => ("updated", *written, *removed),
@@ -992,13 +1001,16 @@ pub fn sync_out(wc: &WorkingCopy, o: &SyncOutcome) -> SyncOut {
         pending: wc.state().head.clone(),
         written,
         removed,
+        reference: wc.state().reference.clone(),
+        old,
     }
 }
 
 pub async fn sync(ctx: &Ctx) -> Result<SyncOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
+    let old = wc.state().base.clone();
     let o = wc.sync(&client).await?;
-    Ok(sync_out(&wc, &o))
+    Ok(sync_out(&wc, old, &o))
 }
 
 // ---------- import ----------
@@ -1555,13 +1567,21 @@ mod tests {
             pending: None,
             written: 0,
             removed: 0,
+            reference: "main".into(),
+            old: None,
         };
-        assert_eq!(so.text(), "already up to date");
+        assert_eq!(so.text(), "Already up to date.");
         so.outcome = "updated";
-        assert!(so.text().starts_with("updated to -"));
+        so.written = 1;
+        assert_eq!(so.text(), "Fast-forward\n 1 file changed");
         so.outcome = "rebased";
         so.base = Some("c1base".into());
-        assert!(so.text().contains("rebased your change onto c1base"));
+        so.old = Some("c1old".into());
+        so.removed = 2;
+        assert_eq!(
+            so.text(),
+            "Updating c1old..c1base\n 3 files changed\nSuccessfully rebased and updated main."
+        );
 
         let ls = LsOut {
             schema: "s",

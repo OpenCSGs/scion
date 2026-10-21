@@ -586,8 +586,14 @@ async fn clone_commit_land_sync_workflow() {
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(text.starts_with(&format!("To {u}/team/app\n   c1")), "{text}");
         assert!(text.ends_with("  main -> main\n"), "{text}");
-        let v = json_of(&scn_in(&root.join("second"), &["sync", "--json"]));
-        assert_eq!(v["outcome"], "updated");
+        let out = scn_in(&root.join("second"), &["sync"]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            text.starts_with("Updating c1") && text.ends_with("\nFast-forward\n 1 file changed\n"),
+            "{text}"
+        );
+        let out = scn_in(&root.join("second"), &["sync"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Already up to date.\n");
         assert_eq!(
             std::fs::read_to_string(root.join("second/src/lib.rs")).expect("read"),
             "pub fn f() -> u8 { 1 }\n"

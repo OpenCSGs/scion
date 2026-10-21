@@ -175,18 +175,22 @@ pub struct BranchListOut {
     pub schema: &'static str,
     pub repo: String,
     pub branches: Vec<BranchOut>,
+    /// The working copy's branch, which the text marks with `*` (outside one: the default branch).
+    #[serde(skip)]
+    pub current: Option<String>,
 }
 
+/// Like `git branch`.
 impl Render for BranchListOut {
     fn text(&self) -> String {
-        if self.branches.is_empty() {
-            return format!("no branches in {}", self.repo);
-        }
         self.branches
             .iter()
             .map(|b| {
-                let mark = if b.is_default { "*" } else { " " };
-                format!("{mark} {}  {}  (version {})", b.name, short(&b.changeset), b.version)
+                let current = match &self.current {
+                    Some(c) => *c == b.name,
+                    None => b.is_default,
+                };
+                format!("{} {}", if current { "*" } else { " " }, b.name)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -200,15 +204,18 @@ pub struct BranchChangeOut {
     pub name: String,
     /// created | deleted
     pub action: &'static str,
+    /// The commit the branch points at (for a deleted one: pointed at).
     pub changeset: Option<String>,
     pub version: Option<u64>,
 }
 
+/// Like git: creating is silent, deleting prints `Deleted branch NAME (was ID).`
 impl Render for BranchChangeOut {
     fn text(&self) -> String {
-        match &self.changeset {
-            Some(c) => format!("{} branch {} at {}", self.action, self.name, short(c)),
-            None => format!("{} branch {}", self.action, self.name),
+        match (self.action, &self.changeset) {
+            ("deleted", Some(c)) => format!("Deleted branch {} (was {}).", self.name, short(c)),
+            ("deleted", None) => format!("Deleted branch {}.", self.name),
+            _ => String::new(),
         }
     }
 }
@@ -218,7 +225,7 @@ fn short(id: &str) -> &str {
 }
 
 pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
-    let (c, _) = query_client(ctx).await?;
+    let (c, current) = query_client(ctx).await?;
     let repo = c.repo_name().unwrap_or_default().to_owned();
     let default = c.get_repo(&repo, false).await?.default_branch;
     let branches = c
@@ -237,6 +244,7 @@ pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
         schema: "scion.cli.branches/v1",
         repo,
         branches,
+        current: (ctx.repo.is_none() && ctx.has_working_copy()).then_some(current),
     })
 }
 
@@ -258,13 +266,14 @@ pub async fn create_branch(ctx: &Ctx, name: &str, revision: Option<&str>) -> Res
 
 pub async fn delete_branch(ctx: &Ctx, name: &str) -> Result<BranchChangeOut, CliError> {
     let (c, _) = query_client(ctx).await?;
+    let was = c.resolve_ref(name).await?.map(|t| t.changeset.to_string());
     c.delete_ref(name, None).await?;
     Ok(BranchChangeOut {
         schema: "scion.cli.branch/v1",
         repo: c.repo_name().unwrap_or_default().to_owned(),
         name: name.to_owned(),
         action: "deleted",
-        changeset: None,
+        changeset: was,
         version: None,
     })
 }
@@ -285,16 +294,10 @@ pub struct TagListOut {
     pub tags: Vec<TagOut>,
 }
 
+/// Like `git tag`: one name per line.
 impl Render for TagListOut {
     fn text(&self) -> String {
-        if self.tags.is_empty() {
-            return format!("no tags in {}", self.repo);
-        }
-        self.tags
-            .iter()
-            .map(|t| format!("{}  {}", t.name, short(&t.changeset)))
-            .collect::<Vec<_>>()
-            .join("\n")
+        self.tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("\n")
     }
 }
 
@@ -304,14 +307,17 @@ pub struct TagChangeOut {
     pub name: String,
     /// created | deleted
     pub action: &'static str,
+    /// The tagged commit (for a deleted tag: the one it named).
     pub changeset: Option<String>,
 }
 
+/// Like git: creating is silent, deleting prints `Deleted tag 'NAME' (was ID)`.
 impl Render for TagChangeOut {
     fn text(&self) -> String {
-        match &self.changeset {
-            Some(c) => format!("{} tag {} at {}", self.action, self.name, short(c)),
-            None => format!("{} tag {}", self.action, self.name),
+        match (self.action, &self.changeset) {
+            ("deleted", Some(c)) => format!("Deleted tag '{}' (was {})", self.name, short(c)),
+            ("deleted", None) => format!("Deleted tag '{}'", self.name),
+            _ => String::new(),
         }
     }
 }
@@ -356,12 +362,14 @@ pub async fn create_tag(ctx: &Ctx, name: &str, revision: Option<&str>) -> Result
 
 pub async fn delete_tag(ctx: &Ctx, name: &str) -> Result<TagChangeOut, CliError> {
     let (c, _) = query_client(ctx).await?;
-    c.delete_ref(&format!("{TAG_PREFIX}{name}"), None).await?;
+    let tag = format!("{TAG_PREFIX}{name}");
+    let was = c.resolve_ref(&tag).await?.map(|t| t.changeset.to_string());
+    c.delete_ref(&tag, None).await?;
     Ok(TagChangeOut {
         schema: "scion.cli.tag/v1",
         name: name.to_owned(),
         action: "deleted",
-        changeset: None,
+        changeset: was,
     })
 }
 
@@ -376,28 +384,37 @@ mod tests {
             repo: "r".into(),
             tags: vec![],
         };
-        assert_eq!(empty.text(), "no tags in r");
+        assert_eq!(empty.text(), "");
         let list = TagListOut {
-            tags: vec![TagOut {
-                name: "v1".into(),
-                changeset: "c1abcdefabcdef00".into(),
-            }],
+            tags: ["v1", "v2"]
+                .map(|n| TagOut {
+                    name: n.into(),
+                    changeset: "c1abcdefabcdef00".into(),
+                })
+                .into(),
             ..empty
         };
-        assert_eq!(list.text(), "v1  c1abcdefabcd");
+        assert_eq!(list.text(), "v1\nv2");
         let made = TagChangeOut {
             schema: "s",
             name: "v1".into(),
             action: "created",
             changeset: Some("c1abcdefabcdef00".into()),
         };
-        assert_eq!(made.text(), "created tag v1 at c1abcdefabcd");
+        assert_eq!(made.text(), "");
         let gone = TagChangeOut {
-            changeset: None,
             action: "deleted",
             ..made
         };
-        assert_eq!(gone.text(), "deleted tag v1");
+        assert_eq!(gone.text(), "Deleted tag 'v1' (was c1abcdefabcd)");
+        assert_eq!(
+            TagChangeOut {
+                changeset: None,
+                ..gone
+            }
+            .text(),
+            "Deleted tag 'v1'"
+        );
     }
 
     fn repo(purge: Option<i64>, fork: Option<&str>, description: &str) -> RepoOut {
@@ -445,22 +462,25 @@ mod tests {
                     is_default: false,
                 },
             ],
+            current: None,
         };
-        assert_eq!(b.text(), "* main  c1abcdefghij  (version 3)\n  dev  c1zz  (version 1)");
-        let empty = BranchListOut {
-            schema: "s",
-            repo: "r".into(),
-            branches: vec![],
+        assert_eq!(b.text(), "* main\n  dev", "outside a working copy: the default branch");
+        let b = BranchListOut {
+            current: Some("dev".into()),
+            ..b
         };
-        assert_eq!(empty.text(), "no branches in r");
+        assert_eq!(b.text(), "  main\n* dev");
         let c = BranchChangeOut {
             schema: "s",
             repo: "r".into(),
             name: "x".into(),
             action: "deleted",
-            changeset: None,
+            changeset: Some("c1abcdefghijklmn".into()),
             version: None,
         };
-        assert_eq!(c.text(), "deleted branch x");
+        assert_eq!(c.text(), "Deleted branch x (was c1abcdefghij).");
+        let c = BranchChangeOut { changeset: None, ..c };
+        assert_eq!(c.text(), "Deleted branch x.");
+        assert_eq!(BranchChangeOut { action: "created", ..c }.text(), "");
     }
 }

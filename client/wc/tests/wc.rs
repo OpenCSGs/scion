@@ -425,6 +425,43 @@ async fn open_from_subdirectory() {
 }
 
 #[tokio::test]
+async fn clone_reports_progress() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src = tmp.path().join("src");
+    let mut wc = WorkingCopy::clone(&c, &srv.url, "mono", "main", &src, Sparse::full())
+        .await
+        .expect("clone");
+    write(&src, "a.txt", "aa");
+    write(&src, "d/b.txt", "bbb");
+    wc.commit(&c, "two files", None).await.expect("commit");
+    wc.land(&c).await.expect("land");
+    let seen = std::sync::Mutex::new(Vec::new());
+    WorkingCopy::clone_with_progress(
+        &c,
+        &srv.url,
+        "mono",
+        "main",
+        &tmp.path().join("dst"),
+        Sparse::full(),
+        &|p| seen.lock().expect("lock").push(p),
+    )
+    .await
+    .expect("clone");
+    let seen = seen.into_inner().expect("lock");
+    assert!(seen.contains(&scion_wc::Progress::Listing { files: 2 }), "{seen:?}");
+    assert_eq!(
+        seen.last(),
+        Some(&scion_wc::Progress::Checkout {
+            done: 2,
+            total: 2,
+            bytes: 5
+        })
+    );
+}
+
+#[tokio::test]
 async fn clone_into_non_empty_dir_rejected() {
     let srv = server().await;
     let c = client(&srv.url).await;

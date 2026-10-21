@@ -998,7 +998,10 @@ async fn sparse_checkout_commands() {
         assert!(wc.join("top.txt").exists() && wc.join("a/x.txt").exists());
         assert!(!wc.join("b").exists());
         let out = scn_in(&root, &["clone", "mono", "w2", "--sparse", "a,b", "--endpoint", &u]);
-        assert!(String::from_utf8_lossy(&out.stdout).contains("sparse checkout: a, b"));
+        assert!(out.status.success() && out.stdout.is_empty(), "{out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), "Cloning into 'w2'...\n");
+        let out = scn_in(&root, &["clone", "mono", "w3", "-q", "--endpoint", &u]);
+        assert!(out.status.success() && out.stderr.is_empty(), "{out:?}");
 
         let v = json_of(&scn_in(&wc, &["sparse", "add", "b", "--json"]));
         assert_eq!(v["schema"], "scion.cli.sparse/v1");

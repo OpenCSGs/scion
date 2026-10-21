@@ -74,6 +74,18 @@ A repository can be named in two ways:
 
 A working copy remembers the server it was cloned from, so inside it `status`, `commit`, `land`, `sync`, `log` and the rest need no address. Where several are given, the address in a URL comes first, then `--endpoint` / `SCION_ENDPOINT`, then the working copy's, then `http://127.0.0.1:7080`.
 
+## Output
+
+Text output follows git: a command prints what git prints for the same step, and a command git keeps quiet prints nothing. Progress and notes such as `Cloning into 'mono'...` go to standard error. When standard error is a terminal, `clone` shows git-style progress:
+
+```text
+Cloning into 'mono'...
+Listing files: 18342, done.
+Receiving objects: 100% (18342/18342), 212.40 MiB | 38.12 MiB/s, done.
+```
+
+`-q` / `--quiet` drops progress and notes; errors are still printed. `--json` prints one JSON object with a `schema` field instead, and no progress.
+
 ## What a checkout will not write
 
 A repository's paths come from the server, so a hostile repository must not be able to change anything outside the working copy. `scn` refuses to write or remove, and stops with `refusing to write <path>`:

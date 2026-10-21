@@ -10,6 +10,7 @@ mod daemon;
 mod history;
 mod login;
 mod output;
+mod progress;
 mod repos;
 
 use std::io::Write;
@@ -34,6 +35,9 @@ struct Cli {
     /// Print JSON (with a schema field) for agents and scripts.
     #[arg(long, global = true)]
     json: bool,
+    /// No progress or notes on standard error (errors are still printed).
+    #[arg(short, long, global = true)]
+    quiet: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -431,7 +435,11 @@ fn one_path(flag: Option<String>, rest: Vec<String>) -> Result<Option<String>, C
 fn emit<T: Render>(v: Result<T, CliError>, json: bool) -> ExitCode {
     match v {
         Ok(v) => {
-            println!("{}", render(&v, json));
+            // Like git, commands with nothing to say print nothing
+            let text = render(&v, json);
+            if !text.is_empty() {
+                println!("{text}");
+            }
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e, json),
@@ -469,6 +477,7 @@ async fn run(cli: Cli) -> ExitCode {
         endpoint: cli.endpoint.clone(),
         repo: None,
         cwd,
+        chatty: !(json || cli.quiet),
     };
     // A repository or server given as a URL replaces --endpoint for this command.
     macro_rules! arg {

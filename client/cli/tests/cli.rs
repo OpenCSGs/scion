@@ -356,6 +356,8 @@ async fn clone_commit_land_sync_workflow() {
             &["commit", "-m", "topic", "--author", "Ada <ada@example.com>", "--json"],
         ));
         json_of(&scn_in(&wc, &["land", "--json"]));
+        let out = scn_in(&wc, &["switch", "topic"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "Already on 'topic'\n");
         let v = json_of(&scn_in(&wc, &["switch", "main", "--json"]));
         assert_eq!(v["removed"], 1);
         let v = json_of(&scn_in(

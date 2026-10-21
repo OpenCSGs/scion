@@ -57,13 +57,12 @@ Against Git on the same machine, CSG Scion's full and `apps/web` checkouts both 
 
 ## How it works
 
-- **Writes on the server.** A commit is created on the server from the files it changes; `land` moves a branch to it and rebases it on the server when the branch has moved, exactly once, without a global queue. Concurrent writers to one branch all succeed.
-- **Fetch on demand.** Clients ask for the trees and files they want by id, so sparse checkout needs no special support: directories outside the scope are never fetched.
-- **History without a clone.** Log, diff, blame, ancestry, merge bases, the last commit of each entry and archives are server queries.
-- **Three storage tiers.** Lite (SQLite and a local directory), Standard (PostgreSQL and S3-compatible storage) and in-memory for tests. Objects are content-addressed, zstd-compressed and packed; `scion admin repack` stores older versions as deltas against newer ones.
-- **Caches.** A regional cache, `scion cache`, and a local daemon, `scn daemon`, serve the same protocol as the server, so clients do not need to know the topology.
-- **Git compatibility.** `scn import git` brings in a repository with its history; every commit keeps a git SHA, accepted wherever a revision is.
-- **Access control and redaction.** Tokens, OIDC login, external issuers, ACLs by repository, ref and path, and redaction of leaked content without rewriting history.
+```mermaid
+flowchart LR
+    scn["scn<br/>client"] --> daemon["scn daemon<br/>local cache"] --> cache["scion cache<br/>regional cache"] --> server["scion server<br/>commit · land · history"]
+    server --> meta[("SQLite / PostgreSQL")]
+    server --> blobs[("Local dir / S3")]
+```
 
 ## Quick start
 

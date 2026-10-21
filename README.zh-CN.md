@@ -57,13 +57,12 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 
 ## 工作方式
 
-- **写入在服务端。** 提交由服务端根据改动的文件创建；`land` 把分支移到这个提交上，分支已经前进时由服务端 rebase，恰好一次，不需要全局队列。同时向一个分支写入的人都会成功。
-- **按需获取。** 客户端按 id 请求需要的 tree 和文件，所以稀疏检出不需要任何特殊支持：范围外的目录根本不会被拉取。
-- **不用克隆就能查历史。** log、diff、blame、祖先判断、merge base、每个条目的最后提交、打包下载都是服务端查询。
-- **三档存储。** Lite（SQLite + 本地目录）、Standard（PostgreSQL + S3 兼容存储），以及测试用的内存档。对象按内容寻址、zstd 压缩并打包；`scion admin repack` 把旧版本存成相对新版本的 delta。
-- **缓存。** 区域缓存 `scion cache` 和本机 daemon `scn daemon` 提供和服务端相同的协议，客户端不需要知道缓存拓扑。
-- **兼容 Git。** `scn import git` 连同历史导入已有仓库；每个提交都保留 git SHA，任何需要版本号的地方都可以用。
-- **认证与 redaction。** 令牌、OIDC 登录、外部签发方、按仓库、ref 和路径的访问控制，以及不改写历史地清除泄露内容。
+```mermaid
+flowchart LR
+    scn["scn<br/>客户端"] --> daemon["scn daemon<br/>本机缓存"] --> cache["scion cache<br/>区域缓存"] --> server["scion server<br/>提交 · 合入 · 历史"]
+    server --> meta[("SQLite / PostgreSQL")]
+    server --> blobs[("本地目录 / S3")]
+```
 
 ## 快速开始
 

@@ -767,30 +767,27 @@ pub struct SwitchOut {
     pub tip: Option<String>,
     pub written: usize,
     pub removed: usize,
+    /// Already on that branch.
+    #[serde(skip)]
+    pub already: bool,
 }
 
+/// Like `git switch`.
 impl Render for SwitchOut {
     fn text(&self) -> String {
-        let verb = if self.created {
-            "created and switched to"
+        if self.created {
+            format!("Switched to a new branch '{}'", self.reference)
+        } else if self.already {
+            format!("Already on '{}'", self.reference)
         } else {
-            "switched to"
-        };
-        match &self.tip {
-            Some(t) => format!(
-                "{verb} {} at {} ({} written, {} removed)",
-                self.reference,
-                short(t),
-                self.written,
-                self.removed
-            ),
-            None => format!("{verb} {}", self.reference),
+            format!("Switched to branch '{}'", self.reference)
         }
     }
 }
 
 pub async fn switch(ctx: &Ctx, reference: &str, create: bool) -> Result<SwitchOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
+    let already = wc.state().reference == reference;
     let s = wc.switch(&client, reference, create).await?;
     Ok(SwitchOut {
         schema: "scion.cli.switch/v1",
@@ -799,6 +796,7 @@ pub async fn switch(ctx: &Ctx, reference: &str, create: bool) -> Result<SwitchOu
         tip: s.tip.map(|t| t.to_string()),
         written: s.written,
         removed: s.removed,
+        already,
     })
 }
 
@@ -1560,6 +1558,19 @@ mod tests {
         };
         assert_eq!(land.text(), "Everything up-to-date");
 
+        let sw = SwitchOut {
+            schema: "s",
+            reference: "dev".into(),
+            created: true,
+            tip: None,
+            written: 0,
+            removed: 0,
+            already: false,
+        };
+        assert_eq!(sw.text(), "Switched to a new branch 'dev'");
+        let sw = SwitchOut { created: false, ..sw };
+        assert_eq!(sw.text(), "Switched to branch 'dev'");
+        assert_eq!(SwitchOut { already: true, ..sw }.text(), "Already on 'dev'");
         let mut so = SyncOut {
             schema: "s",
             outcome: "up_to_date",

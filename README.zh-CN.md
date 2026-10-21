@@ -11,9 +11,7 @@ Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.
 
 ## 性能对比
 
-[测试程序](bench/openscion/src/main.rs)在 [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) 的四个合成负载上，对比 CSG Scion、Git，以及同一设计的另一个实现 [CarterT27/scion](https://github.com/CarterT27/scion)。三者在同一台机器上运行：Apple M5、16 GiB 内存、macOS 26.5.2、Git 2.54.0。CarterT27/scion 用当时 `main` 的代码构建，用它自己的测试程序运行。
-
-每个文件是 4 KiB 伪随机内容，分布在 10 个目录里。1,000 个文件跑 7 次，10,000 个文件跑 5 次。单位是毫秒，取中位数，越小越好。
+在 [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) 的负载上对比 CSG Scion、Git 和 [CarterT27/scion](https://github.com/CarterT27/scion)，同一台 Apple M5。单位毫秒，取中位数，越小越好。
 
 | 场景 | Git，1k 文件 | CarterT27，1k | CSG Scion，1k | Git，10k 文件 | CarterT27，10k | CSG Scion，10k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -22,24 +20,9 @@ Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.
 | 完整克隆 / 检出 | 243.0 | 115.8 | **52.2** | 2,361.9 | 1,047.3 | **589.4** |
 | 只克隆 / 检出一个目录 | 60.3 | 25.0 | **23.1** | 172.9 | 123.1 | **49.5** |
 
-CSG Scion 在每一项都是三者中最快的：比 Git 快 2–12 倍；和 CarterT27/scion 相比，检出快 1.1–2.5 倍，提交快 2.1–4 倍，导入快 7–17%。
+每一项都最快：比 Git 快 2–12 倍，检出和提交比 CarterT27/scion 快 1.1–4 倍。
 
-- **导入：** Git 执行 `init`、`add -A` 和 `commit`。CSG Scion 每批 256 个上传文件，再通过写入 API 创建一个没有父提交的 changeset 和一个 ref。
-- **提交：** 在完整工作副本里改一个文件的一个字节，然后计时 Git 的 `commit -a`，或 CSG Scion 的工作副本提交（包括扫描状态和上传）。两边都不 push 也不 land。
-- **完整检出：** Git 的 `clone --no-local`；CSG Scion 的工作副本克隆。
-- **只检出一个目录：** Git 的 `clone --no-local --filter=blob:none --sparse` 加 `sparse-checkout set dir0000`；CSG Scion 只克隆 `dir0000`。
-
-两个实现都在进程内启动服务端，元数据和对象都在内存里；CSG Scion 的对象和存到磁盘或 S3 时一样经过 zstd 压缩和打包。两边的服务端都要求令牌认证：客户端用长期令牌换取短期访问令牌，每个请求都带上它。CarterT27/scion 还开了 TLS，CSG Scion 的进程内服务端没有开（部署时由前面的代理终止 TLS）；关掉认证时 CSG Scion 的时间变化不到 4 ms。生成测试文件和校验检出结果不计入时间。
-
-```sh
-(cd bench/openscion && cargo build --release)
-bench/openscion/target/release/openscion-bench 100 7 objects auth      # 1,000 个文件，跑 7 次
-bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 个文件，跑 5 次
-```
-
-### 真实仓库
-
-[pingdotgg/t3code](https://github.com/pingdotgg/t3code)，用 CarterT27/scion README 里测的同一个快照：5,573 个提交、28,068 个文件。CSG Scion 在上面那台 M5 上运行，后端是 Docker 中的 PostgreSQL 和 MinIO，Git 用本地裸仓库。M4 Pro 两列是 CarterT27/scion README 里公布的数字（CockroachDB + MinIO），没有在这里重跑。
+**真实仓库：** [pingdotgg/t3code](https://github.com/pingdotgg/t3code)，5,573 个提交、28,068 个文件；CSG Scion 用 PostgreSQL + MinIO。M4 Pro 两列取自 CarterT27/scion 的 README。
 
 | 场景 | Git，M5 | CSG Scion，M5 | Git，M4 Pro | CarterT27，M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
@@ -49,11 +32,7 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 | 完整历史：Git 克隆、Scion 导入 | 3.96 秒 | 103 秒 + repack 42 秒 | 3.56 秒 | 23 分 18 秒 |
 | 历史占用的存储 | pack 557 MB | MinIO 247 MB + PostgreSQL 90 MB | — | — |
 
-和同一台机器上的 Git 相比，CSG Scion 完整检出和检出 `apps/web` 的用时都是 Git 的 1.03 倍；CarterT27/scion 分别是 5.2 倍和 4.6 倍。CSG Scion 的干净工作区 status 用时是 Git 的 0.77 倍。Scion 的导入要在服务端构建并存下每一个提交，所以拿来和另一个实现的导入比，而不是和 Git 的克隆比；CarterT27/scion 没有公布 status 和存储的数字。每次检出都逐个文件和 Git 核对；Git 的 pack 是从 GitHub 直接克隆下来的，没有重新打包。
-
-- [报告：CarterT27/scion 的测试](docs/reports/2026-10-20-openscion-workloads.md)（英文）：方法、全部数据和复现方式。
-- [报告：starhub-server](docs/reports/2026-10-19-starhub-server.md)（英文）：在 starhub-server 历史上的全量真实测试，以及与 starhub 的 Gitaly + MinIO 方案、libgit2 的对比。
-- [组件基准测试](docs/performance.md)（英文）：缓存、合入、历史查询、10 万文件的检出。
+方法和更多数据：[OpenScion 负载](docs/reports/2026-10-20-openscion-workloads.md) · [starhub-server](docs/reports/2026-10-19-starhub-server.md) · [组件基准测试](docs/performance.md)（均为英文）
 
 ## 工作方式
 

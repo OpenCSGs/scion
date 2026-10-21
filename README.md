@@ -11,9 +11,7 @@ Scion is a Rust implementation of the design in Anthropic's [Redesigning source 
 
 ## Benchmarks
 
-The [benchmark runner](bench/openscion/src/main.rs) compares CSG Scion with Git and with [CarterT27/scion](https://github.com/CarterT27/scion), another implementation of the same design, on the four synthetic workloads used by [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md). All three ran on one machine: an Apple M5 with 16 GiB RAM, macOS 26.5.2 and Git 2.54.0. CarterT27/scion was built from its `main` at the time and run with its own runner.
-
-Each file contains 4 KiB of pseudorandom bytes, spread across 10 directories. The 1,000-file case uses seven runs and the 10,000-file case uses five. All times are median milliseconds; lower is better.
+CSG Scion vs. Git and [CarterT27/scion](https://github.com/CarterT27/scion) on the [OpenScion](https://github.com/tinyhumansai/openscion/blob/main/benchmarks/README.md) workloads, one Apple M5. Median ms, lower is better.
 
 | Scenario | Git, 1k files | CarterT27, 1k | CSG Scion, 1k | Git, 10k files | CarterT27, 10k | CSG Scion, 10k |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -22,24 +20,9 @@ Each file contains 4 KiB of pseudorandom bytes, spread across 10 directories. Th
 | Full clone / checkout | 243.0 | 115.8 | **52.2** | 2,361.9 | 1,047.3 | **589.4** |
 | One-directory clone / checkout | 60.3 | 25.0 | **23.1** | 172.9 | 123.1 | **49.5** |
 
-CSG Scion is the fastest of the three in every cell: 2–12× faster than Git, and against CarterT27/scion 1.1–2.5× faster for checkouts, 2.1–4× for commits and 7–17% for imports.
+Fastest in every cell: 2–12× faster than Git, 1.1–4× faster than CarterT27/scion on checkouts and commits.
 
-- **Import:** Git runs `init`, `add -A` and `commit`. CSG Scion uploads the files in batches of 256 and creates a parentless changeset and a ref through the write API.
-- **Commit:** change one byte in one file of the full working copy, then time Git's `commit -a` or CSG Scion's working-copy commit, including the status scan and the upload. Neither side pushes or lands.
-- **Full checkout:** Git's `clone --no-local`; CSG Scion's working-copy clone.
-- **One-directory checkout:** Git's `clone --no-local --filter=blob:none --sparse` and `sparse-checkout set dir0000`; CSG Scion's clone of `dir0000` only.
-
-Both implementations run an in-process server with in-memory metadata and objects; CSG Scion's objects go through the same zstd compression and packing as on disk or S3. Both servers require token authentication: the client exchanges a long-lived token for short-lived access tokens and every request carries one. CarterT27/scion's also uses TLS, which CSG Scion's in-process server does not (deployments terminate TLS in front of it); without authentication CSG Scion's times change by less than 4 ms. Fixture writes and checks of the checked-out files are outside the timers.
-
-```sh
-(cd bench/openscion && cargo build --release)
-bench/openscion/target/release/openscion-bench 100 7 objects auth      # 1,000 files, 7 runs
-bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 files, 5 runs
-```
-
-### Real repositories
-
-[pingdotgg/t3code](https://github.com/pingdotgg/t3code) at the snapshot CarterT27/scion's README measures: 5,573 commits and 28,068 files. CSG Scion ran on PostgreSQL and MinIO in Docker on the M5 above, with Git on a local bare repository. The M4 Pro columns are CarterT27/scion's published numbers, from its README (CockroachDB and MinIO), as it was not rerun here.
+**Real repository:** [pingdotgg/t3code](https://github.com/pingdotgg/t3code), 5,573 commits and 28,068 files; CSG Scion on PostgreSQL and MinIO. The M4 Pro columns are from CarterT27/scion's README.
 
 | Scenario | Git, M5 | CSG Scion, M5 | Git, M4 Pro | CarterT27, M4 Pro |
 | --- | ---: | ---: | ---: | ---: |
@@ -49,11 +32,7 @@ bench/openscion/target/release/openscion-bench 1000 5 objects auth     # 10,000 
 | Full history: Git's clone, Scion's import | 3.96 s | 103 s + 42 s repack | 3.56 s | 23 min 18 s |
 | Storage of the history | 557 MB pack | 247 MB in MinIO + 90 MB in PostgreSQL | — | — |
 
-Against Git on the same machine, CSG Scion's full and `apps/web` checkouts both take 1.03× Git's time; CarterT27/scion's take 5.2× and 4.6×. Its clean status takes 0.77× Git's. A Scion import builds and stores every commit on the server, so it is compared with the other implementation's import rather than with Git's clone; CarterT27/scion publishes no status or storage numbers. Every checkout is checked file by file against Git, and Git's pack is the one cloned from GitHub, not repacked.
-
-- [Report: CarterT27/scion's benchmarks](docs/reports/2026-10-20-openscion-workloads.md), with the method, every number and how to rerun it.
-- [Report: starhub-server](docs/reports/2026-10-19-starhub-server.md): a full real-world test on starhub-server's history, compared with starhub's Gitaly + MinIO stack and with libgit2.
-- [Component benchmarks](docs/performance.md): the cache, landing, history queries and checkouts at 100,000 files.
+Method and more: [OpenScion workloads](docs/reports/2026-10-20-openscion-workloads.md) · [starhub-server](docs/reports/2026-10-19-starhub-server.md) · [component benchmarks](docs/performance.md)
 
 ## How it works
 

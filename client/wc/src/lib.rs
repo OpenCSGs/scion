@@ -275,6 +275,15 @@ pub enum Progress {
     Checkout { done: usize, total: usize, bytes: u64 },
 }
 
+/// One file of a commit made by [`WorkingCopy::commit_with_stat`]: its mode before (None: added)
+/// and after (None: deleted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    pub path: String,
+    pub old_mode: Option<Mode>,
+    pub new_mode: Option<Mode>,
+}
+
 /// Receives [`Progress`] reports.
 pub type OnProgress<'a> = &'a (dyn Fn(Progress) + Sync);
 
@@ -594,6 +603,16 @@ impl WorkingCopy {
         message: &str,
         author: Option<(&str, &str)>,
     ) -> Result<Option<CreatedChangeset>> {
+        Ok(self.commit_with_stat(client, message, author).await?.map(|(c, _)| c))
+    }
+
+    /// [`WorkingCopy::commit`], also returning the files it changed.
+    pub async fn commit_with_stat(
+        &mut self,
+        client: &Client,
+        message: &str,
+        author: Option<(&str, &str)>,
+    ) -> Result<Option<(CreatedChangeset, Vec<FileStat>)>> {
         let _lock = self.paths.lock()?;
         self.commit_locked(client, message, author, None).await
     }
@@ -604,7 +623,7 @@ impl WorkingCopy {
         message: &str,
         author: Option<(&str, &str)>,
         merge: Option<ObjectId>,
-    ) -> Result<Option<CreatedChangeset>> {
+    ) -> Result<Option<(CreatedChangeset, Vec<FileStat>)>> {
         // Finishing a sync or merge that stopped on conflicts: its message, author and merge
         // parent are the defaults
         let conflict = self.state.conflict.clone();
@@ -658,6 +677,20 @@ impl WorkingCopy {
         let created = b.create().await?;
 
         let mut dirstate = self.paths.load_dirstate()?;
+        let stat = changes
+            .iter()
+            .map(|c| {
+                let (path, new_mode) = match c {
+                    Change::Put { path, mode, .. } => (path, Some(*mode)),
+                    Change::Delete { path } => (path, None),
+                };
+                FileStat {
+                    path: path.clone(),
+                    old_mode: dirstate.files.get(path).map(|r| r.mode),
+                    new_mode,
+                }
+            })
+            .collect();
         for c in changes {
             match c {
                 Change::Put {
@@ -684,7 +717,7 @@ impl WorkingCopy {
         self.state.head_merge = merge.map(|m| m.to_string());
         self.state.conflict = None;
         self.paths.save_state(&self.state)?;
-        Ok(Some(created))
+        Ok(Some((created, stat)))
     }
 
     /// Replaces the pending commit with one that also includes the current local changes, with
@@ -696,6 +729,16 @@ impl WorkingCopy {
         message: Option<&str>,
         author: Option<(&str, &str)>,
     ) -> Result<Option<CreatedChangeset>> {
+        Ok(self.amend_with_stat(client, message, author).await?.map(|(c, _)| c))
+    }
+
+    /// [`WorkingCopy::amend`], also returning the files the new commit changes.
+    pub async fn amend_with_stat(
+        &mut self,
+        client: &Client,
+        message: Option<&str>,
+        author: Option<(&str, &str)>,
+    ) -> Result<Option<(CreatedChangeset, Vec<FileStat>)>> {
         let _lock = self.paths.lock()?;
         let old_message = self.state.head_message.clone().unwrap_or_default();
         let old_author = self.state.head_author.clone();

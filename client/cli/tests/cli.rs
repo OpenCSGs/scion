@@ -326,11 +326,18 @@ async fn clone_commit_land_sync_workflow() {
             ],
         ));
         std::fs::write(wc.join("src/extra2.rs"), "y").expect("add");
-        let v = json_of(&scn_in(&wc, &["commit", "--amend", "-m", "extra files", "--json"]));
-        assert!(v["changeset"].is_string());
+        let out = scn_in(&wc, &["commit", "--amend", "-m", "extra files\n\nbody"]);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.starts_with("[main c1"), "{text}");
+        assert!(
+            text.ends_with(
+                "] extra files\n 2 files changed\n create mode 100644 src/extra.rs\n create mode 100644 src/extra2.rs\n"
+            ),
+            "{text}"
+        );
         json_of(&scn_in(&wc, &["land", "--json"]));
         let log = json_of(&scn_in(&wc, &["log", "-n", "1", "--json"]));
-        assert_eq!(log["entries"][0]["message"], "extra files");
+        assert_eq!(log["entries"][0]["message"], "extra files\n\nbody");
         assert_eq!(log["entries"][0]["author"], "Ada", "amend keeps the author");
         let out = scn_in(&wc, &["uncommit"]);
         assert_eq!(out.status.code(), Some(1));

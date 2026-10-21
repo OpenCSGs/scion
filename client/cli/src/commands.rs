@@ -572,14 +572,81 @@ pub struct CommitOut {
     /// 没有改动时为 None。
     pub changeset: Option<String>,
     pub generation: Option<u64>,
+    /// For the text: the branch, the subject, whether it is the branch's first commit, and the files.
+    #[serde(skip)]
+    pub summary: Option<CommitSummary>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommitSummary {
+    pub reference: String,
+    pub subject: String,
+    pub root: bool,
+    pub files: Vec<scion_wc::FileStat>,
+}
+
+fn git_mode(m: scion_wc::Mode) -> &'static str {
+    match m {
+        scion_wc::Mode::File => "100644",
+        scion_wc::Mode::Executable => "100755",
+        scion_wc::Mode::Symlink => "120000",
+    }
+}
+
+/// Like git: `[main abc123456789] subject`, ` 2 files changed`, then created, deleted and
+/// mode-changed files. (No line counts: they would mean downloading every changed file's old
+/// version.)
 impl Render for CommitOut {
     fn text(&self) -> String {
-        match &self.changeset {
-            Some(c) => format!("committed {} (run `scn land` to publish)", short(c)),
-            None => "nothing to commit".to_owned(),
+        let (Some(c), Some(sum)) = (&self.changeset, &self.summary) else {
+            return "nothing to commit, working tree clean".to_owned();
+        };
+        let root = if sum.root { " (root-commit)" } else { "" };
+        let n = sum.files.len();
+        let mut s = format!(
+            "[{}{root} {}] {}\n {n} file{} changed",
+            sum.reference,
+            short(c),
+            sum.subject,
+            if n == 1 { "" } else { "s" }
+        );
+        for f in &sum.files {
+            match (f.old_mode, f.new_mode) {
+                (None, Some(m)) => s.push_str(&format!("\n create mode {} {}", git_mode(m), f.path)),
+                (Some(m), None) => s.push_str(&format!("\n delete mode {} {}", git_mode(m), f.path)),
+                (Some(a), Some(b)) if a != b => {
+                    s.push_str(&format!("\n mode change {} => {} {}", git_mode(a), git_mode(b), f.path));
+                }
+                _ => {}
+            }
         }
+        s
+    }
+}
+
+fn commit_out(
+    wc: &WorkingCopy,
+    root: bool,
+    created: Option<(scion_client::CreatedChangeset, Vec<scion_wc::FileStat>)>,
+) -> CommitOut {
+    let subject = wc
+        .state()
+        .head_message
+        .as_deref()
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("");
+    CommitOut {
+        schema: "scion.cli.commit/v1",
+        changeset: created.as_ref().map(|(c, _)| c.id.to_string()),
+        generation: created.as_ref().map(|(c, _)| c.generation),
+        summary: created.map(|(_, files)| CommitSummary {
+            reference: wc.state().reference.clone(),
+            subject: subject.to_owned(),
+            root,
+            files,
+        }),
     }
 }
 
@@ -588,14 +655,11 @@ impl Render for CommitOut {
 pub async fn amend(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> Result<CommitOut, CliError> {
     let author = author.map(parse_author).transpose()?;
     let (mut wc, client) = open_wc(ctx).await?;
+    let root = wc.state().base.is_none();
     let created = wc
-        .amend(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
+        .amend_with_stat(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
         .await?;
-    Ok(CommitOut {
-        schema: "scion.cli.commit/v1",
-        changeset: created.map(|c| c.id.to_string()),
-        generation: created.map(|c| c.generation),
-    })
+    Ok(commit_out(&wc, root, created))
 }
 
 #[derive(Debug, Serialize)]
@@ -824,14 +888,11 @@ pub async fn commit(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> R
         (None, Some(c)) if c.author.is_some() => None,
         (a, _) => resolve_author(a)?,
     };
+    let root = wc.state().base.is_none() && wc.state().head.is_none();
     let created = wc
-        .commit(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
+        .commit_with_stat(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
         .await?;
-    Ok(CommitOut {
-        schema: "scion.cli.commit/v1",
-        changeset: created.map(|c| c.id.to_string()),
-        generation: created.map(|c| c.generation),
-    })
+    Ok(commit_out(&wc, root, created))
 }
 
 #[derive(Debug, Serialize)]
@@ -1397,24 +1458,50 @@ mod tests {
         };
         assert_eq!(nested.text(), "A  a\nA  ../b\nA  ../../c\nA  ../../src");
 
+        let none = CommitOut {
+            schema: "s",
+            changeset: None,
+            generation: None,
+            summary: None,
+        };
+        assert_eq!(none.text(), "nothing to commit, working tree clean");
+        use scion_wc::{FileStat, Mode};
+        let stat = |path: &str, old_mode, new_mode| FileStat {
+            path: path.into(),
+            old_mode,
+            new_mode,
+        };
+        let c = CommitOut {
+            changeset: Some("c1abcdefghijklmn".into()),
+            generation: Some(1),
+            summary: Some(CommitSummary {
+                reference: "main".into(),
+                subject: "add things".into(),
+                root: true,
+                files: vec![
+                    stat("a", None, Some(Mode::File)),
+                    stat("b", Some(Mode::Symlink), None),
+                    stat("c", Some(Mode::File), Some(Mode::Executable)),
+                    stat("d", Some(Mode::File), Some(Mode::File)),
+                ],
+            }),
+            ..none
+        };
         assert_eq!(
-            CommitOut {
-                schema: "s",
-                changeset: None,
-                generation: None
-            }
-            .text(),
-            "nothing to commit"
+            c.text(),
+            "[main (root-commit) c1abcdefghij] add things\n 4 files changed\n create mode 100644 a\n \
+             delete mode 120000 b\n mode change 100644 => 100755 c"
         );
-        assert!(
-            CommitOut {
-                schema: "s",
-                changeset: Some("c1x".into()),
-                generation: Some(1)
-            }
-            .text()
-            .contains("scn land")
-        );
+        let one = CommitOut {
+            summary: Some(CommitSummary {
+                reference: "dev".into(),
+                subject: "s".into(),
+                root: false,
+                files: vec![stat("d", Some(Mode::File), Some(Mode::File))],
+            }),
+            ..c
+        };
+        assert_eq!(one.text(), "[dev c1abcdefghij] s\n 1 file changed");
         assert!(
             LandOut {
                 schema: "s",

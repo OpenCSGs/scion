@@ -696,20 +696,17 @@ pub struct RestoreOut {
     pub kept_added: Vec<String>,
 }
 
+/// Silent like `git restore`, except for a note about added files it left alone.
 impl Render for RestoreOut {
     fn text(&self) -> String {
-        let mut lines: Vec<String> = self.restored.iter().map(|p| format!("restored {p}")).collect();
-        if lines.is_empty() {
-            lines.push("nothing to restore".to_owned());
+        if self.kept_added.is_empty() {
+            return String::new();
         }
-        if !self.kept_added.is_empty() {
-            lines.push(format!(
-                "kept {} added file(s) (restore never deletes files): {}",
-                self.kept_added.len(),
-                self.kept_added.join(", ")
-            ));
-        }
-        lines.join("\n")
+        format!(
+            "kept {} added file(s) (restore never deletes files): {}",
+            self.kept_added.len(),
+            self.kept_added.join(", ")
+        )
     }
 }
 
@@ -1594,6 +1591,17 @@ mod tests {
         };
         assert_eq!(m.text(), "Merge made by the 'scion' strategy.\n 2 files changed");
         assert_eq!(AbortOut { schema: "s" }.text(), "");
+        let r = RestoreOut {
+            schema: "s",
+            restored: vec!["a".into()],
+            kept_added: vec![],
+        };
+        assert_eq!(r.text(), "");
+        let r = RestoreOut {
+            kept_added: vec!["n".into()],
+            ..r
+        };
+        assert_eq!(r.text(), "kept 1 added file(s) (restore never deletes files): n");
         let sw = SwitchOut {
             schema: "s",
             reference: "dev".into(),

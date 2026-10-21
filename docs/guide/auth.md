@@ -81,6 +81,25 @@ repos    = ["*"]
 actions  = ["admin"]                  # admin on repos "*" grants system administration (policy, tokens)
 ```
 
+**Deny rules** (`effect = "deny"`) win over every allow rule. A deny rule denies its action and every higher one, so denying `write` still lets the subject read. A deny rule with `paths` also denies requests not made by path, such as reading objects by id for a checkout, because those cover the whole repository:
+
+```toml
+[[rule]]
+effect   = "deny"
+subjects = ["group:contractors"]
+repos    = ["mono"]
+paths    = ["secrets"]
+actions  = ["read"]
+```
+
+**Groups** can be defined in the policy itself, from users and other groups; they are added to the groups a token or IdP gives before any rule is matched, and cycles are rejected:
+
+```toml
+[groups]
+eng    = ["user:alice", "user:bob", "group:agents"]
+agents = ["user:ci-bot"]
+```
+
 What each API needs:
 
 | Operation | Needs |

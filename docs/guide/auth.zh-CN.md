@@ -81,6 +81,25 @@ repos    = ["*"]
 actions  = ["admin"]                  # repos 含 "*" 的 admin 规则授予系统管理（策略、令牌）
 ```
 
+**拒绝规则**（`effect = "deny"`）优先于所有允许规则。拒绝规则拒绝它的动作以及更高的动作，所以拒绝 `write` 后仍然可以读。带 `paths` 的拒绝规则也会拒绝不按路径的请求（例如检出时按 id 读对象），因为这类请求涉及整个仓库：
+
+```toml
+[[rule]]
+effect   = "deny"
+subjects = ["group:contractors"]
+repos    = ["mono"]
+paths    = ["secrets"]
+actions  = ["read"]
+```
+
+**组**也可以直接在策略里定义，成员是用户或其他组。它们会在匹配规则之前补到令牌或 IdP 给出的组里，组之间不能循环包含：
+
+```toml
+[groups]
+eng    = ["user:alice", "user:bob", "group:agents"]
+agents = ["user:ci-bot"]
+```
+
 各接口需要的权限：
 
 | 操作 | 需要 |

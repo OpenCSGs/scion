@@ -494,11 +494,12 @@ impl Guard {
         let yes = |b: bool| if b { Decision::Allow } else { Decision::Abstain };
         Ok(match d {
             Decider::Policy => match self.current_policy()? {
-                Some(pol) => yes(if admin {
-                    pol.is_system_admin(p)
-                } else {
-                    pol.allows(p, req)
-                }),
+                Some(pol) if admin => yes(pol.is_system_admin(p)),
+                Some(pol) => match pol.decide(p, req) {
+                    Some(true) => Decision::Allow,
+                    Some(false) => Decision::Deny,
+                    None => Decision::Abstain,
+                },
                 // The built-in default settles the request either way
                 None if self.webhooks.is_empty() => {
                     let builtin = Policy::builtin();
@@ -516,8 +517,18 @@ impl Guard {
         })
     }
 
+    /// `p` with the policy's `[groups]` added: every decider sees them.
+    fn expand<'p>(&self, p: &'p Principal) -> Result<std::borrow::Cow<'p, Principal>, AuthError> {
+        Ok(match self.current_policy()? {
+            // No copy on the hot path when there are no groups to add
+            Some(pol) if pol.has_groups() => std::borrow::Cow::Owned(pol.with_groups(p)),
+            _ => std::borrow::Cow::Borrowed(p),
+        })
+    }
+
     /// Runs the chain: the first decider that allows or denies settles it; all abstaining denies.
     async fn run_chain(&self, p: &Principal, req: &Request<'_>, admin: bool) -> Result<bool, AuthError> {
+        let p = &*self.expand(p)?;
         for d in &self.chain {
             match self.decide(*d, p, req, admin).await? {
                 Decision::Allow => return Ok(true),
@@ -543,7 +554,7 @@ impl Guard {
         }
         if self
             .current_policy()?
-            .is_some_and(|pol| pol.allows_any(p, repo, action))
+            .is_some_and(|pol| pol.allows_any(&pol.with_groups(p), repo, action))
         {
             return Ok(true);
         }
@@ -584,7 +595,7 @@ impl Guard {
         }
         Ok(self
             .current_policy()?
-            .is_some_and(|pol| pol.path_visible(p, repo, path)))
+            .is_some_and(|pol| pol.path_visible(&pol.with_groups(p), repo, path)))
     }
 
     /// 是否有系统管理权限（策略、令牌）。
@@ -662,6 +673,61 @@ bearer = "opa"
             "opa, last in the chain"
         );
         assert!(!g.is_admin(&Principal::user("alice", vec![])).await.expect("admin"));
+    }
+
+    #[tokio::test]
+    async fn policy_denials_and_groups_reach_the_chain() {
+        let g = Guard::build(
+            GuardConfig {
+                required: true,
+                auth: AuthConfig::default(),
+                signing_key_pem: None,
+            },
+            Arc::new(MemStore::new()),
+            lookup(),
+        )
+        .expect("build");
+        g.set_policy(
+            r#"
+[groups]
+eng = ["user:alice"]
+ops = ["group:eng"]
+
+[[rule]]
+subjects = ["group:ops"]
+repos = ["mono"]
+actions = ["land"]
+
+[[rule]]
+effect = "deny"
+subjects = ["group:eng"]
+repos = ["mono"]
+paths = ["secrets"]
+actions = ["read"]
+
+[[rule]]
+subjects = ["group:ops"]
+repos = ["*"]
+actions = ["admin"]
+"#,
+        )
+        .await
+        .expect("policy");
+        let alice = Principal::user("alice", vec![]);
+        let read = |path| Request::repo("mono", Action::Read).with_path(path);
+        assert!(
+            g.check(&alice, &read("src")).await.expect("check"),
+            "group from [groups]"
+        );
+        assert!(!g.check(&alice, &read("secrets/k")).await.expect("check"), "denied");
+        assert!(g.check_any(&alice, "mono", Action::Land).await.expect("any"));
+        assert!(g.path_visible(&alice, "mono", "src").await.expect("visible"));
+        assert!(g.is_admin(&alice).await.expect("admin"));
+        assert!(
+            !g.check(&Principal::user("bob", vec![]), &read("src"))
+                .await
+                .expect("check")
+        );
     }
 
     async fn guard(idp: &FakeIdp, webhook: bool) -> Arc<Guard> {

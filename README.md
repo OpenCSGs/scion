@@ -141,11 +141,11 @@ With an OIDC provider configured, people sign in with `scn login SERVER` in a br
 
 ## Documentation
 
-- **Using Scion:** [deployment](docs/guide/deploy.md) · [command tour](docs/guide/cli.md) · [git commands in scn](docs/guide/git-commands.md) · [coming from git](docs/guide/coming-from-git.md) · [importing from git](docs/guide/git-import.md) · [sparse checkout](docs/guide/sparse-checkout.md) · [repositories and branches](docs/guide/repos.md) · [archives](docs/guide/archive.md) · [directory listings](docs/guide/browse.md) · [git SHAs](docs/guide/git-sha.md)
-- **Running a server:** [object storage](docs/guide/object-storage.md) · [clusters and landing](docs/guide/cluster.md) · [caching](docs/guide/cache.md) · [authentication and access control](docs/guide/auth.md) · [redaction and fsck](docs/guide/redaction.md) · [ref events](docs/guide/events.md) · [metrics and tracing](docs/guide/observability.md)
-- **Design:** [server](docs/design/rust-server-architecture.md) · [client](docs/design/rust-client-architecture.md) · [starhub / CSGLite integration](docs/design/starhub-integration.md) · object format [`SPEC.md`](SPEC.md) · protocol [`proto/scion/v1/`](proto/scion/v1/)
-
-Every guide, the three design documents and SPEC.md have Chinese versions, linked at their tops.
+| | |
+|---|---|
+| **Use** | [Deploy](docs/guide/deploy.md) · [CLI tour](docs/guide/cli.md) · [Git commands](docs/guide/git-commands.md) · [Coming from git](docs/guide/coming-from-git.md) · [Git import](docs/guide/git-import.md) · [Sparse checkout](docs/guide/sparse-checkout.md) · [Repos](docs/guide/repos.md) · [Archives](docs/guide/archive.md) · [Browse](docs/guide/browse.md) · [Git SHAs](docs/guide/git-sha.md) |
+| **Operate** | [Storage](docs/guide/object-storage.md) · [Clusters](docs/guide/cluster.md) · [Caching](docs/guide/cache.md) · [Auth](docs/guide/auth.md) · [Redaction](docs/guide/redaction.md) · [Events](docs/guide/events.md) · [Observability](docs/guide/observability.md) |
+| **Design** | [Server](docs/design/rust-server-architecture.md) · [Client](docs/design/rust-client-architecture.md) · [starhub](docs/design/starhub-integration.md) · [Object format](SPEC.md) · [Protocol](proto/scion/v1/) |
 
 ## Status
 

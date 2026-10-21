@@ -587,6 +587,7 @@ async fn clone_commit_land_sync_workflow() {
             (Some("v1.0"), Some("created"))
         );
         json_of(&scn_in(&wc, &["tag", "v0.9", "HEAD~1", "--json"]));
+        assert!(scn_in(&wc, &["tag", "-l"]).status.success());
         let v = json_of(&scn_in(&wc, &["tag", "--json"]));
         let names: Vec<&str> = v["tags"]
             .as_array()
@@ -1186,6 +1187,11 @@ async fn repo_and_branch_commands() {
         let out = scn_in(&wc, &["branch", "ls"]);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert_eq!(text, "  dev\n* main\n");
+        let out = scn_in(&wc, &["branch", "--show-current"]);
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "main\n");
+        let text = String::from_utf8_lossy(&scn_in(&wc, &["branch", "-av"]).stdout).into_owned();
+        assert!(text.contains("* main c1") && text.contains("  dev  c1"), "{text}");
+
         assert_eq!(
             scn_in(&wc, &["branch", "rm", "main"]).status.code(),
             Some(1),

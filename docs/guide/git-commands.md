@@ -16,8 +16,8 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git restore PATH` | `scn restore PATH` | |
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | |
 | `git merge B`, `git merge --abort` | `scn merge B`, `scn merge --abort` | Then `scn land` to publish |
-| `git branch`, `git branch NAME [REV]`, `git branch -d NAME` | `scn branch`, `scn branch NAME [REV]`, `scn branch -d NAME` | Branches live on the server |
-| `git tag`, `git tag NAME [REV]`, `git tag -d NAME` | `scn tag`, `scn tag NAME [REV]`, `scn tag -d NAME` | Lightweight tags |
+| `git branch [-v] [-a]`, `git branch NAME [REV]`, `git branch -d NAME`, `--show-current` | the same | Branches live on the server, so `-a` lists the same ones |
+| `git tag [-l]`, `git tag NAME [REV]`, `git tag -d NAME` | the same | Lightweight tags |
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | the same | |
 | `git show [REV] [-- PATH]` | the same | |
 | `git diff [--cached]`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH`; with no staging area, `--cached` / `--staged` show the same local changes |

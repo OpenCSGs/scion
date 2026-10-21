@@ -16,8 +16,8 @@
 | `git restore PATH` | `scn restore PATH` | |
 | `git switch B`、`git switch -c B` | `scn switch B`、`scn switch -c B` | |
 | `git merge B`、`git merge --abort` | `scn merge B`、`scn merge --abort` | 之后用 `scn land` 发布 |
-| `git branch`、`git branch NAME [REV]`、`git branch -d NAME` | `scn branch`、`scn branch NAME [REV]`、`scn branch -d NAME` | 分支在服务端 |
-| `git tag`、`git tag NAME [REV]`、`git tag -d NAME` | `scn tag`、`scn tag NAME [REV]`、`scn tag -d NAME` | 轻量标签 |
+| `git branch [-v] [-a]`、`git branch NAME [REV]`、`git branch -d NAME`、`--show-current` | 相同 | 分支都在服务端，所以 `-a` 列出的是同一批 |
+| `git tag [-l]`、`git tag NAME [REV]`、`git tag -d NAME` | 相同 | 轻量标签 |
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | 相同 | |
 | `git show [REV] [-- PATH]` | 相同 | |
 | `git diff [--cached]`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH`；没有暂存区，`--cached` / `--staged` 显示同样的本地改动 |

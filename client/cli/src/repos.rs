@@ -178,11 +178,15 @@ pub struct BranchListOut {
     /// The working copy's branch, which the text marks with `*` (outside one: the default branch).
     #[serde(skip)]
     pub current: Option<String>,
+    /// `-v`: each branch's commit too.
+    #[serde(skip)]
+    pub verbose: bool,
 }
 
 /// Like `git branch`.
 impl Render for BranchListOut {
     fn text(&self) -> String {
+        let width = self.branches.iter().map(|b| b.name.chars().count()).max().unwrap_or(0);
         self.branches
             .iter()
             .map(|b| {
@@ -190,7 +194,12 @@ impl Render for BranchListOut {
                     Some(c) => *c == b.name,
                     None => b.is_default,
                 };
-                format!("{} {}", if current { "*" } else { " " }, b.name)
+                let mark = if current { "*" } else { " " };
+                if self.verbose {
+                    format!("{mark} {:<width$} {}", b.name, short(&b.changeset))
+                } else {
+                    format!("{mark} {}", b.name)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -245,6 +254,27 @@ pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
         repo,
         branches,
         current: (ctx.repo.is_none() && ctx.has_working_copy()).then_some(current),
+        verbose: false,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct CurrentBranchOut {
+    pub schema: &'static str,
+    pub branch: String,
+}
+
+impl Render for CurrentBranchOut {
+    fn text(&self) -> String {
+        self.branch.clone()
+    }
+}
+
+/// `scn branch --show-current`: the working copy's branch, without asking the server.
+pub fn current_branch(ctx: &Ctx) -> Result<CurrentBranchOut, CliError> {
+    Ok(CurrentBranchOut {
+        schema: "scion.cli.current-branch/v1",
+        branch: scion_wc::WorkingCopy::open(&ctx.cwd)?.state().reference.clone(),
     })
 }
 
@@ -463,8 +493,12 @@ mod tests {
                 },
             ],
             current: None,
+            verbose: false,
         };
         assert_eq!(b.text(), "* main\n  dev", "outside a working copy: the default branch");
+        let b = BranchListOut { verbose: true, ..b };
+        assert_eq!(b.text(), "* main c1abcdefghij\n  dev  c1zz");
+        let b = BranchListOut { verbose: false, ..b };
         let b = BranchListOut {
             current: Some("dev".into()),
             ..b

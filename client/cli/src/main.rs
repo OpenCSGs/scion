@@ -121,6 +121,15 @@ enum Command {
             conflicts_with = "name"
         )]
         delete: Option<String>,
+        /// List with each branch's commit.
+        #[arg(short, long, conflicts_with_all = ["name", "delete"])]
+        verbose: bool,
+        /// Accepted for git compatibility: every branch is on the server, so the list has them all.
+        #[arg(short = 'a', long = "all", short_alias = 'r', alias = "remotes")]
+        all: bool,
+        /// Print the working copy's branch.
+        #[arg(long, conflicts_with_all = ["name", "delete", "verbose"])]
+        show_current: bool,
     },
     /// Tags: fixed names for commits. `scn tag` lists, `scn tag NAME [REV]` creates (default
     /// HEAD), `scn tag -d NAME` deletes. A tag name works as a revision (`scn log v1.0`).
@@ -134,6 +143,9 @@ enum Command {
         /// Delete this tag.
         #[arg(short = 'd', long = "delete", value_name = "NAME", conflicts_with = "name")]
         delete: Option<String>,
+        /// List the tags (what `scn tag` with no name does).
+        #[arg(short = 'l', long, conflicts_with_all = ["name", "delete"])]
+        list: bool,
     },
     /// Show local changes, like `git status`.
     Status {
@@ -852,13 +864,21 @@ async fn run(cli: Cli) -> ExitCode {
                 emit(repos::fork(&ctx, &source, &target).await, json)
             }
         },
+        Command::Branch { show_current: true, .. } => emit(repos::current_branch(&ctx), json),
         Command::Branch {
             cmd,
             name,
             revision,
             delete,
+            verbose,
+            ..
         } => match (cmd, name, delete) {
-            (Some(BranchCmd::Ls), _, _) | (None, None, None) => emit(repos::branches(&ctx).await, json),
+            (Some(BranchCmd::Ls), _, _) | (None, None, None) => emit(
+                repos::branches(&ctx)
+                    .await
+                    .map(|b| repos::BranchListOut { verbose, ..b }),
+                json,
+            ),
             (Some(BranchCmd::Create { name, revision }), _, _) => {
                 emit(repos::create_branch(&ctx, &name, revision.as_deref()).await, json)
             }
@@ -867,7 +887,9 @@ async fn run(cli: Cli) -> ExitCode {
                 emit(repos::delete_branch(&ctx, &name).await, json)
             }
         },
-        Command::Tag { name, revision, delete } => match (name, delete) {
+        Command::Tag {
+            name, revision, delete, ..
+        } => match (name, delete) {
             (Some(name), _) => emit(repos::create_tag(&ctx, &name, revision.as_deref()).await, json),
             (None, Some(name)) => emit(repos::delete_tag(&ctx, &name).await, json),
             (None, None) => emit(repos::tags(&ctx).await, json),

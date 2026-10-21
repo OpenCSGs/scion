@@ -2,7 +2,7 @@
 
 English | [简体中文](authorization.zh-CN.md)
 
-Status: design, not implemented yet.
+Status: implemented (all nine steps below). How to configure it is in [the authentication guide](../guide/auth.md).
 
 Scion has to decide who may do what in very different deployments:
 - standalone with a few teams;
@@ -21,9 +21,9 @@ As in git hosting, users and organizations belong to the application layer, not 
 
 This design is about what happens between the principal and the answer.
 
-## Today
+## Before this design
 
-`Guard::check` hard-wires three sources, and a request is allowed if any of them allows it:
+`Guard::check` hard-wired three sources, and a request was allowed if any of them allowed it:
 
 1. the saved ACL policy (`scion admin policy set`), or the built-in default when there is none;
 2. grants carried by the token (`repos_claim`);
@@ -139,13 +139,13 @@ Every signed-in user owns `user/SUBJECT/*`, as personal accounts do on GitHub: t
 Open-source users mostly have GitHub accounts, so the first version supports GitHub as an identity provider and as a membership source.
 
 - **Login.** `[github]` names an OAuth app (`client_id`). `scn login` runs GitHub's device flow when the server offers it, the server reads `GET /user`, and the subject is the GitHub login (with an optional `subject_prefix`). The server then issues its own refresh and access tokens, as with OIDC.
-- **Teams as groups.** With `orgs = ["opencsg"]` and a server token that can read them (`token_env`), the server keeps the members of those organizations and their teams in memory, refreshed every `refresh` (default 5 minutes). A login gets the groups `github:ORG` and `github:ORG/TEAM`, so policies and organizations can name them: `subjects = ["group:github:opencsg/core"]`.
+- **Teams as groups.** With `orgs = ["opencsg"]` and a server token that can read them (`token_env`), the server keeps the members of those organizations and their teams in memory, refreshed every `refresh` (default 5 minutes). A login gets the groups `github:ORG` and `github:ORG/TEAM`, so policies can name them (organization members are still subjects): `subjects = ["group:github:opencsg/core"]`.
 
 ## Rollout
 
-Each step is one commit with tests, and none of them changes behaviour until it is configured:
+Each step was one commit with tests, and none of them changes behaviour until it is configured. All nine are done:
 
-1. A decider chain behind `Guard::check`, with allow, deny and abstain. Today's three sources become deciders, in today's order. (Done.)
+1. A decider chain behind `Guard::check`, with allow, deny and abstain. Today's three sources become deciders, in today's order.
 2. `[authorization]` in `auth.toml`: the chain order, several named webhooks with `decides` and `repos`, and the old `[authz_webhook]` still accepted.
 3. `effect = "deny"` rules and `[groups]` in the policy.
 4. The `orgs` and `org_members` tables (SQLite and PostgreSQL migrations), the `orgs` membership source and decider, and the `personal` decider.

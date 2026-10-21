@@ -2,7 +2,7 @@
 
 [English](authorization.md) | 简体中文
 
-状态：设计中，尚未实现。
+状态：已实现（下面九个步骤全部完成）。配置方法见[认证指南](../guide/auth.zh-CN.md)。
 
 Scion 要在差别很大的部署里决定谁能做什么：
 - 几个团队独立部署；
@@ -21,7 +21,7 @@ Scion 要在差别很大的部署里决定谁能做什么：
 
 本文讨论的是从身份到"允许或拒绝"之间的部分。
 
-## 现状
+## 改造之前
 
 `Guard::check` 写死了三个来源，任意一个允许就放行：
 
@@ -139,13 +139,13 @@ actions  = ["read"]
 开源用户大多有 GitHub 账号，所以第一版就支持把 GitHub 作为身份来源和成员关系来源。
 
 - **登录。** `[github]` 里填一个 OAuth app 的 `client_id`。服务端提供 GitHub 登录时，`scn login` 走 GitHub 的 device flow，服务端读取 `GET /user`，subject 就是 GitHub 用户名（可选加 `subject_prefix`）。之后服务端签发自己的刷新令牌和访问令牌，和 OIDC 登录一样。
-- **team 作为组。** 配置 `orgs = ["opencsg"]`，以及能读取这些组织的服务端令牌（`token_env`）后，服务端在内存里维护这些组织及其 team 的成员，每隔 `refresh`（默认 5 分钟）刷新一次。用户登录后得到 `github:ORG` 和 `github:ORG/TEAM` 两类组，策略和组织都可以引用，例如 `subjects = ["group:github:opencsg/core"]`。
+- **team 作为组。** 配置 `orgs = ["opencsg"]`，以及能读取这些组织的服务端令牌（`token_env`）后，服务端在内存里维护这些组织及其 team 的成员，每隔 `refresh`（默认 5 分钟）刷新一次。用户登录后得到 `github:ORG` 和 `github:ORG/TEAM` 两类组，策略可以引用（组织成员仍按 subject 管理），例如 `subjects = ["group:github:opencsg/core"]`。
 
 ## 分步实现
 
-每一步一个提交，带测试；在配置之前，每一步都不改变现有行为：
+每一步一个提交，带测试；在配置之前，每一步都不改变现有行为。九步已全部完成：
 
-1. 在 `Guard::check` 后面建判定器链，支持允许、拒绝、弃权。现有三个来源接成判定器，顺序和现在一致。（已完成）
+1. 在 `Guard::check` 后面建判定器链，支持允许、拒绝、弃权。现有三个来源接成判定器，顺序和现在一致。
 2. `auth.toml` 增加 `[authorization]`：链的顺序、多个带名字的回调（含 `decides` 和 `repos`），旧的 `[authz_webhook]` 继续可用。
 3. 策略支持 `effect = "deny"` 规则和 `[groups]`。
 4. `orgs` 和 `org_members` 两张表（SQLite 与 PostgreSQL 迁移），`orgs` 成员关系来源和判定器，以及 `personal` 判定器。

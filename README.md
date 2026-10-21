@@ -116,7 +116,7 @@ Each user or CI job signs in once with `scn login SERVER scn_pat_…` (or sets `
 | Docker, one node | `docker exec scion scion admin token create --lite --subject alice` |
 | Docker Compose or production | `docker compose exec scion scion admin token create --subject alice` |
 
-With an OIDC provider configured, people sign in with `scn login SERVER` in a browser instead. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details.
+With an OIDC provider or a GitHub OAuth app configured, people sign in with `scn login SERVER` in a browser instead. Organizations (`scn org`), personal namespaces and several authorization sources can be combined: the policy, GitHub teams, and webhooks such as starhub or OPA. [Deployment](docs/guide/deploy.md) and [authentication](docs/guide/auth.md) have the details.
 
 ## Documentation
 

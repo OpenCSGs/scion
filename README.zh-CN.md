@@ -116,7 +116,7 @@ docker exec scion scion admin token create --subject admin --group admins
 | Docker 单节点 | `docker exec scion scion admin token create --lite --subject alice` |
 | Docker Compose 或生产环境 | `docker compose exec scion scion admin token create --subject alice` |
 
-配置了 OIDC 时，用户直接 `scn login 服务端地址`，在浏览器里登录。详见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
+配置了 OIDC 或 GitHub OAuth app 时，用户直接 `scn login 服务端地址`，在浏览器里登录。组织（`scn org`）、个人命名空间和多种授权来源可以组合使用：策略、GitHub team，以及 starhub、OPA 这类回调。详见[部署](docs/guide/deploy.zh-CN.md)和[认证](docs/guide/auth.zh-CN.md)。
 
 ## 文档
 

@@ -854,7 +854,12 @@ pub async fn import_git(ctx: &Ctx, git_dir: &Path, git_ref: &str, target_ref: &s
         .ok_or_else(|| CliError::Usage("--repo is required for import".into()))?;
     let endpoint = ctx.endpoint.clone().unwrap_or_else(|| DEFAULT_ENDPOINT.to_owned());
     let client = connect(&endpoint, Some(&repo)).await?;
-    let summary = scion_gitimport::import(&client, &ctx.cwd.join(git_dir), git_ref, target_ref, |_, _| {}).await?;
+    let meter = Meter::stderr(ctx.chatty);
+    let summary = scion_gitimport::import(&client, &ctx.cwd.join(git_dir), git_ref, target_ref, |done, total| {
+        meter.update("Importing commits", done as u64, Some(total as u64), None);
+    })
+    .await?;
+    meter.done();
     Ok(ImportOut {
         schema: "scion.cli.import/v1",
         repo,

@@ -76,7 +76,7 @@ cargo run -p scion -- admin reindex --lite --data-dir ./.scion-data
 
 ## 输出
 
-文本输出与 git 一致：同一步骤 git 打印什么，scn 就打印什么；git 不出声的命令，scn 也什么都不打印。进度和 `Cloning into 'mono'...` 这类提示写到标准错误。标准错误是终端时，`clone` 显示 git 风格的进度：
+文本输出与 git 一致：同一步骤 git 打印什么，scn 就打印什么；git 不出声的命令，scn 也什么都不打印。进度和 `Cloning into 'mono'...` 这类提示写到标准错误。标准错误是终端时，`clone` 和 `import git` 显示 git 风格的进度（导入时是 `Importing commits:  45% (2852/6338)`）：
 
 ```text
 Cloning into 'mono'...

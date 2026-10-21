@@ -76,7 +76,7 @@ A working copy remembers the server it was cloned from, so inside it `status`, `
 
 ## Output
 
-Text output follows git: a command prints what git prints for the same step, and a command git keeps quiet prints nothing. Progress and notes such as `Cloning into 'mono'...` go to standard error. When standard error is a terminal, `clone` shows git-style progress:
+Text output follows git: a command prints what git prints for the same step, and a command git keeps quiet prints nothing. Progress and notes such as `Cloning into 'mono'...` go to standard error. When standard error is a terminal, `clone` and `import git` show git-style progress (`Importing commits:  45% (2852/6338)` for an import):
 
 ```text
 Cloning into 'mono'...

@@ -21,7 +21,7 @@
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | 相同 | |
 | `git show [REV] [-- PATH]` | 相同 | |
 | `git diff [--cached]`、`git diff A B`、`A..B`、`A...B` | 相同 | `--name-only`、`--name-status`、`-- PATH`；没有暂存区，`--cached` / `--staged` 显示同样的本地改动 |
-| `git blame PATH` | `scn blame PATH` | 指定版本用 `scn blame REV:PATH` |
+| `git blame [-L N,M] PATH` | `scn blame [-L N,M] PATH` | 指定版本用 `scn blame REV:PATH` |
 | `git remote -v`、`git remote get-url origin`、`git remote set-url origin URL` | 相同 | 只有一个 remote，`origin`；`set-url` 会先检查新地址上有工作副本所在的提交 |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`、`--prefix`、`-o FILE` |
 | 版本号：`HEAD`、`@`、`HEAD~1`、`main^2`、`A..B`、40 位 SHA | 相同 | 每个提交都有 git SHA |

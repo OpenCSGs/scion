@@ -442,10 +442,17 @@ enum Command {
         paths: Vec<String>,
     },
     /// The commit that last changed each line of a file.
+    #[command(
+        after_help = "Examples:\n  scn blame src/lib.rs\n  scn blame -L 10,20 src/lib.rs\n  \
+        scn blame -L 40,+5 v1.0:src/lib.rs"
+    )]
     Blame {
         /// The file, optionally at a revision (default: the current branch).
         #[arg(value_name = "[REV:]PATH")]
         spec: String,
+        /// Only these lines: N,M, N,+K, N (to the end) or ,M; can be repeated, as in git.
+        #[arg(short = 'L', value_name = "RANGE", value_parser = history::parse_line_range)]
+        lines: Vec<(usize, usize)>,
     },
     /// Changes: without revisions, the uncommitted local changes; with one, what that commit introduced; with two, the difference between them.
     /// Revisions may be `A B`, `A..B` or `A...B` (from their common ancestor), as in git.
@@ -1299,7 +1306,7 @@ async fn run(cli: Cli) -> ExitCode {
             ),
             Err(e) => fail(&e, json),
         },
-        Command::Blame { spec } => emit(history::blame(&ctx, &spec).await, json),
+        Command::Blame { spec, lines } => emit(history::blame(&ctx, &spec, &lines).await, json),
         Command::Diff {
             revisions,
             path,

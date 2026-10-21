@@ -837,6 +837,13 @@ async fn log_and_diff_commands() {
         assert_ne!(commits[1], first_id);
         let text = String::from_utf8_lossy(&scn_in(&wc, &["blame", "main:a.txt"]).stdout).to_string();
         assert!(text.contains(" 2) three"), "{text}");
+        let text = String::from_utf8_lossy(&scn_in(&wc, &["blame", "-L", "2", "main:a.txt"]).stdout).to_string();
+        assert!(text.lines().count() == 1 && text.contains(" 2) three"), "{text}");
+        assert_eq!(
+            scn_in(&wc, &["blame", "-L", "3,4", "main:a.txt"]).status.code(),
+            Some(2),
+            "past the end"
+        );
         // restore --source: an older version as a local change
         let out = scn_in(&wc, &["restore", "--source", "HEAD~1", "a.txt"]);
         assert!(out.status.success(), "{out:?}");

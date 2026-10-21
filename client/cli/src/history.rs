@@ -233,12 +233,36 @@ fn blame_time(time_ms: i64, tz_offset_minutes: i32) -> String {
     format!("{}:{secs:02}{}", &t[..16], &t[16..])
 }
 
+/// git's `blame -L` ranges: `N,M`, `N,+K`, `N` (to the end) and `,M` (from the start); lines
+/// count from 1, both ends included.
+pub fn parse_line_range(s: &str) -> Result<(usize, usize), String> {
+    let bad = || "expected N,M, N,+K, N or ,M with lines counted from 1".to_owned();
+    let num = |t: &str| t.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(bad);
+    let (start, end) = match s.split_once(',') {
+        None => (num(s)?, usize::MAX),
+        Some(("", e)) => (1, num(e)?),
+        Some((b, e)) => {
+            let b = num(b)?;
+            match e.strip_prefix('+') {
+                Some(k) => (b, b + num(k)? - 1),
+                None if e.is_empty() => (b, usize::MAX),
+                None => (b, num(e)?),
+            }
+        }
+    };
+    if end < start {
+        return Err(bad());
+    }
+    Ok((start, end))
+}
+
 /// 按行切分，与服务端一致：保留换行符，末尾没有换行的最后一行也算一行。
 fn split_lines(data: &[u8]) -> Vec<&[u8]> {
     data.split_inclusive(|b| *b == b'\n').collect()
 }
 
-pub async fn blame(ctx: &Ctx, spec: &str) -> Result<BlameOut, CliError> {
+/// `ranges` (from `-L`) keep only those lines; none keeps them all.
+pub async fn blame(ctx: &Ctx, spec: &str, ranges: &[(usize, usize)]) -> Result<BlameOut, CliError> {
     let (client, default_rev) = query_client(ctx).await?;
     let (rev, path) = split_spec(spec, &default_rev);
     let rev = ctx.expand_rev(rev)?;
@@ -253,10 +277,18 @@ pub async fn blame(ctx: &Ctx, spec: &str) -> Result<BlameOut, CliError> {
             raw.len()
         ))));
     }
+    if let Some((start, _)) = ranges.iter().find(|(start, _)| *start > raw.len()) {
+        return Err(CliError::Usage(format!(
+            "-L {start}: {path} has only {} lines",
+            raw.len()
+        )));
+    }
+    let wanted = |line: usize| ranges.is_empty() || ranges.iter().any(|(a, b)| (*a..=*b).contains(&line));
     let lines = raw
         .iter()
         .zip(&info.lines)
         .enumerate()
+        .filter(|(i, _)| wanted(i + 1))
         .map(|(i, (text, idx))| {
             let c = &info.commits[*idx];
             let content = String::from_utf8_lossy(text);
@@ -828,6 +860,18 @@ mod tests {
         assert_eq!(split_lines(b"a\nb"), vec![&b"a\n"[..], b"b"]);
         assert_eq!(split_lines(b"a\n"), vec![&b"a\n"[..]]);
         assert!(split_lines(b"").is_empty());
+    }
+
+    #[test]
+    fn line_ranges() {
+        assert_eq!(parse_line_range("3,7").ok(), Some((3, 7)));
+        assert_eq!(parse_line_range("3,+2").ok(), Some((3, 4)));
+        assert_eq!(parse_line_range("3").ok(), Some((3, usize::MAX)));
+        assert_eq!(parse_line_range("3,").ok(), Some((3, usize::MAX)));
+        assert_eq!(parse_line_range(",4").ok(), Some((1, 4)));
+        for bad in ["", "0", "5,2", "a,b", "1,+0", "x"] {
+            assert!(parse_line_range(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

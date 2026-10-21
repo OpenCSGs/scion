@@ -21,7 +21,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | the same | |
 | `git show [REV] [-- PATH]` | the same | |
 | `git diff [--cached]`, `git diff A B`, `A..B`, `A...B` | the same | `--name-only`, `--name-status`, `-- PATH`; with no staging area, `--cached` / `--staged` show the same local changes |
-| `git blame PATH` | `scn blame PATH` | `scn blame REV:PATH` for a revision |
+| `git blame [-L N,M] PATH` | `scn blame [-L N,M] PATH` | `scn blame REV:PATH` for a revision |
 | `git remote -v`, `git remote get-url origin`, `git remote set-url origin URL` | the same | One remote, `origin`; `set-url` checks the new URL has the working copy's commits |
 | `git archive REV` | `scn archive REV` | `--format tar.gz\|zip\|tar`, `--prefix`, `-o FILE` |
 | Revisions: `HEAD`, `@`, `HEAD~1`, `main^2`, `A..B`, 40-digit SHAs | the same | Every commit has a git SHA |

@@ -327,6 +327,11 @@ impl<'a> Batch<'a> {
             // 内容已不同于导入时的 git 提交，不再携带 git sha
             let mut extensions = cs.extensions.clone();
             extensions.remove(GIT_SHA1_EXTENSION);
+            // Which commit this was before the rebase, for history and watchers
+            extensions.insert(
+                scion_object::REBASED_FROM_EXTENSION.to_string(),
+                r.id.to_bytes().to_vec(),
+            );
             // Like git rebase, which gives the committer time the rebase's, but deterministic (the
             // same inputs give the same commit): no earlier than the commit it now follows, so the
             // commit times along the branch follow the order commits landed in. The author keeps

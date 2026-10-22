@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use scion_merge::ConflictKind;
-use scion_object::{Changeset, EntryMode, FileChange, ObjectId, ObjectKind, Signature};
+use scion_object::{Changeset, EntryMode, FileChange, ObjectId, ObjectKind, REBASED_FROM_EXTENSION, Signature};
 use scion_query::{GIT_SHA1_EXTENSION, load_changeset};
 use scion_store::{BlobStore, IndexedObject, MemStore, MetaStore};
 use scion_tree::{BlobTreeSource, lookup};
@@ -278,6 +278,18 @@ async fn prepare_rebases_disjoint_stack() {
     );
     assert_eq!(p.landed[0].change_id, cs1.change_id);
     assert!(!r1.extensions.contains_key(GIT_SHA1_EXTENSION));
+    // Each rebased commit names the commit it was made as
+    let r2 = load_changeset(fx.store.as_ref(), p.landed[1].landed)
+        .await
+        .expect("load");
+    assert_eq!(
+        r1.extensions.get(REBASED_FROM_EXTENSION).map(Vec::as_slice),
+        Some(&s1.to_bytes()[..])
+    );
+    assert_eq!(
+        r2.extensions.get(REBASED_FROM_EXTENSION).map(Vec::as_slice),
+        Some(&s2.to_bytes()[..])
+    );
     assert_eq!(r1.extensions.get("other").map(Vec::as_slice), Some(&b"kept"[..]));
     // 相同输入得到相同结果（rebase 是确定的）
     assert_eq!(fx.prepare(s2, Some(head)).await.expect("again").tip, p.tip);

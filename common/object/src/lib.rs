@@ -11,7 +11,7 @@ mod id;
 mod path;
 mod tree;
 
-pub use changeset::{Changeset, FileChange, FileOp, MAX_TZ_OFFSET_MINUTES, Signature};
+pub use changeset::{Changeset, FileChange, FileOp, MAX_TZ_OFFSET_MINUTES, REBASED_FROM_EXTENSION, Signature};
 pub use chunklist::{Chunk, ChunkList};
 pub use error::{Error, Result};
 pub use id::{DIGEST_LEN, HashAlgo, ID_LEN, ObjectId, ObjectKind};

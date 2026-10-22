@@ -11,6 +11,10 @@ use crate::tree::EntryMode;
 /// 时区偏移上限（分钟）。
 pub const MAX_TZ_OFFSET_MINUTES: i32 = 1440;
 
+/// Extension key: the commit as it was made (its id, as bytes), on a commit the server rebased
+/// while landing it (SPEC.md §5).
+pub const REBASED_FROM_EXTENSION: &str = "scion.rebased-from";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature {
     pub name: String,

@@ -291,6 +291,8 @@ impl<'a> Batch<'a> {
         }
 
         let mut parent = onto;
+        // The commit time of the commit rebased onto, read when the first commit is rebased
+        let mut parent_time: Option<i64> = None;
         let mut landed = Vec::with_capacity(stack.len());
         let mut previously_landed = Vec::new();
         let mut built = Vec::new();
@@ -325,13 +327,19 @@ impl<'a> Batch<'a> {
             // 内容已不同于导入时的 git 提交，不再携带 git sha
             let mut extensions = cs.extensions.clone();
             extensions.remove(GIT_SHA1_EXTENSION);
-            // As git rebase does, the committer time becomes the time of the rebase (the land), so
-            // the history's commit times follow the order commits landed in; the author keeps
+            // Like git rebase, which gives the committer time the rebase's, but deterministic (the
+            // same inputs give the same commit): no earlier than the commit it now follows, so the
+            // commit times along the branch follow the order commits landed in. The author keeps
             // the time the change was made
+            let after = match parent_time {
+                Some(t) => t,
+                None => load_changeset(&self.pending, parent.id).await?.committer.time_ms,
+            };
             let committer = scion_object::Signature {
-                time_ms: crate::land::now_ms(),
+                time_ms: cs.committer.time_ms.max(after),
                 ..cs.committer.clone()
             };
+            parent_time = Some(committer.time_ms);
             let new_cs = Changeset::new(
                 vec![parent.id],
                 cs.author.clone(),

@@ -96,8 +96,8 @@ pub struct LogOut {
 
 /// A commit as `git log` and `git show` print it: `commit`, `Merge:`, `Author:`, `Date:`, then
 /// the message indented by four spaces. When the commit time differs from the author's, as after
-/// a rebase on the server (whose commit time is when it landed), a `CommitDate:` line (git's
-/// `--format=fuller` name) follows `Date:`, so that the order commits landed in shows.
+/// a rebase on the server (which keeps commit times in landing order), a `CommitDate:` line
+/// (git's `--format=fuller` name) follows `Date:`.
 fn commit_header(c: &LogLine) -> String {
     let mut out = format!("commit {}\n", c.id);
     if c.parents.len() > 1 {

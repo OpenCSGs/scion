@@ -377,18 +377,62 @@ async fn land_creates_fast_forwards_rebases_and_is_idempotent() {
     let o = l.land(req(REPO, "main", side, false)).await.expect("rebase");
     assert_eq!(o.state.version, 3);
     assert_ne!(o.state.target, side);
-    // As in git rebase, the committer time is the land's; the author's stays
-    let data = fx.store.get(&o.state.target).await.expect("get").expect("changeset");
-    let rebased = Changeset::decode(&data).expect("decode");
-    assert_eq!(rebased.author, sig());
-    assert!(rebased.committer.time_ms > sig().time_ms);
-    assert_eq!(rebased.committer.name, sig().name);
     assert_eq!(fx.read(o.state.target, "f").await.as_deref(), Some("2"));
     assert_eq!(fx.read(o.state.target, "g").await.as_deref(), Some("1"));
     assert_eq!(
         l.land(req(REPO, "main", fx.commit(&[a], &[]).await, true)).await,
         Err(LandError::NotFastForward { tip: o.state.target })
     );
+}
+
+/// After a rebase the committer time is no earlier than the new parent's, so commit times
+/// along the branch follow the landing order; the author's time stays.
+#[tokio::test]
+async fn rebased_commits_follow_the_parent_in_time() {
+    let fx = Fx::new().await;
+    let l = fx.lander();
+    let at = |time_ms| Signature { time_ms, ..sig() };
+    let commit = |parent: ObjectId, path: &'static str, time_ms: i64, n: u8| {
+        let fx = &fx;
+        async move {
+            let id = fx.upload(path.as_bytes()).await;
+            let delta = vec![FileChange::put(path, EntryMode::File, id, path.len() as u64)];
+            let cs = Changeset::new(
+                vec![parent],
+                at(time_ms),
+                at(time_ms),
+                "m".to_string(),
+                [200 + n; 16],
+                delta,
+                BTreeMap::new(),
+            )
+            .expect("cs");
+            fx.w.create(REPO, &cs).await.expect("create").id
+        }
+    };
+    let base = fx.commit(&[], &[("a", Some("1"))]).await;
+    l.land(req(REPO, "main", base, false)).await.expect("base");
+    let later = commit(base, "later", 5_000, 0).await;
+    l.land(req(REPO, "main", later, false)).await.expect("later");
+    // Written before `later` but landed after it, as a stack of two
+    let first = commit(base, "x", 2_000, 1).await;
+    let second = commit(first, "y", 3_000, 2).await;
+    let o = l.land(req(REPO, "main", second, false)).await.expect("rebase");
+    let store = fx.store.clone();
+    let load = |id: ObjectId| {
+        let store = store.clone();
+        async move {
+            let data = store.get(&id).await.expect("get").expect("changeset");
+            Changeset::decode(&data).expect("decode")
+        }
+    };
+    let (x, y) = (load(o.landed[0].landed).await, load(o.landed[1].landed).await);
+    assert_eq!((x.author.time_ms, y.author.time_ms), (2_000, 3_000));
+    assert_eq!((x.committer.time_ms, y.committer.time_ms), (5_000, 5_000));
+    // A commit written after its new parent keeps its own time
+    let newest = commit(base, "z", 9_000, 3).await;
+    let o = l.land(req(REPO, "main", newest, false)).await.expect("rebase");
+    assert_eq!(load(o.state.target).await.committer.time_ms, 9_000);
 }
 
 #[tokio::test]

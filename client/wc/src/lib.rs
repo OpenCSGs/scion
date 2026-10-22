@@ -1146,8 +1146,10 @@ impl WorkingCopy {
 
     /// Merges `other` (a ref) into the current branch as a pending merge commit with parents
     /// (current snapshot, other's tip), and updates local files. `scn land` publishes it.
-    /// The merge covers the whole tree, also outside a sparse checkout; conflicts anywhere fail
-    /// it without touching anything.
+    /// The merge covers the whole tree, also outside a sparse checkout. On conflicts the working
+    /// tree gets the merged files, text conflicts with markers, for `scn resolve` and
+    /// `scn commit`; when a sparse checkout leaves out a path the merge changes, it fails
+    /// without touching anything, since the commit that finishes it is made from local files.
     pub async fn merge(
         &mut self,
         client: &Client,

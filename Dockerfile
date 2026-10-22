@@ -8,7 +8,7 @@
 #   --build-arg RUNTIME_IMAGE=docker.m.daocloud.io/library/debian:bookworm-slim \
 #   --build-arg DEBIAN_MIRROR=mirrors.ustc.edu.cn
 # 同时构建 linux/amd64 与 linux/arm64（交叉编译，不需要模拟）：
-#   docker buildx build --platform linux/amd64,linux/arm64 -t opencsg/scion:latest --push .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t opencsghq/scion:latest --push .
 ARG RUST_IMAGE=rust:1.99-slim-bookworm
 ARG RUNTIME_IMAGE=debian:bookworm-slim
 # A Debian mirror host for apt, such as mirrors.ustc.edu.cn, when deb.debian.org is unreachable

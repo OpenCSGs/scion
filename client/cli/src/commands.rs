@@ -12,7 +12,7 @@ use crate::output::{CliError, ConflictOut, DoctorOut, Render, doctor_out};
 use crate::progress::Meter;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:7080";
-const DEFAULT_REF: &str = "main";
+pub(crate) const DEFAULT_REF: &str = "main";
 
 /// 命令行给出的全局选项。
 #[derive(Debug, Clone, Default)]
@@ -26,7 +26,7 @@ pub struct Ctx {
 
 impl Ctx {
     /// 当前目录所在的工作副本（如果有）。
-    fn working_copy(&self) -> Option<WorkingCopy> {
+    pub(crate) fn working_copy(&self) -> Option<WorkingCopy> {
         WorkingCopy::open(&self.cwd).ok()
     }
 
@@ -1186,9 +1186,13 @@ pub(crate) async fn query_client(ctx: &Ctx) -> Result<(Client, String), CliError
         .clone()
         .or_else(|| wc.as_ref().map(|w| w.state().repo.clone()))
         .ok_or_else(|| CliError::Usage("--repo is required outside a working copy".into()))?;
-    let default_rev = wc
-        .as_ref()
-        .map_or_else(|| DEFAULT_REF.to_owned(), |w| w.state().reference.clone());
+    // As in git, revisions default to the working copy's current commit (HEAD), which may not
+    // be the branch's tip on the server yet; the branch's name (`main`) names that tip
+    let default_rev = match &wc {
+        Some(w) if w.state().current()?.is_some() => "HEAD".to_owned(),
+        Some(w) => w.state().reference.clone(),
+        None => DEFAULT_REF.to_owned(),
+    };
     Ok((connect(&ctx.endpoint_or(wc.as_ref()), Some(&repo)).await?, default_rev))
 }
 

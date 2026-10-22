@@ -43,7 +43,8 @@ scn resolve src/main.rs             # 删掉冲突标记之后执行；或者用
 scn commit                          # 完成合并，沿用原来的提交说明；`scn merge --abort` 撤销合并
 scn cat main:README.md              # 不需要工作副本就能读文件（在工作副本外加 --repo）
 scn ls main:                        # 列出目录；所有命令都支持 --json
-scn log -n 10 -- src                # 历史，从新到旧，可以只看某个路径（git 写法：HEAD~1、A..B）
+scn log -n 10 -- src                # 从 HEAD 开始的历史，从新到旧，可以只看某个路径（git 写法：HEAD~1、A..B）
+scn log main                        # 服务端的分支，包括上次 sync 之后别人合入的提交
 scn diff                            # 未提交的本地改动（unified diff）
 scn diff main                       # main 最新提交改了什么；`scn diff A B` 比较两个版本
 scn blame src/lib.rs                # 每一行最后被哪个提交改动

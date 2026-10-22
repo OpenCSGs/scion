@@ -3,7 +3,7 @@
 use scion_client::{NewRepo, RepoInfo};
 use serde::Serialize;
 
-use crate::commands::{Ctx, connect, query_client};
+use crate::commands::{Ctx, DEFAULT_REF, connect, query_client};
 use crate::history::format_time;
 use crate::output::{CliError, Render};
 
@@ -234,7 +234,10 @@ fn short(id: &str) -> &str {
 }
 
 pub async fn branches(ctx: &Ctx) -> Result<BranchListOut, CliError> {
-    let (c, current) = query_client(ctx).await?;
+    let (c, _) = query_client(ctx).await?;
+    let current = ctx
+        .working_copy()
+        .map_or_else(|| DEFAULT_REF.to_owned(), |w| w.state().reference.clone());
     let repo = c.repo_name().unwrap_or_default().to_owned();
     let default = c.get_repo(&repo, false).await?.default_branch;
     let branches = c

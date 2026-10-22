@@ -159,6 +159,11 @@ async fn land_reports_the_server_rebase() {
         ));
         json_of(&scn_in(&first, &["land", "--json"]));
         let b = head_now(&first);
+        // As in git, log shows the working copy's history; the branch's name shows the server's
+        let base = head_now(&second);
+        let top = |args: &[&str]| json_of(&scn_in(&second, args))["entries"][0]["id"].clone();
+        assert_eq!(top(&["log", "-n", "1", "--json"]), base.as_str());
+        assert_eq!(top(&["log", "main", "-n", "1", "--json"]), b.as_str());
         std::fs::write(second.join("c.txt"), "c").expect("write");
         let committed = json_of(&scn_in(
             &second,

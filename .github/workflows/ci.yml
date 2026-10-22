@@ -120,6 +120,9 @@ jobs:
   # 镜像与 docker compose 冒烟测试：起 PostgreSQL + SeaweedFS + scion server，建仓库、提交、合入、读回，查指标
   docker:
     runs-on: ubuntu-latest
+    env:
+      # The image built below instead of the published one
+      SCION_IMAGE: scion:dev
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-buildx-action@v3
@@ -133,16 +136,14 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Compose smoke test
         run: |
-          # The image built above instead of the published one
-          export SCION_IMAGE=scion:dev
           compose="docker compose -f deploy/compose/docker-compose.yml"
-          $compose up -d --no-build --wait
+          $compose up -d --wait
           $compose exec -T scion scn --endpoint http://127.0.0.1:7080 repo create demo
           $compose exec -T scion sh -c 'cd /data && scn --endpoint http://127.0.0.1:7080 clone demo \
             && cd demo && echo hello > a.txt && scn commit -m first && scn land && scn cat main:a.txt' | grep -x hello
           curl -fs localhost:9464/metrics | grep 'scion_land_batches_total{outcome="landed"} 1'
       - if: failure()
-        run: SCION_IMAGE=scion:dev docker compose -f deploy/compose/docker-compose.yml logs
+        run: docker compose -f deploy/compose/docker-compose.yml logs
 
   # 函数级测试要求（服务端设计文档 §12.1）
   coverage:

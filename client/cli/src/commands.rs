@@ -36,8 +36,12 @@ impl Ctx {
 
     /// Expands git's `HEAD` / `@` (alone or followed by `~N` / `^N`, e.g. `HEAD~1`) to the
     /// working copy's current commit: the pending commit if any, else the synced one. Other
-    /// revisions, including suffixes on refs and ids, are resolved by the server.
+    /// revisions, including suffixes on refs and ids, are resolved by the server. `origin/NAME`
+    /// is the branch NAME: the server is the only remote, and its branches are always current.
     pub fn expand_rev(&self, rev: &str) -> Result<String, CliError> {
+        if let Some(name) = rev.strip_prefix("origin/").filter(|n| !n.is_empty()) {
+            return Ok(name.to_owned());
+        }
         let rest = match rev.strip_prefix("HEAD").or_else(|| rev.strip_prefix('@')) {
             Some(r) if r.is_empty() || r.starts_with(['~', '^']) => r,
             _ => return Ok(rev.to_owned()),
@@ -1431,6 +1435,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(ctx.expand_rev("main~1").ok().as_deref(), Some("main~1"));
+        assert_eq!(ctx.expand_rev("origin/main~1").ok().as_deref(), Some("main~1"));
+        assert_eq!(
+            ctx.expand_rev("origin/").ok().as_deref(),
+            Some("origin/"),
+            "not a branch"
+        );
         assert_eq!(
             ctx.expand_rev("HEADS-up").ok().as_deref(),
             Some("HEADS-up"),

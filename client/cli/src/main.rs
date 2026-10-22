@@ -1272,7 +1272,12 @@ async fn run(cli: Cli) -> ExitCode {
             json,
         ),
         Command::Fetch { .. } => fail(
-            &CliError::Usage("there is no local history to fetch into; `scn sync` updates the working copy".into()),
+            &CliError::Usage(
+                "there is no local history to fetch into: commands read the server directly, so \
+                 `scn log main` (or `origin/main`) and `scn diff HEAD main` show what others landed; \
+                 `scn sync` updates the working copy"
+                    .into(),
+            ),
             json,
         ),
         Command::Stash { .. } => fail(

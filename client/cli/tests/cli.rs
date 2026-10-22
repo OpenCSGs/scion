@@ -1433,6 +1433,13 @@ async fn repository_urls_name_the_server() {
             );
         }
         assert_eq!(scn_in(&wc, &["remote", "get-url", "upstream"]).status.code(), Some(2));
+        let out = scn_in(&wc, &["fetch"]);
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("`scn log main`"),
+            "{out:?}"
+        );
+        let log = |rev: &str| json_of(&scn_in(&wc, &["log", rev, "-n", "1", "--json"]))["entries"][0]["id"].clone();
+        assert_eq!(log("origin/main"), log("main"));
         assert_eq!(scn_in(&wc, &["remote", "set-url", "not-a-url"]).status.code(), Some(2));
         assert_eq!(
             scn_in(&wc, &["remote", "set-url", &u]).status.code(),

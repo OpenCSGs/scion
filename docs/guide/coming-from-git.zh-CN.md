@@ -30,6 +30,7 @@
 | `git remote -v`、`git remote set-url origin URL` | `scn remote -v`、`scn remote set-url URL` | 服务端的新地址，或有相同提交的另一个仓库（如 fork）；保存前会先检查 |
 | `git push` | `scn land` | 分支已经前进时由服务端 rebase |
 | `git pull --rebase` | `scn sync` | 移到分支最新提交，并 rebase 待合入的提交；没有单独的 `fetch` |
+| `git fetch` + `git log origin/main` | `scn log main`（或 `origin/main`）、`scn diff HEAD main` | 命令直接读服务端，不需要 fetch；工作副本保持不变 |
 | `git branch` | `scn branch`（或 `scn branch ls`） | |
 | `git branch NAME [REV]` | `scn branch NAME [REV]`（或 `scn branch create`） | 分支是服务端的 ref。名为 `ls`、`create` 或 `rm` 的分支要用 `create` 的写法 |
 | `git branch -d NAME` / `-D` | `scn branch -d NAME` / `-D`（或 `scn branch rm`） | |

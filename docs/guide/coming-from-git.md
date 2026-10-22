@@ -30,6 +30,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git remote -v`, `git remote set-url origin URL` | `scn remote -v`, `scn remote set-url URL` | The server's new address, or another repository with the same commits (a fork); checked before it is saved |
 | `git push` | `scn land` | The server rebases when the branch moved |
 | `git pull --rebase` | `scn sync` | Moves to the branch tip and rebases the pending commit; no separate `fetch` |
+| `git fetch` + `git log origin/main` | `scn log main` (or `origin/main`), `scn diff HEAD main` | Commands read the server, so there is nothing to fetch; the working copy stays as it is |
 | `git branch` | `scn branch` (or `scn branch ls`) | |
 | `git branch NAME [REV]` | `scn branch NAME [REV]` (or `scn branch create`) | Branches are server refs. A branch named `ls`, `create` or `rm` needs the `create` form |
 | `git branch -d NAME` / `-D` | `scn branch -d NAME` / `-D` (or `scn branch rm`) | |

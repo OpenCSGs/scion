@@ -673,6 +673,11 @@ pub struct CommitOut {
     /// 没有改动时为 None。
     pub changeset: Option<String>,
     pub generation: Option<u64>,
+    /// Lines added and removed in text files; absent when not counted (see [`COUNT_LINES_FILES`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<usize>,
     /// For the text: the branch, the subject, whether it is the branch's first commit, and the files.
     #[serde(skip)]
     pub summary: Option<CommitSummary>,
@@ -694,9 +699,8 @@ fn git_mode(m: scion_wc::Mode) -> &'static str {
     }
 }
 
-/// Like git: `[main abc123456789] subject`, ` 2 files changed`, then created, deleted and
-/// mode-changed files. (No line counts: they would mean downloading every changed file's old
-/// version.)
+/// Like git: `[main abc123456789] subject`, ` 2 files changed, 3 insertions(+), 1 deletion(-)`,
+/// then created, deleted and mode-changed files.
 impl Render for CommitOut {
     fn text(&self) -> String {
         let (Some(c), Some(sum)) = (&self.changeset, &self.summary) else {
@@ -711,6 +715,13 @@ impl Render for CommitOut {
             sum.subject,
             if n == 1 { "" } else { "s" }
         );
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+        if let Some(add) = self.insertions.filter(|n| *n > 0) {
+            s.push_str(&format!(", {add} insertion{}(+)", plural(add)));
+        }
+        if let Some(del) = self.deletions.filter(|n| *n > 0) {
+            s.push_str(&format!(", {del} deletion{}(-)", plural(del)));
+        }
         for f in &sum.files {
             match (f.old_mode, f.new_mode) {
                 (None, Some(m)) => s.push_str(&format!("\n create mode {} {}", git_mode(m), f.path)),
@@ -725,11 +736,47 @@ impl Render for CommitOut {
     }
 }
 
-fn commit_out(
+/// Lines are counted only for commits up to this many files, whose old versions (fetched in one
+/// batch) add up to at most [`COUNT_LINES_BYTES`], so that a large commit does not wait for
+/// downloads; a commit that only adds files needs none.
+const COUNT_LINES_FILES: usize = 1000;
+const COUNT_LINES_BYTES: u64 = 4 << 20;
+
+/// Lines added and removed by a commit's files, like git's summary; None when over the limits
+/// or the old versions cannot be read.
+async fn count_lines(client: &Client, files: &[scion_wc::FileStat]) -> Option<(usize, usize)> {
+    let old_bytes: u64 = files.iter().filter_map(|f| f.old.map(|(_, size)| size)).sum();
+    if files.len() > COUNT_LINES_FILES || old_bytes > COUNT_LINES_BYTES {
+        return None;
+    }
+    let ids: Vec<scion_client::ObjectId> = files.iter().filter_map(|f| f.old.map(|(id, _)| id)).collect();
+    let mut olds = if ids.is_empty() {
+        Vec::new()
+    } else {
+        client.get_objects(&ids).await.ok()?
+    }
+    .into_iter();
+    let mut total = (0, 0);
+    for f in files {
+        let old = if f.old.is_some() { olds.next()? } else { Bytes::new() };
+        let new = f.new_content.clone().unwrap_or_default();
+        if let Some((add, del)) = crate::history::changed_lines(&old, &new) {
+            total = (total.0 + add, total.1 + del);
+        }
+    }
+    Some(total)
+}
+
+async fn commit_out(
+    client: &Client,
     wc: &WorkingCopy,
     root: bool,
     created: Option<(scion_client::CreatedChangeset, Vec<scion_wc::FileStat>)>,
 ) -> CommitOut {
+    let lines = match &created {
+        Some((_, files)) => count_lines(client, files).await,
+        None => None,
+    };
     let subject = wc
         .state()
         .head_message
@@ -742,6 +789,8 @@ fn commit_out(
         schema: "scion.cli.commit/v1",
         changeset: created.as_ref().map(|(c, _)| c.id.to_string()),
         generation: created.as_ref().map(|(c, _)| c.generation),
+        insertions: lines.map(|(add, _)| add),
+        deletions: lines.map(|(_, del)| del),
         summary: created.map(|(_, files)| CommitSummary {
             reference: wc.state().reference.clone(),
             subject: subject.to_owned(),
@@ -760,7 +809,7 @@ pub async fn amend(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> Re
     let created = wc
         .amend_with_stat(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
         .await?;
-    Ok(commit_out(&wc, root, created))
+    Ok(commit_out(&client, &wc, root, created).await)
 }
 
 #[derive(Debug, Serialize)]
@@ -1017,7 +1066,7 @@ pub async fn commit(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> R
     let created = wc
         .commit_with_stat(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
         .await?;
-    Ok(commit_out(&wc, root, created))
+    Ok(commit_out(&client, &wc, root, created).await)
 }
 
 #[derive(Debug, Serialize)]
@@ -1725,6 +1774,8 @@ mod tests {
             schema: "s",
             changeset: None,
             generation: None,
+            insertions: None,
+            deletions: None,
             summary: None,
         };
         assert_eq!(none.text(), "nothing to commit, working tree clean");
@@ -1733,6 +1784,8 @@ mod tests {
             path: path.into(),
             old_mode,
             new_mode,
+            old: None,
+            new_content: None,
         };
         let c = CommitOut {
             changeset: Some("c1abcdefghijklmn".into()),
@@ -1765,6 +1818,23 @@ mod tests {
             ..c
         };
         assert_eq!(one.text(), "[dev c1abcdefghij] s\n 1 file changed");
+        let counted = |insertions, deletions| {
+            CommitOut {
+                schema: "s",
+                changeset: one.changeset.clone(),
+                generation: Some(1),
+                insertions: Some(insertions),
+                deletions: Some(deletions),
+                summary: one.summary.clone(),
+            }
+            .text()
+        };
+        assert_eq!(
+            counted(3, 1),
+            "[dev c1abcdefghij] s\n 1 file changed, 3 insertions(+), 1 deletion(-)"
+        );
+        assert_eq!(counted(1, 0), "[dev c1abcdefghij] s\n 1 file changed, 1 insertion(+)");
+        assert_eq!(counted(0, 2), "[dev c1abcdefghij] s\n 1 file changed, 2 deletions(-)");
         let land = LandOut {
             schema: "s",
             reference: "main".into(),

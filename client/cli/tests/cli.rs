@@ -172,6 +172,15 @@ async fn land_reports_the_server_rebase() {
         assert_eq!(sb(&["status", "-sb", "--no-ahead-behind"]), "## main\n");
         assert!(sb(&["status"]).contains("Your branch is behind 'main' on the server by 1 commit."));
         assert!(json_of(&scn_in(&first, &["status", "--json"]))["behind"]["count"] == 0);
+        // A changed file's lines are counted against its old version on the server
+        std::fs::write(first.join("a.txt"), "a\nx\ny\n").expect("write");
+        let out = scn_in(&first, &[&["commit", "-m", "x"][..], &author].concat());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).ends_with(" 1 file changed, 3 insertions(+), 1 deletion(-)\n"),
+            "{out:?}"
+        );
+        json_of(&scn_in(&first, &["uncommit", "--json"]));
+        std::fs::write(first.join("a.txt"), "a").expect("write");
         std::fs::write(second.join("c.txt"), "c").expect("write");
         let committed = json_of(&scn_in(
             &second,
@@ -434,7 +443,8 @@ async fn clone_commit_land_sync_workflow() {
         assert!(text.starts_with("[main c1"), "{text}");
         assert!(
             text.ends_with(
-                "] extra files\n 2 files changed\n create mode 100644 src/extra.rs\n create mode 100644 src/extra2.rs\n"
+                "] extra files\n 2 files changed, 2 insertions(+)\n create mode 100644 src/extra.rs\n \
+                 create mode 100644 src/extra2.rs\n"
             ),
             "{text}"
         );

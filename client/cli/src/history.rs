@@ -511,6 +511,23 @@ fn is_binary(b: &[u8]) -> bool {
     b.contains(&0) || std::str::from_utf8(b).is_err()
 }
 
+/// Lines added and removed between two versions, as `--stat` counts them; None when either is
+/// binary.
+pub(crate) fn changed_lines(old: &[u8], new: &[u8]) -> Option<(usize, usize)> {
+    if is_binary(old) || is_binary(new) {
+        return None;
+    }
+    let (a, b) = (String::from_utf8_lossy(old), String::from_utf8_lossy(new));
+    let diff = similar::TextDiff::configure()
+        .algorithm(diff_algorithm(a.as_bytes(), b.as_bytes()))
+        .diff_lines(a.as_ref(), b.as_ref());
+    Some(diff.iter_all_changes().fold((0, 0), |(add, del), c| match c.tag() {
+        similar::ChangeTag::Insert => (add + 1, del),
+        similar::ChangeTag::Delete => (add, del + 1),
+        similar::ChangeTag::Equal => (add, del),
+    }))
+}
+
 /// 生成 unified diff；任一侧为二进制时返回 (true, None)。
 /// The line-diff algorithm to use: exact LCS (minimal, like `git diff --minimal`) when the part
 /// between the common prefix and suffix is small enough for its table (about 32 MB at most),

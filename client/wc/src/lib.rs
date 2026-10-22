@@ -276,12 +276,15 @@ pub enum Progress {
 }
 
 /// One file of a commit made by [`WorkingCopy::commit_with_stat`]: its mode before (None: added)
-/// and after (None: deleted).
+/// and after (None: deleted), and for counting changed lines the old version's id and size and
+/// the new content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStat {
     pub path: String,
     pub old_mode: Option<Mode>,
     pub new_mode: Option<Mode>,
+    pub old: Option<(ObjectId, u64)>,
+    pub new_content: Option<Bytes>,
 }
 
 /// Receives [`Progress`] reports.
@@ -689,14 +692,19 @@ impl WorkingCopy {
         let stat = changes
             .iter()
             .map(|c| {
-                let (path, new_mode) = match c {
-                    Change::Put { path, mode, .. } => (path, Some(*mode)),
-                    Change::Delete { path } => (path, None),
+                let (path, new_mode, new_content) = match c {
+                    Change::Put {
+                        path, mode, content, ..
+                    } => (path, Some(*mode), Some(content.clone())),
+                    Change::Delete { path } => (path, None, None),
                 };
+                let old = dirstate.files.get(path);
                 FileStat {
                     path: path.clone(),
-                    old_mode: dirstate.files.get(path).map(|r| r.mode),
+                    old_mode: old.map(|r| r.mode),
                     new_mode,
+                    old: old.and_then(|r| Some((r.id.parse().ok()?, r.size))),
+                    new_content,
                 }
             })
             .collect();

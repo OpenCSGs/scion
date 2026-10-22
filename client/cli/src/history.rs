@@ -67,7 +67,7 @@ fn short(id: &ObjectId) -> String {
 
 // ---------- log ----------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LogLine {
     pub id: String,
     pub parents: Vec<String>,
@@ -78,6 +78,7 @@ pub struct LogLine {
     pub tz_offset_minutes: i32,
     pub committer: String,
     pub committer_time_ms: i64,
+    pub committer_tz_offset_minutes: i32,
     pub message: String,
     pub generation: u64,
 }
@@ -94,7 +95,9 @@ pub struct LogOut {
 }
 
 /// A commit as `git log` and `git show` print it: `commit`, `Merge:`, `Author:`, `Date:`, then
-/// the message indented by four spaces.
+/// the message indented by four spaces. When the commit time differs from the author's, as after
+/// a rebase on the server (whose commit time is when it landed), a `CommitDate:` line (git's
+/// `--format=fuller` name) follows `Date:`, so that the order commits landed in shows.
 fn commit_header(c: &LogLine) -> String {
     let mut out = format!("commit {}\n", c.id);
     if c.parents.len() > 1 {
@@ -107,6 +110,10 @@ fn commit_header(c: &LogLine) -> String {
         c.email,
         git_date(c.time_ms, c.tz_offset_minutes)
     ));
+    let committed = git_date(c.committer_time_ms, c.committer_tz_offset_minutes);
+    if committed != git_date(c.time_ms, c.tz_offset_minutes) {
+        out.push_str(&format!("\nCommitDate: {committed}"));
+    }
     if !c.message.trim().is_empty() {
         out.push('\n');
         for line in c.message.lines() {
@@ -146,6 +153,7 @@ fn log_line(e: LogItem) -> LogLine {
         tz_offset_minutes: e.author.tz_offset_minutes,
         committer: e.committer.name,
         committer_time_ms: e.committer.time_ms,
+        committer_tz_offset_minutes: e.committer.tz_offset_minutes,
         author: e.author.name,
         email: e.author.email,
         message: e.message,
@@ -809,8 +817,13 @@ mod tests {
             tz_offset_minutes: 0,
             committer: "c".into(),
             committer_time_ms: 0,
+            committer_tz_offset_minutes: 0,
             message: "subject\n\nbody".into(),
             generation: 3,
+        };
+        let commit_copy = LogLine {
+            parents: vec![],
+            ..commit.clone()
         };
         let diff = DiffOut {
             schema: "d",
@@ -832,6 +845,17 @@ mod tests {
                 "commit c1aaaaaaaaaaaaaaaa\nMerge: c1bbbbbbbbbb c1cccccccccc\nAuthor: Ada <ada@x>\nDate:   Thu Jan 1 00:00:00 1970 +0000\n\n    subject\n    \n    body"
             ),
             "{text}"
+        ); // Landed later than it was written (a rebase on the server)
+        let landed = LogLine {
+            committer_time_ms: 60_000,
+            ..commit_copy
+        };
+        assert!(
+            commit_header(&landed).contains(
+                "Date:   Thu Jan 1 00:00:00 1970 +0000\nCommitDate: Thu Jan 1 00:01:00 1970 +0000\n\n    subject"
+            ),
+            "{}",
+            commit_header(&landed)
         );
     }
 
@@ -1065,6 +1089,7 @@ mod tests {
             tz_offset_minutes: 0,
             committer: "c".into(),
             committer_time_ms: 0,
+            committer_tz_offset_minutes: 0,
             message: "subject\n\nbody".into(),
             generation: 1,
         };

@@ -4,7 +4,7 @@ English | [简体中文](README.zh-CN.md)
 
 Server-first source control for monorepos, coding agents and CI.
 
-Scion is a Rust implementation of the design in Anthropic's [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control): history, merges and rebases are computed on the server, clients stay online and fetch immutable objects on demand, and a checkout holds only the paths a job needs. It ships a server, `scion`, and a client, `scn`, over a language-neutral protocol, and is built by OpenCSG for [starhub-server](https://github.com/OpenCSGs/csghub-server) and CSGLite. It is not Anthropic's implementation and is not affiliated with Anthropic.
+Scion is a Rust implementation of the design in Anthropic's [Redesigning source control](https://www.anthropic.com/engineering/redesigning-source-control): history, merges and rebases are computed on the server, clients stay online and fetch immutable objects on demand, and a checkout holds only the paths a job needs. It ships a server, `scion`, and a client, `scn`, over a language-neutral protocol, and is built by OpenCSG for [starhub-server](https://github.com/OpenCSGs/csghub-server) and CSGLite. 
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 

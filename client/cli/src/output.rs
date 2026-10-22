@@ -113,8 +113,8 @@ impl CliError {
                  (the server rebases), or run `scn sync`",
             ),
             CliError::Client(e) if e.reason() == Some(ErrorReason::MergeConflict) => Some(
-                "the ref changed the same lines or files; edit them on top of the latest ref \
-                 (fresh `scn clone`), commit and land again",
+                "the ref changed the same lines or files; run `scn sync` to bring them into your commit, \
+                 fix the files it marks, `scn resolve FILE`, `scn commit` and `scn land` again",
             ),
             CliError::Client(e) if e.reason() == Some(ErrorReason::RepoNotFound) => {
                 Some("check the repository name, or create it with `scn repo create NAME`")
@@ -489,7 +489,11 @@ mod tests {
                 kind: "content".into()
             }]
         );
-        assert!(conflict.hint().expect("hint").contains("land again"));
+        let hint = conflict.hint().expect("hint");
+        assert!(
+            hint.contains("`scn sync`") && hint.contains("`scn land` again"),
+            "{hint}"
+        );
         assert!(serde_json::to_string(&e).expect("json").contains("\"conflicts\""));
     }
 

@@ -39,7 +39,7 @@ pub use ops::{
 };
 pub use orgs::{MemberInfo, OrgInfo};
 pub use repos::{NewRepo, RefEventInfo, RefEventPage, RepoInfo, RepoPage};
-pub use scion_object::{EntryMode, ObjectId, ObjectKind};
+pub use scion_object::{EntryMode, ObjectId, ObjectKind, REBASED_FROM_EXTENSION};
 /// gRPC 状态码，出现在 [`Error::Rpc`] 中。
 pub use tonic::Code;
 pub use watch::{RefChange, RefWatch};

@@ -280,6 +280,14 @@ async fn land_reports_the_server_rebase() {
         assert!(out.status.success(), "{out:?}");
         let landed = head_now(&second);
         assert_ne!(landed, committed);
+        // The landed commit names the one it was made as
+        let v = json_of(&scn_in(&second, &["log", "-n", "1", "--json"]));
+        assert_eq!(v["entries"][0]["rebased_from"], committed.as_str());
+        let show = String::from_utf8_lossy(&scn_in(&second, &["show", "--name-only"]).stdout).into_owned();
+        assert!(
+            show.contains(&format!("\nRebased-from: {}\n", &committed[..12])),
+            "{show}"
+        );
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         // The range starts at b, the server's tip before the land, not second's old base
         assert!(

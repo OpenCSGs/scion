@@ -40,7 +40,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git merge --abort` | `scn merge --abort` | |
 | `git add` after fixing a conflict | `scn resolve PATH`, `--ours` / `--theirs` | Refuses leftover markers unless `--force`; no paths lists conflicts |
 | `git rebase --continue`, `git merge --continue` | `scn commit` | `-m` is optional; it keeps the original message |
-| `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | git's format (default 20 commits); `--path PATH` also works. As in git, it starts at the working copy's commit (HEAD); `scn log main` shows the branch on the server, including what others landed since your last `scn sync`. A commit the server rebased also shows `CommitDate:`; commit dates follow the order commits landed in, author dates when they were written |
+| `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | git's format (default 20 commits); `--path PATH` also works. As in git, it starts at the working copy's commit (HEAD); `scn log main` shows the branch on the server, including what others landed since your last `scn sync`. A commit the server rebased also shows `CommitDate:` and `Rebased-from:`, the commit as it was made; commit dates follow the order commits landed in, author dates when they were written |
 | `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status | --stat] [-- PATH]` | |
 | `git diff`, `git diff A B`, `A..B`, `A...B` | `scn diff`, `scn diff A B`, `A..B`, `A...B` | `--name-only`, `--name-status`, `--stat`, `-- PATH` |
 | `git blame [REV] -- PATH` | `scn blame [REV:]PATH` | |

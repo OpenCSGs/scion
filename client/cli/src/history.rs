@@ -79,6 +79,9 @@ pub struct LogLine {
     pub committer: String,
     pub committer_time_ms: i64,
     pub committer_tz_offset_minutes: i32,
+    /// The commit as it was made, when the server rebased it while landing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebased_from: Option<String>,
     pub message: String,
     pub generation: u64,
 }
@@ -97,7 +100,8 @@ pub struct LogOut {
 /// A commit as `git log` and `git show` print it: `commit`, `Merge:`, `Author:`, `Date:`, then
 /// the message indented by four spaces. When the commit time differs from the author's, as after
 /// a rebase on the server (which keeps commit times in landing order), a `CommitDate:` line
-/// (git's `--format=fuller` name) follows `Date:`.
+/// (git's `--format=fuller` name) follows `Date:`; a commit the server rebased also names the
+/// commit it was made as (`Rebased-from:`).
 fn commit_header(c: &LogLine) -> String {
     let mut out = format!("commit {}\n", c.id);
     if c.parents.len() > 1 {
@@ -113,6 +117,9 @@ fn commit_header(c: &LogLine) -> String {
     let committed = git_date(c.committer_time_ms, c.committer_tz_offset_minutes);
     if committed != git_date(c.time_ms, c.tz_offset_minutes) {
         out.push_str(&format!("\nCommitDate: {committed}"));
+    }
+    if let Some(from) = &c.rebased_from {
+        out.push_str(&format!("\nRebased-from: {}", &from[..from.len().min(12)]));
     }
     if !c.message.trim().is_empty() {
         out.push('\n');
@@ -146,6 +153,8 @@ impl Render for LogOut {
 
 fn log_line(e: LogItem) -> LogLine {
     LogLine {
+        // Before the fields below move out of `e`
+        rebased_from: e.rebased_from().map(|id| id.to_string()),
         id: e.id.to_string(),
         parents: e.parents.iter().map(ToString::to_string).collect(),
         // Author and author date, as `git log` shows them
@@ -818,6 +827,7 @@ mod tests {
             committer: "c".into(),
             committer_time_ms: 0,
             committer_tz_offset_minutes: 0,
+            rebased_from: None,
             message: "subject\n\nbody".into(),
             generation: 3,
         };
@@ -845,14 +855,17 @@ mod tests {
                 "commit c1aaaaaaaaaaaaaaaa\nMerge: c1bbbbbbbbbb c1cccccccccc\nAuthor: Ada <ada@x>\nDate:   Thu Jan 1 00:00:00 1970 +0000\n\n    subject\n    \n    body"
             ),
             "{text}"
-        ); // Landed later than it was written (a rebase on the server)
+        );
+        // Rebased on the server when it landed, after a commit made later
         let landed = LogLine {
             committer_time_ms: 60_000,
+            rebased_from: Some("c1dddddddddddddddd".into()),
             ..commit_copy
         };
         assert!(
             commit_header(&landed).contains(
-                "Date:   Thu Jan 1 00:00:00 1970 +0000\nCommitDate: Thu Jan 1 00:01:00 1970 +0000\n\n    subject"
+                "Date:   Thu Jan 1 00:00:00 1970 +0000\nCommitDate: Thu Jan 1 00:01:00 1970 +0000\n\
+                 Rebased-from: c1dddddddddd\n\n    subject"
             ),
             "{}",
             commit_header(&landed)
@@ -1090,6 +1103,7 @@ mod tests {
             committer: "c".into(),
             committer_time_ms: 0,
             committer_tz_offset_minutes: 0,
+            rebased_from: None,
             message: "subject\n\nbody".into(),
             generation: 1,
         };

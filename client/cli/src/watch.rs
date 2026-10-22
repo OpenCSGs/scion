@@ -40,6 +40,9 @@ pub struct WatchCommit {
     pub author: String,
     pub email: String,
     pub subject: String,
+    /// The commit as it was made, when the server rebased it while landing it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebased_from: Option<String>,
 }
 
 fn short(id: &str) -> &str {
@@ -57,7 +60,14 @@ impl Render for RefUpdate {
         let mut lines: Vec<String> = self
             .commits
             .iter()
-            .map(|c| format!("{r}  {}  {}  {}", short(&c.id), c.author, c.subject))
+            .map(|c| {
+                let rebased = c
+                    .rebased_from
+                    .as_deref()
+                    .map(|o| format!("  (rebased from {})", short(o)))
+                    .unwrap_or_default();
+                format!("{r}  {}  {}  {}{rebased}", short(&c.id), c.author, c.subject)
+            })
             .collect();
         if self.truncated {
             let old = self.old.as_deref().unwrap_or_default();
@@ -77,6 +87,7 @@ fn commit_of(e: &LogItem) -> WatchCommit {
         author: e.author.name.clone(),
         email: e.author.email.clone(),
         subject: e.message.lines().next().unwrap_or("").to_owned(),
+        rebased_from: e.rebased_from().map(|id| id.to_string()),
     }
 }
 
@@ -174,15 +185,23 @@ mod tests {
 
     #[test]
     fn text() {
-        let c = |id: &str| WatchCommit {
+        let c = |id: &str, rebased: Option<&str>| WatchCommit {
             id: id.into(),
             author: "agent-1".into(),
             email: "a@x".into(),
             subject: "tb title".into(),
+            rebased_from: rebased.map(Into::into),
         };
         assert_eq!(
-            update(vec![c("c1aaaaaaaaaaaaaa"), c("c1bbbbbbbbbbbbbb")], false).text(),
-            "main  c1aaaaaaaaaa  agent-1  tb title\nmain  c1bbbbbbbbbb  agent-1  tb title"
+            update(
+                vec![
+                    c("c1aaaaaaaaaaaaaa", None),
+                    c("c1bbbbbbbbbbbbbb", Some("c1cccccccccccccc"))
+                ],
+                false
+            )
+            .text(),
+            "main  c1aaaaaaaaaa  agent-1  tb title\nmain  c1bbbbbbbbbb  agent-1  tb title  (rebased from c1cccccccccc)"
         );
         assert_eq!(
             update(vec![], true).text(),

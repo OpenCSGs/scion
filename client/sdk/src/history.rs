@@ -27,6 +27,15 @@ pub struct LogItem {
     pub extensions: BTreeMap<String, Bytes>,
 }
 
+impl LogItem {
+    /// The commit as it was made, when the server rebased it while landing it (the
+    /// `scion.rebased-from` extension).
+    pub fn rebased_from(&self) -> Option<ObjectId> {
+        let raw = self.extensions.get(scion_object::REBASED_FROM_EXTENSION)?;
+        ObjectId::from_bytes(raw).ok()
+    }
+}
+
 /// 归档格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArchiveFormat {

@@ -15,7 +15,7 @@ Events are kept for `--event-retention` (7 days by default) and cleaned up by th
 
 ## From the command line
 
-`scn watch` follows a repository's branches (all of them, or the ones named) and prints each commit as it lands, one line per commit: `BRANCH  ID  AUTHOR  SUBJECT`. With `--json` it prints one object per move of a branch, with its commits oldest first; `--count N` stops after N moves. It needs read on the repository.
+`scn watch` follows a repository's branches (all of them, or the ones named) and prints each commit as it lands, one line per commit: `BRANCH  ID  AUTHOR  SUBJECT`, followed by `(rebased from ID)` for a commit the server rebased to land it. With `--json` it prints one object per move of a branch, with its commits oldest first; `--count N` stops after N moves. It needs read on the repository.
 
 ```sh
 scn watch                                   # in a working copy: its repository

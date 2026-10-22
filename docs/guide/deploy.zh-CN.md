@@ -111,9 +111,12 @@ docker run -d -p 7080:7080 -v scion-data:/data scion --log-format json server --
 - 可选的区域缓存 `scion cache`。
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml up -d --build
-# 镜像站
-REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d --build
+# 国内用阿里云上的 scion 镜像，其余镜像走镜像站
+SCION_IMAGE=opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d
+# 能访问 Docker Hub 时，直接用 opencsghq/scion:latest
+docker compose -f deploy/compose/docker-compose.yml up -d
+# 用本地源码构建的服务端
+docker build -t scion:dev . && SCION_IMAGE=scion:dev docker compose -f deploy/compose/docker-compose.yml up -d
 # 同时启动区域缓存（7090）
 docker compose -f deploy/compose/docker-compose.yml --profile cache up -d
 

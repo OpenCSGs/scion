@@ -1,16 +1,15 @@
 # 运行 Scion：PostgreSQL（Standard 档元数据库）+ SeaweedFS（S3 兼容对象存储）+ scion server，
 # 可选区域缓存 scion cache。说明见 docs/guide/deploy.md。
 #
-#   docker compose -f deploy/compose/docker-compose.yml up -d --build
+#   docker compose -f deploy/compose/docker-compose.yml up -d
 #   scn --endpoint http://localhost:7080 repo create demo
 #
+# scion 默认用 Docker Hub 上的 opencsghq/scion:latest。用本地源码构建的镜像：
+#   docker build -t scion:dev . && SCION_IMAGE=scion:dev docker compose -f deploy/compose/docker-compose.yml up -d
 # 拉不到 Docker Hub 时用镜像站，例如
-#   REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d --build
+#   REGISTRY=docker.m.daocloud.io SCION_IMAGE=opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest \
+#     docker compose -f deploy/compose/docker-compose.yml up -d
 name: scion
-
-x-images:
-  base: &rust-image ${REGISTRY:-docker.io}/library/rust:1.99-slim-bookworm
-  runtime: &runtime-image ${REGISTRY:-docker.io}/library/debian:bookworm-slim
 
 services:
   postgres:
@@ -51,12 +50,7 @@ services:
         echo 's3.bucket.list' | weed shell -master=s3:9333 | grep -q scion-objects
 
   scion:
-    build:
-      context: ../..
-      args:
-        RUST_IMAGE: *rust-image
-        RUNTIME_IMAGE: *runtime-image
-    image: ${SCION_IMAGE:-scion:dev}
+    image: ${SCION_IMAGE:-opencsghq/scion:latest}
     command: ["--log-format", "json", "server"]
     environment:
       SCION_LISTEN: 0.0.0.0:7080
@@ -86,7 +80,7 @@ services:
   # 区域缓存（可选）：docker compose ... --profile cache up -d
   cache:
     profiles: ["cache"]
-    image: ${SCION_IMAGE:-scion:dev}
+    image: ${SCION_IMAGE:-opencsghq/scion:latest}
     command: ["--log-format", "json", "cache"]
     environment:
       SCION_CACHE_LISTEN: 0.0.0.0:7090

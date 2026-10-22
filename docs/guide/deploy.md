@@ -111,9 +111,11 @@ Every option has an environment variable (`SCION_META`, `SCION_BLOBS`, `SCION_S3
 - optionally, the regional cache `scion cache`.
 
 ```sh
-docker compose -f deploy/compose/docker-compose.yml up -d --build
+docker compose -f deploy/compose/docker-compose.yml up -d                  # the image opencsghq/scion:latest
+# The server built from this checkout instead
+docker build -t scion:dev . && SCION_IMAGE=scion:dev docker compose -f deploy/compose/docker-compose.yml up -d
 # Through a registry mirror
-REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d --build
+REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d
 # With the regional cache as well (7090)
 docker compose -f deploy/compose/docker-compose.yml --profile cache up -d
 

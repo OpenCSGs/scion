@@ -41,7 +41,7 @@ services:
   # starhub / CSGHub 部署使用的 MinIO 版本（bitnami 镜像，2023.12）
   minio:
     profiles: ["minio"]
-    image: opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsg_public/bitnami/minio:2023
+    image: bitnamilegacy/minio:2023
     environment:
       MINIO_ROOT_USER: scion
       MINIO_ROOT_PASSWORD: scion-dev-secret

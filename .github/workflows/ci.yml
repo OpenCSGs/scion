@@ -133,6 +133,8 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Compose smoke test
         run: |
+          # The image built above instead of the published one
+          export SCION_IMAGE=scion:dev
           compose="docker compose -f deploy/compose/docker-compose.yml"
           $compose up -d --no-build --wait
           $compose exec -T scion scn --endpoint http://127.0.0.1:7080 repo create demo
@@ -140,7 +142,7 @@ jobs:
             && cd demo && echo hello > a.txt && scn commit -m first && scn land && scn cat main:a.txt' | grep -x hello
           curl -fs localhost:9464/metrics | grep 'scion_land_batches_total{outcome="landed"} 1'
       - if: failure()
-        run: docker compose -f deploy/compose/docker-compose.yml logs
+        run: SCION_IMAGE=scion:dev docker compose -f deploy/compose/docker-compose.yml logs
 
   # 函数级测试要求（服务端设计文档 §12.1）
   coverage:

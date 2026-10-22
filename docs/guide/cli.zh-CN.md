@@ -6,7 +6,7 @@
 
 ```sh
 # 方式一：docker compose，带 PostgreSQL + S3 兼容存储（见 deploy.zh-CN.md）
-docker compose -f deploy/compose/docker-compose.yml up -d --build
+SCION_IMAGE=opencsg-registry.cn-beijing.cr.aliyuncs.com/opencsghq/scion:latest REGISTRY=docker.m.daocloud.io docker compose -f deploy/compose/docker-compose.yml up -d
 
 # 方式二：从源码启动 Lite 模式的服务端（SQLite + 本地目录，数据持久保存）
 cargo run -p scion -- server --lite --data-dir ./.scion-data

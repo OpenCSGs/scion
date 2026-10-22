@@ -28,7 +28,7 @@ scn clone mono && cd mono          # 检出（默认 ref 为 main；空仓库也
 # scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # 支持 .gitignore 和 .scionignore（gitignore 语法）
-scn status                          # git 的长格式；`scn status -s`：A  .gitignore、A  README.md
+scn status                          # git 的长格式，并说明服务端的 main 前进了多少；`scn status -s`：A  .gitignore、A  README.md
 scn commit -m "add readme"          # 或者 --author "Ada <ada@example.com>"
 scn restore src/main.rs             # 丢弃已跟踪文件的本地改动（`.` 表示全部）；新增的文件会保留
 scn commit --amend                  # 把更多本地改动并入待合入的提交（保留提交说明和作者）

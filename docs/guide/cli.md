@@ -28,7 +28,7 @@ scn clone mono && cd mono          # check out (ref main by default; empty repos
 # scn clone http://127.0.0.1:7080/mono
 echo 'hello' > README.md
 echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (gitignore syntax)
-scn status                          # git's long format; `scn status -s`: A  .gitignore, A  README.md
+scn status                          # git's long format, and how far main on the server has moved; `scn status -s`: A  .gitignore, A  README.md
 scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
 scn restore src/main.rs             # discard local changes to tracked files (`.` for all); added files are kept
 scn commit --amend                  # fold more local changes into the pending commit (keeps message and author)

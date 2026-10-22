@@ -168,6 +168,9 @@ enum Command {
         /// The short format, for scripts (as git's `--porcelain`).
         #[arg(long)]
         porcelain: bool,
+        /// Do not ask the server how far its branch has moved past the working copy.
+        #[arg(long)]
+        no_ahead_behind: bool,
     },
     /// Commit the local changes (not landed yet; see `scn land`).
     #[command(after_help = "Examples:\n  scn commit -m \"Fix the parser\"\n  \
@@ -1126,9 +1129,17 @@ async fn run(cli: Cli) -> ExitCode {
             short,
             branch,
             porcelain,
+            no_ahead_behind,
         } => emit(
-            // --porcelain paths are relative to the root, as in git
-            commands::status(&ctx, short || porcelain).map(|s| commands::StatusOut {
+            // --porcelain paths are relative to the root, as in git. The short format shows the
+            // server's branch only with -b, so only then is it asked
+            commands::status(
+                &ctx,
+                short || porcelain,
+                !no_ahead_behind && (branch || !(short || porcelain)),
+            )
+            .await
+            .map(|s| commands::StatusOut {
                 branch,
                 cwd: if porcelain { String::new() } else { s.cwd.clone() },
                 ..s

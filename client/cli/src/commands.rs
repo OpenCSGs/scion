@@ -340,6 +340,10 @@ pub struct StatusOut {
     pub deleted: Vec<String>,
     /// Paths with unresolved conflicts (see `scn resolve`).
     pub conflicted: Vec<String>,
+    /// How many commits the branch on the server has that the working copy does not; absent
+    /// when unknown (no server reached, `--no-ahead-behind`, or the short format without -b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind: Option<Behind>,
     /// Conflict kind of each conflicted path.
     #[serde(skip)]
     pub kinds: std::collections::BTreeMap<String, String>,
@@ -356,6 +360,25 @@ pub struct StatusOut {
     /// output shows paths relative to it, like git.
     #[serde(skip)]
     pub cwd: String,
+}
+
+/// Commits on the server's branch past the working copy's base: at least `count`, exactly
+/// when `exact`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Behind {
+    pub count: usize,
+    pub exact: bool,
+}
+
+impl Behind {
+    fn commits(self) -> String {
+        let n = if self.exact {
+            self.count.to_string()
+        } else {
+            format!("{}+", self.count)
+        };
+        format!("{n} commit{}", if self.count == 1 && self.exact { "" } else { "s" })
+    }
 }
 
 /// `path` (relative to the working copy root) as seen from `cwd` (also relative to the root).
@@ -412,7 +435,17 @@ impl Render for StatusOut {
         if self.short {
             let mut lines: Vec<String> = Vec::new();
             if self.branch {
-                lines.push(format!("## {}", self.reference));
+                let ahead = self.pending.is_some().then_some("ahead 1".to_owned());
+                let behind = self
+                    .behind
+                    .filter(|b| b.count > 0)
+                    .map(|b| format!("behind {}{}", b.count, if b.exact { "" } else { "+" }));
+                let marks: Vec<String> = ahead.into_iter().chain(behind).collect();
+                lines.push(if marks.is_empty() {
+                    format!("## {}", self.reference)
+                } else {
+                    format!("## {} [{}]", self.reference, marks.join(", "))
+                });
             }
             lines.extend(unmerged.iter().map(|(p, _, code)| format!("{code} {p}")));
             lines.extend(changes.iter().map(|(_, code, p)| format!("{code} {p}")));
@@ -425,6 +458,20 @@ impl Render for StatusOut {
                 short(p)
             )),
             (None, None) => head.push("\nNo commits yet".to_owned()),
+            _ => {}
+        }
+        match (self.behind, self.pending.is_some()) {
+            (Some(b), false) if b.count > 0 => head.push(format!(
+                "Your branch is behind '{}' on the server by {}.\n  (use \"scn sync\" to update the working copy)",
+                self.reference,
+                b.commits()
+            )),
+            (Some(b), true) if b.count > 0 => head.push(format!(
+                "'{}' on the server has {} that your commit is not based on.\n  \
+                 (\"scn land\" rebases your commit onto them; \"scn sync\" brings them here first)",
+                self.reference,
+                b.commits()
+            )),
             _ => {}
         }
         match (self.merging, unmerged.is_empty()) {
@@ -481,6 +528,7 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
         modified: s.modified,
         deleted: s.deleted,
         conflicted: s.conflicted,
+        behind: None,
         kinds: conflict
             .map(|c| {
                 c.paths
@@ -496,14 +544,52 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
     }
 }
 
-pub fn status(ctx: &Ctx, short: bool) -> Result<StatusOut, CliError> {
+/// `ahead_behind`: also ask the server how far its branch has moved past the working copy (as
+/// git compares with `origin/BRANCH`). That costs a round trip, two when it moved; offline, or
+/// when the server is slow, the status simply leaves it out.
+pub async fn status(ctx: &Ctx, short: bool, ahead_behind: bool) -> Result<StatusOut, CliError> {
     let wc = WorkingCopy::open(&ctx.cwd)?;
     let s = wc.status()?;
     let cwd = wc_relative(wc.root(), &ctx.cwd, &[".".to_owned()])?.remove(0);
+    let behind = if ahead_behind {
+        tokio::time::timeout(std::time::Duration::from_secs(2), behind(ctx, &wc))
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
     Ok(StatusOut {
         short,
         cwd: if cwd == "." { String::new() } else { cwd },
+        behind,
         ..status_out(&wc, s)
+    })
+}
+
+/// Pages of log read from the server's tip to find the working copy's base.
+const BEHIND_PAGE: u32 = 100;
+
+async fn behind(ctx: &Ctx, wc: &WorkingCopy) -> Option<Behind> {
+    let base = wc.state().base.clone()?;
+    let client = connect(&ctx.endpoint_or(Some(wc)), Some(&wc.state().repo)).await.ok()?;
+    let tip = client
+        .resolve_ref(&wc.state().reference)
+        .await
+        .ok()??
+        .changeset
+        .to_string();
+    if tip == base {
+        return Some(Behind { count: 0, exact: true });
+    }
+    // History runs newest first, so the commits before the base are the ones it lacks
+    let page = client.log(&tip, None, BEHIND_PAGE, None).await.ok()?;
+    Some(match page.entries.iter().position(|e| e.id.to_string() == base) {
+        Some(count) => Behind { count, exact: true },
+        None => Behind {
+            count: page.entries.len(),
+            exact: false,
+        },
     })
 }
 
@@ -1510,6 +1596,7 @@ mod tests {
             modified: vec![],
             deleted: vec![],
             conflicted: vec![],
+            behind: None,
             kinds: Default::default(),
             merging: None,
             short: false,
@@ -1520,6 +1607,36 @@ mod tests {
             s.text(),
             "On branch main\n\nNo commits yet\n\nnothing to commit, working tree clean"
         );
+        // The branch on the server moved past the working copy
+        let moved = |count, exact, pending: Option<&str>| StatusOut {
+            base: Some("c1base".into()),
+            pending: pending.map(Into::into),
+            behind: Some(Behind { count, exact }),
+            ..s.clone()
+        };
+        assert_eq!(
+            moved(2, true, None).text(),
+            "On branch main\nYour branch is behind 'main' on the server by 2 commits.\n  \
+             (use \"scn sync\" to update the working copy)\n\nnothing to commit, working tree clean"
+        );
+        assert!(moved(1, true, None).text().contains("by 1 commit.\n"));
+        assert!(
+            moved(100, false, Some("c1pending0000"))
+                .text()
+                .contains("'main' on the server has 100+ commits that your commit is not based on.")
+        );
+        assert!(!moved(0, true, None).text().contains("behind"));
+        let sb = |m: StatusOut| {
+            StatusOut {
+                short: true,
+                branch: true,
+                ..m
+            }
+            .text()
+        };
+        assert_eq!(sb(moved(2, true, None)), "## main [behind 2]");
+        assert_eq!(sb(moved(100, false, Some("c1p"))), "## main [ahead 1, behind 100+]");
+        assert_eq!(sb(moved(0, true, None)), "## main");
         assert_eq!(
             StatusOut {
                 short: true,
@@ -1886,7 +2003,7 @@ mod tests {
         assert!(matches!(cat(&ctx, "main:a").await, Err(CliError::Usage(_))));
         assert!(matches!(ls(&ctx, None).await, Err(CliError::Usage(_))));
         assert!(matches!(
-            status(&ctx, false),
+            status(&ctx, false, true).await,
             Err(CliError::Wc(scion_wc::Error::NotAWorkingCopy(_)))
         ));
         assert!(matches!(

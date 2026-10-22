@@ -164,6 +164,14 @@ async fn land_reports_the_server_rebase() {
         let top = |args: &[&str]| json_of(&scn_in(&second, args))["entries"][0]["id"].clone();
         assert_eq!(top(&["log", "-n", "1", "--json"]), base.as_str());
         assert_eq!(top(&["log", "main", "-n", "1", "--json"]), b.as_str());
+        // status compares with the branch on the server
+        let v = json_of(&scn_in(&second, &["status", "--json"]));
+        assert_eq!(v["behind"], serde_json::json!({"count": 1, "exact": true}));
+        let sb = |args: &[&str]| String::from_utf8_lossy(&scn_in(&second, args).stdout).into_owned();
+        assert_eq!(sb(&["status", "-sb"]), "## main [behind 1]\n");
+        assert_eq!(sb(&["status", "-sb", "--no-ahead-behind"]), "## main\n");
+        assert!(sb(&["status"]).contains("Your branch is behind 'main' on the server by 1 commit."));
+        assert!(json_of(&scn_in(&first, &["status", "--json"]))["behind"]["count"] == 0);
         std::fs::write(second.join("c.txt"), "c").expect("write");
         let committed = json_of(&scn_in(
             &second,
@@ -172,6 +180,7 @@ async fn land_reports_the_server_rebase() {
             .as_str()
             .expect("id")
             .to_owned();
+        assert_eq!(sb(&["status", "-sb"]), "## main [ahead 1, behind 1]\n");
         let out = scn_in(&second, &["land"]);
         assert!(out.status.success(), "{out:?}");
         let landed = head_now(&second);

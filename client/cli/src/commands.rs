@@ -1325,14 +1325,19 @@ pub(crate) async fn query_client(ctx: &Ctx) -> Result<(Client, String), CliError
         .clone()
         .or_else(|| wc.as_ref().map(|w| w.state().repo.clone()))
         .ok_or_else(|| CliError::Usage("--repo is required outside a working copy".into()))?;
+    let endpoint = ctx.endpoint_or(wc.as_ref());
     // As in git, revisions default to the working copy's current commit (HEAD), which may not
-    // be the branch's tip on the server yet; the branch's name (`main`) names that tip
-    let default_rev = match &wc {
+    // be the branch's tip on the server yet; the branch's name (`main`) names that tip. Only for
+    // the working copy's own repository: `--repo` can name another one
+    let own = wc.as_ref().filter(|w| {
+        w.state().repo == repo && w.state().endpoint.trim_end_matches('/') == endpoint.trim_end_matches('/')
+    });
+    let default_rev = match own {
         Some(w) if w.state().current()?.is_some() => "HEAD".to_owned(),
         Some(w) => w.state().reference.clone(),
         None => DEFAULT_REF.to_owned(),
     };
-    Ok((connect(&ctx.endpoint_or(wc.as_ref()), Some(&repo)).await?, default_rev))
+    Ok((connect(&endpoint, Some(&repo)).await?, default_rev))
 }
 
 #[derive(Debug, Serialize)]

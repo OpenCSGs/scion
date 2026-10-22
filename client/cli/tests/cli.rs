@@ -164,6 +164,16 @@ async fn land_reports_the_server_rebase() {
         let top = |args: &[&str]| json_of(&scn_in(&second, args))["entries"][0]["id"].clone();
         assert_eq!(top(&["log", "-n", "1", "--json"]), base.as_str());
         assert_eq!(top(&["log", "main", "-n", "1", "--json"]), b.as_str());
+        // Another repository named with --repo from inside the working copy: its main, not our HEAD
+        let other = format!("{url}/other");
+        json_of(&scn_in(&root, &["repo", "create", &other, "--json"]));
+        let oc = root.join("oc");
+        json_of(&scn_in(&root, &["clone", &other, "oc", "--json"]));
+        std::fs::write(oc.join("o.txt"), "o").expect("write");
+        json_of(&scn_in(&oc, &[&["commit", "-m", "o", "--json"][..], &author].concat()));
+        json_of(&scn_in(&oc, &["land", "--json"]));
+        let out = scn_in(&second, &["cat", "o.txt", "--repo", &other]);
+        assert_eq!(out.stdout, b"o", "{out:?}");
         // status compares with the branch on the server
         let v = json_of(&scn_in(&second, &["status", "--json"]));
         assert_eq!(v["behind"], serde_json::json!({"count": 1, "exact": true}));

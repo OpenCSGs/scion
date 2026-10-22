@@ -205,7 +205,7 @@ async fn land_reports_the_server_rebase() {
             "{text}"
         );
         assert!(
-            text.contains(&format!(" your commit {} is now {}", &committed[..12], &landed[..12])),
+            text.contains(&format!("\nYour commit {} is now {}", &committed[..12], &landed[..12])),
             "{text}"
         );
     })

@@ -1116,7 +1116,7 @@ impl Render for LandOut {
         let mut out = format!("To {}\n{update}{rebased}", self.url);
         for r in &self.rewritten {
             out.push_str(&format!(
-                "\n your commit {} is now {}",
+                "\nYour commit {} is now {}",
                 short(&r.committed),
                 short(&r.landed)
             ));
@@ -1858,8 +1858,8 @@ mod tests {
         };
         assert_eq!(
             land.text(),
-            "To http://h:7080/mono\n   c1oldabcdefg..c1tipabcdefg  main -> main (rebased onto the latest main)\n \
-             your commit c1mineabcdef is now c1tipabcdefg"
+            "To http://h:7080/mono\n   c1oldabcdefg..c1tipabcdefg  main -> main (rebased onto the latest main)\n\
+             Your commit c1mineabcdef is now c1tipabcdefg"
         );
         let land = LandOut {
             up_to_date: true,

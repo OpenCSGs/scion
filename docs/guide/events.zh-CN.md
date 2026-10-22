@@ -13,6 +13,17 @@
 
 事件保留 `--event-retention`（默认 7 天），由 janitor 清理。
 
+## 命令行
+
+`scn watch` 跟踪一个仓库的分支（全部分支，或指定的分支），每合入一个提交打印一行：`分支  ID  作者  标题`。加 `--json` 时，分支每前进一次输出一个对象，带上这次进来的提交（从旧到新）；`--count N` 在分支前进 N 次后退出。需要该仓库的读权限。
+
+```sh
+scn watch                                   # 在工作副本里：工作副本所在的仓库
+scn watch main --json --repo http://scion.example.com:7080/org/app
+```
+
+它用 `RefService.WatchRefs` 订阅，每次分支前进时，从新的最新提交往回读历史，直到旧的最新提交。服务端可能把一个分支短时间内的多次前进合并成一次通知，但不会漏掉提交；一次进来超过 100 个提交，或者分支被强制移动时，最后一行是 `(more commits not listed)`（JSON 里是 `truncated`）。
+
 ## 拉取
 
 ```

@@ -123,6 +123,82 @@ fn json_of(out: &std::process::Output) -> serde_json::Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn watch_prints_commits_as_they_land() {
+    use scion_store::MetaStore;
+    use std::io::BufRead;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("app").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, std::future::pending()));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let author = ["--author", "Ada <ada@example.com>"];
+        let wc = root.join("app");
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "--json"]));
+        let land = |file: &str| {
+            std::fs::write(wc.join(file), file).expect("write");
+            json_of(&scn_in(&wc, &[&["commit", "-m", file, "--json"][..], &author].concat()));
+            json_of(&scn_in(&wc, &["land", "--json"]));
+            head_now(&wc)
+        };
+        let first = land("a");
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_scn"))
+            .current_dir(&wc)
+            .args(["watch", "main", "--count", "2"])
+            .env("SCION_NO_DAEMON", "1")
+            .env_remove("SCION_TOKEN")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("watch");
+        let mut err = std::io::BufReader::new(child.stderr.take().expect("stderr"));
+        let mut line = String::new();
+        err.read_line(&mut line).expect("read");
+        assert_eq!(line, format!("Watching main at {}; Ctrl-C stops\n", &first[..12]));
+        let lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let out = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+        let seen = lines.clone();
+        let reader = std::thread::spawn(move || {
+            for l in out.lines() {
+                seen.lock().expect("lock").push(l.expect("line"));
+            }
+        });
+        let wait_for = |n: usize| {
+            for _ in 0..100 {
+                if lines.lock().expect("lock").len() >= n {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            panic!("watch printed {:?}", lines.lock().expect("lock"));
+        };
+        let b = land("b");
+        wait_for(1);
+        let c = land("c");
+        wait_for(2);
+        assert!(child.wait().expect("wait").success(), "stops after --count moves");
+        reader.join().expect("reader");
+        assert_eq!(
+            *lines.lock().expect("lock"),
+            [
+                format!("main  {}  Ada  b", &b[..12]),
+                format!("main  {}  Ada  c", &c[..12])
+            ]
+        );
+    })
+    .await
+    .expect("test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn land_reports_the_server_rebase() {
     use scion_store::MetaStore;
     let store = Arc::new(MemStore::new());

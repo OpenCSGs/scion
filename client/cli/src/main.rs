@@ -14,6 +14,7 @@ mod output;
 mod progress;
 mod remote;
 mod repos;
+mod watch;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -450,6 +451,20 @@ enum Command {
         /// `-- PATH`: only changes under this path.
         #[arg(last = true, value_name = "PATH")]
         paths: Vec<String>,
+    },
+    /// Follow branches on the server and print each commit as it lands (all branches by default).
+    #[command(
+        after_help = "One line per commit: BRANCH  ID  AUTHOR  SUBJECT. --json prints one object per move of a \
+        branch, with its commits.\n\nExamples:\n  scn watch\n  scn watch main --json\n  \
+        scn watch main --repo http://scion.example.com:7080/org/app"
+    )]
+    Watch {
+        /// The branches to follow; all of them when none are given.
+        #[arg(value_name = "BRANCH")]
+        refs: Vec<String>,
+        /// Stop after this many moves of a branch.
+        #[arg(long, value_name = "N")]
+        count: Option<usize>,
     },
     /// The commit that last changed each line of a file.
     #[command(
@@ -1446,6 +1461,35 @@ async fn run(cli: Cli) -> ExitCode {
             Err(e) => fail(&e, json),
         },
         Command::Blame { spec, lines } => emit(history::blame(&ctx, &spec, &lines).await, json),
+        Command::Watch { refs, count } => {
+            let quiet = cli.quiet;
+            let mut start = |tips: &[watch::Tip]| {
+                if !(json || quiet) {
+                    let at: Vec<String> = tips
+                        .iter()
+                        .map(|t| format!("{} at {}", t.name, &t.id[..t.id.len().min(12)]))
+                        .collect();
+                    eprintln!(
+                        "Watching {}; Ctrl-C stops",
+                        if at.is_empty() {
+                            "for new branches".to_owned()
+                        } else {
+                            at.join(", ")
+                        }
+                    );
+                }
+            };
+            let mut print = |u: &watch::RefUpdate| {
+                let text = render(u, json);
+                if !text.is_empty() {
+                    println!("{text}");
+                }
+            };
+            match watch::watch(&ctx, &refs, count, &mut start, &mut print).await {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e, json),
+            }
+        }
         Command::Diff {
             revisions,
             path,
@@ -1585,6 +1629,7 @@ Branches and history:
   log        Show the history
   show       Show a commit and its changes
   blame      Show the commit that last changed each line
+  watch      Follow branches on the server as commits land
 
 Read without a working copy:
   cat        Print a file at a revision

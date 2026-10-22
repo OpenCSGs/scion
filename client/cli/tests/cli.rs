@@ -123,6 +123,65 @@ fn json_of(out: &std::process::Output) -> serde_json::Value {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn land_reports_the_server_rebase() {
+    use scion_store::MetaStore;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("app").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, std::future::pending()));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let author = ["--author", "Ada <ada@example.com>"];
+        let first = root.join("first");
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "first", "--json"]));
+        std::fs::write(first.join("a.txt"), "a").expect("write");
+        json_of(&scn_in(
+            &first,
+            &[&["commit", "-m", "a", "--json"][..], &author].concat(),
+        ));
+        json_of(&scn_in(&first, &["land", "--json"]));
+        let second = root.join("second");
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "second", "--json"]));
+
+        // first lands b; second, still on the old base, lands c and is rebased over b
+        std::fs::write(first.join("b.txt"), "b").expect("write");
+        json_of(&scn_in(
+            &first,
+            &[&["commit", "-m", "b", "--json"][..], &author].concat(),
+        ));
+        json_of(&scn_in(&first, &["land", "--json"]));
+        std::fs::write(second.join("c.txt"), "c").expect("write");
+        let committed = json_of(&scn_in(
+            &second,
+            &[&["commit", "-m", "c", "--json"][..], &author].concat(),
+        ))["changeset"]
+            .as_str()
+            .expect("id")
+            .to_owned();
+        let out = scn_in(&second, &["land"]);
+        assert!(out.status.success(), "{out:?}");
+        let landed = head_now(&second);
+        assert_ne!(landed, committed);
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.contains("(rebased onto the latest main)"), "{text}");
+        assert!(
+            text.contains(&format!(" your commit {} is now {}", &committed[..12], &landed[..12])),
+            "{text}"
+        );
+    })
+    .await
+    .expect("test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn clone_commit_land_sync_workflow() {
     use scion_store::MetaStore;
     let store = Arc::new(MemStore::new());

@@ -937,6 +937,8 @@ pub struct LandOut {
     pub version: u64,
     /// 服务端是否 rebase 了提交（ref 在提交之后前进过）。
     pub rebased: bool,
+    /// The commits the server rebased: the id committed and the id it landed as.
+    pub rewritten: Vec<Rewritten>,
     /// For the text: the repository's URL, the branch's commit before (None: a new branch), and
     /// whether the commit was already on the branch.
     #[serde(skip)]
@@ -947,7 +949,14 @@ pub struct LandOut {
     pub up_to_date: bool,
 }
 
-/// Like `git push`: `To URL`, then `   old..new  main -> main`.
+#[derive(Debug, Serialize)]
+pub struct Rewritten {
+    pub committed: String,
+    pub landed: String,
+}
+
+/// Like `git push`: `To URL`, then `   old..new  main -> main`, then the commits that the
+/// server rebased and so landed under a new id.
 impl Render for LandOut {
     fn text(&self) -> String {
         if self.up_to_date {
@@ -963,7 +972,15 @@ impl Render for LandOut {
         } else {
             String::new()
         };
-        format!("To {}\n{update}{rebased}", self.url)
+        let mut out = format!("To {}\n{update}{rebased}", self.url);
+        for r in &self.rewritten {
+            out.push_str(&format!(
+                "\n your commit {} is now {}",
+                short(&r.committed),
+                short(&r.landed)
+            ));
+        }
+        out
     }
 }
 
@@ -977,6 +994,15 @@ pub async fn land(ctx: &Ctx) -> Result<LandOut, CliError> {
         tip: landed.tip.to_string(),
         version: landed.version,
         rebased: landed.rebased(),
+        rewritten: landed
+            .landed
+            .iter()
+            .filter(|l| l.changeset != l.landed)
+            .map(|l| Rewritten {
+                committed: l.changeset.to_string(),
+                landed: l.landed.to_string(),
+            })
+            .collect(),
         url: format!(
             "{}/{}",
             ctx.endpoint_or(Some(&wc)).trim_end_matches('/'),
@@ -1603,6 +1629,7 @@ mod tests {
             tip: "c1tipabcdefghij".into(),
             version: 3,
             rebased: false,
+            rewritten: vec![],
             url: "http://h:7080/mono".into(),
             old: None,
             up_to_date: false,
@@ -1611,11 +1638,16 @@ mod tests {
         let land = LandOut {
             old: Some("c1oldabcdefghij".into()),
             rebased: true,
+            rewritten: vec![Rewritten {
+                committed: "c1mineabcdefghij".into(),
+                landed: "c1tipabcdefghij".into(),
+            }],
             ..land
         };
         assert_eq!(
             land.text(),
-            "To http://h:7080/mono\n   c1oldabcdefg..c1tipabcdefg  main -> main (rebased onto the latest main)"
+            "To http://h:7080/mono\n   c1oldabcdefg..c1tipabcdefg  main -> main (rebased onto the latest main)\n \
+             your commit c1mineabcdef is now c1tipabcdefg"
         );
         let land = LandOut {
             up_to_date: true,

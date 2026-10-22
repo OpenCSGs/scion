@@ -34,7 +34,7 @@ scn restore src/main.rs             # 丢弃已跟踪文件的本地改动（`.`
 scn commit --amend                  # 把更多本地改动并入待合入的提交（保留提交说明和作者）
 scn uncommit                        # 撤掉待合入的提交，它的改动留作本地改动
 scn land                            # 合入 main；main 已经前进时，服务端会 rebase（三方合并）
-scn sync                            # 拉取别人的改动；待合入的提交按文件级 rebase
+scn sync                            # 拉取别人的改动；待合入的提交按行三方合并 rebase
 scn tag v1.0                        # 给当前提交打标签；`scn tag` 列出标签，`scn log v1.0` 可以直接用它
 scn switch -c feature               # 在当前快照上建分支并切换过去；`scn switch main` 切回来
 scn merge feature                   # 把一个分支合并成待合入的合并提交（三方、按行合并）；然后 `scn land`

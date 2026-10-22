@@ -1294,8 +1294,12 @@ impl WorkingCopy {
 
     /// 更新到 ref 的最新提交。要求本地没有未提交的改动。
     ///
-    /// 有已提交未合入的改动且 ref 已前进时，在客户端做文件级 rebase：双方改了同一路径且结果不同则报
-    /// [`Error::Conflict`]，否则把本地改动基于最新提交重新创建，并把上游改动更新到本地。
+    /// With a pending commit and a ref that moved, rebases the commit on the client: paths both
+    /// sides changed get a three-way merge (line level for text, as on the server). Without
+    /// conflicts the commit is made again on the new tip and the upstream changes are written
+    /// locally. Otherwise the working tree gets the merged files, text conflicts with markers,
+    /// as uncommitted changes on the new tip, and [`Error::Conflict`] lists the paths;
+    /// `scn resolve` and `scn commit` finish it.
     pub async fn sync(&mut self, client: &Client) -> Result<SyncOutcome> {
         let _lock = self.paths.lock()?;
         self.check_no_conflict()?;

@@ -986,8 +986,16 @@ impl Render for LandOut {
 
 pub async fn land(ctx: &Ctx) -> Result<LandOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
-    let old = wc.state().base.clone();
+    let mut old = wc.state().base.clone();
     let landed = wc.land(&client).await?;
+    // After a rebase the range starts where the branch was on the server, as git shows the
+    // remote's previous tip: the parent of the first commit landed. Only the text needs it,
+    // so a failed lookup keeps the local base
+    if let Some(first) = landed.landed.first().filter(|_| landed.rebased()) {
+        if let Ok(r) = client.resolve_revision(&first.landed.to_string()).await {
+            old = r.parents.first().map(|p| p.to_string()).or(old);
+        }
+    }
     Ok(LandOut {
         schema: "scion.cli.land/v1",
         reference: wc.state().reference.clone(),

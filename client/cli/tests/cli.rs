@@ -158,6 +158,7 @@ async fn land_reports_the_server_rebase() {
             &[&["commit", "-m", "b", "--json"][..], &author].concat(),
         ));
         json_of(&scn_in(&first, &["land", "--json"]));
+        let b = head_now(&first);
         std::fs::write(second.join("c.txt"), "c").expect("write");
         let committed = json_of(&scn_in(
             &second,
@@ -171,7 +172,15 @@ async fn land_reports_the_server_rebase() {
         let landed = head_now(&second);
         assert_ne!(landed, committed);
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
-        assert!(text.contains("(rebased onto the latest main)"), "{text}");
+        // The range starts at b, the server's tip before the land, not second's old base
+        assert!(
+            text.contains(&format!(
+                "   {}..{}  main -> main (rebased onto the latest main)",
+                &b[..12],
+                &landed[..12]
+            )),
+            "{text}"
+        );
         assert!(
             text.contains(&format!(" your commit {} is now {}", &committed[..12], &landed[..12])),
             "{text}"

@@ -198,8 +198,10 @@ pub fn merge_conflict(changeset: &ObjectId, conflicts: &[scion_merge::Conflict])
     with_reason(
         Code::Aborted,
         ErrorReason::MergeConflict,
+        // A short id, as scn prints commits; the full one is in the metadata
         format!(
-            "changeset {changeset} conflicts with the ref on {} path(s), first {first:?}",
+            "changeset {} conflicts with the ref on {} path(s), first {first:?}",
+            &changeset.to_string()[..12],
             conflicts.len()
         ),
         md,
@@ -531,6 +533,13 @@ mod tests {
         assert_eq!((md["theirs.0"].as_str(), md["base.31"].clone()), ("", blob.to_string()));
         assert!(!md.contains_key("path.32"));
         assert!(s.message().contains("\"f0\""));
+        let full = id.to_string();
+        assert!(
+            s.message().starts_with(&format!("changeset {} conflicts", &full[..12])),
+            "{}",
+            s.message()
+        );
+        assert_eq!(md["changeset"], full, "the full id stays in the metadata");
         // 空列表也能生成（防御性）
         let s = merge_conflict(&id, &[]);
         assert_eq!(info(&s).2["count"], "0");

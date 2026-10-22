@@ -444,7 +444,9 @@ impl Render for StatusOut {
         }
         let mut blocks = vec![head.join("\n")];
         if !changes.is_empty() {
-            let mut b = "Changes to be committed:\n  (use \"scn restore <file>...\" to discard changes)".to_owned();
+            let mut b = "Changes to be committed:\n  (every change is included: scn has no \"add\" step; ignore files with .gitignore)\n  \
+                         (use \"scn restore <file>...\" to discard changes to tracked files)"
+                .to_owned();
             for (label, _, p) in &changes {
                 b.push_str(&format!("\n\t{label:<12}{p}"));
             }
@@ -1566,7 +1568,8 @@ mod tests {
         assert_eq!(
             s.text(),
             "On branch main\nYour commit c1pending000 is not landed yet.\n  (use \"scn land\" to publish your commit)\n\n\
-             Changes to be committed:\n  (use \"scn restore <file>...\" to discard changes)\n\tnew file:   a\n\t\
+             Changes to be committed:\n  (every change is included: scn has no \"add\" step; ignore files with .gitignore)\n  \
+             (use \"scn restore <file>...\" to discard changes to tracked files)\n\tnew file:   a\n\t\
              modified:   m\n\tdeleted:    d"
         );
         assert_eq!(

@@ -325,10 +325,17 @@ impl<'a> Batch<'a> {
             // 内容已不同于导入时的 git 提交，不再携带 git sha
             let mut extensions = cs.extensions.clone();
             extensions.remove(GIT_SHA1_EXTENSION);
+            // As git rebase does, the committer time becomes the time of the rebase (the land), so
+            // the history's commit times follow the order commits landed in; the author keeps
+            // the time the change was made
+            let committer = scion_object::Signature {
+                time_ms: crate::land::now_ms(),
+                ..cs.committer.clone()
+            };
             let new_cs = Changeset::new(
                 vec![parent.id],
                 cs.author.clone(),
-                cs.committer.clone(),
+                committer,
                 cs.message.clone(),
                 cs.change_id,
                 rebased.delta,

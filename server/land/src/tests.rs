@@ -377,6 +377,12 @@ async fn land_creates_fast_forwards_rebases_and_is_idempotent() {
     let o = l.land(req(REPO, "main", side, false)).await.expect("rebase");
     assert_eq!(o.state.version, 3);
     assert_ne!(o.state.target, side);
+    // As in git rebase, the committer time is the land's; the author's stays
+    let data = fx.store.get(&o.state.target).await.expect("get").expect("changeset");
+    let rebased = Changeset::decode(&data).expect("decode");
+    assert_eq!(rebased.author, sig());
+    assert!(rebased.committer.time_ms > sig().time_ms);
+    assert_eq!(rebased.committer.name, sig().name);
     assert_eq!(fx.read(o.state.target, "f").await.as_deref(), Some("2"));
     assert_eq!(fx.read(o.state.target, "g").await.as_deref(), Some("1"));
     assert_eq!(

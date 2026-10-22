@@ -194,15 +194,20 @@ pub fn merge_conflict(changeset: &ObjectId, conflicts: &[scion_merge::Conflict])
         md.insert(format!("ours.{i}"), id(c.ours));
         md.insert(format!("theirs.{i}"), id(c.theirs));
     }
-    let first = conflicts.first().map(|c| c.path.as_str()).unwrap_or("");
+    // The first few paths; all of them (up to MAX_IDS_IN_ERROR) are in the metadata
+    let mut paths: Vec<String> = conflicts.iter().take(3).map(|c| format!("{:?}", c.path)).collect();
+    if conflicts.len() > 3 {
+        paths.push(format!("and {} more", conflicts.len() - 3));
+    }
     with_reason(
         Code::Aborted,
         ErrorReason::MergeConflict,
         // A short id, as scn prints commits; the full one is in the metadata
         format!(
-            "changeset {} conflicts with the ref on {} path(s), first {first:?}",
+            "changeset {} conflicts with the ref on {} path(s): {}",
             &changeset.to_string()[..12],
-            conflicts.len()
+            conflicts.len(),
+            paths.join(", ")
         ),
         md,
     )
@@ -532,7 +537,11 @@ mod tests {
         assert_eq!((md["count"].as_str(), md["kind.0"].as_str()), ("40", "modify_delete"));
         assert_eq!((md["theirs.0"].as_str(), md["base.31"].clone()), ("", blob.to_string()));
         assert!(!md.contains_key("path.32"));
-        assert!(s.message().contains("\"f0\""));
+        assert!(
+            s.message().ends_with(": \"f0\", \"f1\", \"f2\", and 37 more"),
+            "{}",
+            s.message()
+        );
         let full = id.to_string();
         assert!(
             s.message().starts_with(&format!("changeset {} conflicts", &full[..12])),

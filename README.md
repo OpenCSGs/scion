@@ -8,6 +8,11 @@ Scion is a Rust implementation of the design in Anthropic's [Redesigning source 
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 
+## Demo: four agents, one branch
+
+[![Four agents land on one Scion branch at once](docs/demo/scion-demo.gif)](docs/demo/scion-demo.mp4)
+
+Four agents change one repository at the same time (left), each committing and landing on `main`; the right pane watches `main` on the server. When `main` has moved, the server rebases a commit as it lands (`rebased onto the latest main`, `Your commit X is now Y`). When two agents edit the same lines of `CHANGELOG.md`, the land is refused, and the agent runs `scn sync`, keeps both sides, `scn resolve`, and lands again: every agent's line ends up on `main`. The agents are scripts running real `scn` commands against a server; [docs/demo](docs/demo/README.md) has them and how to record the video ([MP4](docs/demo/scion-demo.mp4)).
 
 ## Benchmarks
 

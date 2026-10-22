@@ -8,6 +8,11 @@ Scion 用 Rust 实现了 Anthropic 在 [Redesigning source control](https://www.
 
 ![Scion standalone architecture](docs/design/images/arch-01-standalone.en.png)
 
+## 演示：四个 agent，一个分支
+
+[![四个 agent 同时向一个 Scion 分支合入](docs/demo/scion-demo.gif)](docs/demo/scion-demo.mp4)
+
+四个 agent 同时修改同一个仓库（左侧），各自提交并合入 `main`；右侧实时显示服务端上的 `main`。`main` 已经前进时，服务端在合入时 rebase 提交（`rebased onto the latest main`、`Your commit X is now Y`）。两个 agent 改到 `CHANGELOG.md` 的同一处时，合入被拒绝，agent 执行 `scn sync`、保留双方的改动、`scn resolve`，再次合入：每个 agent 的那一行最终都在 `main` 上。这些 agent 是脚本，对真实的服务端执行真实的 `scn` 命令；脚本和录制方法见 [docs/demo](docs/demo/README.zh-CN.md)（[MP4](docs/demo/scion-demo.mp4)）。
 
 ## 性能对比
 

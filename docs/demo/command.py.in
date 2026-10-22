@@ -1,0 +1,22 @@
+"""tb @CMD@: a command written by an agent in the Scion demo."""
+
+NAME = "@CMD@"
+HELP = "transform stdin (@CMD@)"
+
+
+def add_arguments(parser):
+    pass
+
+
+def run(args):
+    import sys
+
+    lines = lambda f: lambda s: "".join(f(s.splitlines(keepends=True)))
+    ops = {
+        "upper": str.upper, "lower": str.lower, "title": str.title, "swap": str.swapcase,
+        "caps": str.capitalize, "strip": str.strip, "rev": lambda s: s[::-1],
+        "sort": lines(sorted), "tac": lines(lambda l: l[::-1]), "uniq": lines(lambda l: list(dict.fromkeys(l))),
+        "head": lines(lambda l: l[:10]), "tail": lines(lambda l: l[-10:]),
+    }
+    sys.stdout.write(ops.get(NAME, str)(sys.stdin.read()))
+    return 0

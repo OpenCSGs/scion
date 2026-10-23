@@ -26,8 +26,12 @@ pub struct State {
     pub reference: String,
     /// 最近一次同步到的 ref 提交（空仓库时为 None）。
     pub base: Option<String>,
-    /// 已提交但尚未合入的提交。
+    /// 已提交但尚未合入的提交（有多个时为最新的一个）。
     pub head: Option<String>,
+    /// The other pending commits, under `head`, oldest first: each one's parent is the one
+    /// before it, and the first one's is `base`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<String>,
     /// 未合入提交的说明与作者；rebase 时用于重建提交。
     #[serde(default)]
     pub head_message: Option<String>,
@@ -53,6 +57,7 @@ impl State {
             reference: reference.into(),
             base: None,
             head: None,
+            stack: Vec::new(),
             head_message: None,
             head_author: None,
             head_merge: None,
@@ -64,6 +69,11 @@ impl State {
     /// 当前快照对应的提交：有未合入的提交时为它，否则为 base。
     pub fn current(&self) -> Result<Option<ObjectId>> {
         self.head.as_deref().or(self.base.as_deref()).map(parse_id).transpose()
+    }
+
+    /// The pending (committed, not landed) commits, oldest first.
+    pub fn pending(&self) -> Result<Vec<ObjectId>> {
+        self.stack.iter().chain(&self.head).map(|s| parse_id(s)).collect()
     }
 }
 
@@ -90,6 +100,10 @@ pub struct ConflictState {
     /// For a revert or cherry-pick: what it applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pick: Option<Pick>,
+    /// For a sync: the pending commits still to rebase after this one (their ids before the
+    /// rebase, oldest first), which the commit that finishes it goes on with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rest: Vec<String>,
 }
 
 /// A revert or cherry-pick of one commit (see [`crate::WorkingCopy::pick`]).

@@ -11,7 +11,7 @@
 - **提交不等于发布。**
   - `scn commit` 在服务端创建一个提交，它还不在任何分支上。
   - `scn land` 发布它，相当于 `git push`。分支已经前进时，服务端会 rebase 这个提交，并且只合入一次。
-- **只有一个待合入的提交。** 工作副本最多有一个已提交、未合入的提交，没有本地分支，也没有本地提交栈。
+- **待合入的提交可以叠起来。** 用 `scn commit` 做出、还没合入的提交一个接一个叠在一起，`scn land` 按顺序全部合入。没有本地分支：分支都在服务端（`scn switch -c NAME`）。
 - **只有一个 remote。** 一个工作副本只属于一个服务端的一个仓库，即它的 `origin`；`scn remote set-url` 可以换成新地址。
 
 ## 命令对照
@@ -24,12 +24,12 @@
 | `git status` | `scn status` | git 的长格式；`-s` 显示 `A ` / `M ` / `D `（所有改动都算已暂存），冲突是 `UU`。和 git 对比 `origin/main` 一样，会说明服务端的分支比工作副本多几个提交（`-sb`：`## main [ahead 1, behind 2]`）；这要问一次服务端，`--no-ahead-behind` 可以跳过 |
 | `git add`、`git rm`、`git mv` | 不需要 | 直接改文件 |
 | `git commit -m MSG`、`-am MSG` | `scn commit -m MSG`、`-am MSG` | 接受 `-a`，但没有作用。作者依次取 `--author`、`scn config`、git 的 `user.name` / `user.email` |
-| `git commit --amend` | `scn commit --amend` | 只能修改待合入的提交 |
-| `git reset --soft HEAD~1` | `scn uncommit` | 撤掉待合入的提交，保留它的改动 |
+| `git commit --amend` | `scn commit --amend` | 只修改最新的一个待合入提交 |
+| `git reset --soft HEAD~1` | `scn uncommit` | 撤掉最新的一个待合入提交，保留它的改动 |
 | `git restore [-s REV] PATH`、`git checkout [REV] -- PATH` | `scn restore [-s REV] PATH` | `.` 表示全部；新增的文件会保留（没有 `git clean`）；`--source REV` 从 REV 取文件，成为本地改动 |
 | `git remote -v`、`git remote set-url origin URL` | `scn remote -v`、`scn remote set-url URL` | 服务端的新地址，或有相同提交的另一个仓库（如 fork）；保存前会先检查 |
 | `git push` | `scn land` | 分支已经前进时由服务端 rebase |
-| `git pull --rebase` | `scn sync` | 移到分支最新提交，并 rebase 待合入的提交；没有单独的 `fetch` |
+| `git pull --rebase` | `scn sync` | 移到分支最新提交，并把待合入的提交逐个 rebase；没有单独的 `fetch` |
 | `git fetch` + `git log origin/main` | `scn log main`（或 `origin/main`）、`scn diff HEAD main` | 命令直接读服务端，不需要 fetch；工作副本保持不变 |
 | `git branch` | `scn branch`（或 `scn branch ls`） | |
 | `git branch NAME [REV]` | `scn branch NAME [REV]`（或 `scn branch create`） | 分支是服务端的 ref。名为 `ls`、`create` 或 `rm` 的分支要用 `create` 的写法 |
@@ -96,4 +96,4 @@ hint: `scn push` is a transitional git-style spelling; use `scn land` instead
 - **工作副本**：检出旧版本、`stash`、`clean`、交互式 rebase、部分提交（`add -p`）。
 - **查询**：附注标签、`grep`、`bisect`、`reflog`。
 - **协作**：`remote add`、`fetch`。git 客户端目前还不能直接访问 Scion 仓库，这是[路线图](../design/roadmap.md)里的 git 网关。
-- **rebase 冲突**：停在冲突上的 sync 没有 `--abort`。它会撤掉待合入的提交，改动作为本地改动留在新的最新提交之上。
+- **rebase 冲突**：停在冲突上的 sync 没有 `--abort`。停下的那个提交变成本地改动，留在新的最新提交（以及它之前已经 rebase 好的提交）之上；`scn commit` 完成它，并接着 rebase 后面的待合入提交。

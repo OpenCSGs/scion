@@ -175,7 +175,7 @@ enum Command {
     },
     /// Commit the local changes (not landed yet; see `scn land`).
     #[command(after_help = "Examples:\n  scn commit -m \"Fix the parser\"\n  \
-        scn commit --amend                 # fold new changes into the pending commit\n  \
+        scn commit --amend                 # fold new changes into the newest pending commit\n  \
         scn commit                         # finish a sync or merge that stopped on conflicts")]
     Commit {
         /// Required, except with --amend (keeps the old message) or when finishing a sync or
@@ -183,7 +183,7 @@ enum Command {
         /// separate paragraphs, as in git.
         #[arg(short, long)]
         message: Vec<String>,
-        /// Replace the pending (not yet landed) commit, adding the current local changes.
+        /// Replace the newest pending (not yet landed) commit, adding the current local changes.
         #[arg(long)]
         amend: bool,
         /// Accepted for git compatibility (`-am`); scn always commits every local change.
@@ -386,7 +386,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Drop the pending (not yet landed) commit; its changes stay as uncommitted local changes.
+    /// Drop the newest pending (not yet landed) commit; its changes stay as uncommitted local changes.
     Uncommit,
     /// Discard local changes to tracked files under PATHS (`.` for everything). Added files are kept.
     Restore {
@@ -422,9 +422,9 @@ enum Command {
         #[arg(long)]
         global: bool,
     },
-    /// Land the pending commit on the branch.
+    /// Land the pending commits on the branch.
     Land,
-    /// Update to the branch tip, rebasing a pending commit onto it.
+    /// Update to the branch tip, rebasing the pending commits onto it one by one.
     Sync,
     /// Print a file; no working copy needed.
     #[command(after_help = "Examples:\n  scn cat README.md\n  scn cat main~1:src/lib.rs\n  \
@@ -1710,13 +1710,13 @@ Work on a change:
   status     Show local changes
   diff       Show changes: local, of a commit, or between two revisions
   commit     Commit the local changes (published by land)
-  uncommit   Drop the pending commit, keeping its changes
+  uncommit   Drop the newest pending commit, keeping its changes
   restore    Discard local changes to files
   resolve    Mark conflicts resolved, or take one side
 
 Share and update:
-  land       Land the pending commit on the branch (git push)
-  sync       Update to the branch tip, rebasing a pending commit (git pull)
+  land       Land the pending commits on the branch (git push)
+  sync       Update to the branch tip, rebasing pending commits (git pull)
   remote     Show or change the working copy's server and repository
 
 Branches and history:

@@ -23,6 +23,10 @@ pub enum Error {
     /// `switch` / `merge` while a commit is pending.
     #[error("you have a pending commit; land it or `scn uncommit` it first")]
     PendingCommit,
+    /// A new commit on top of a pending merge commit: rebasing commits one by one would lose
+    /// the merge's second parent.
+    #[error("your pending commit is a merge; land it first, or add these changes to it with `scn commit --amend`")]
+    OnPendingMerge,
     /// `merge` into a branch with no commits.
     #[error("{0} has no commits yet; land something on it first")]
     EmptyBranch(String),

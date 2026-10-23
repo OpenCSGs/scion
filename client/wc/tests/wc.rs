@@ -7,7 +7,9 @@ use scion_api::{App, ServerConfig, serve};
 use scion_client::Client;
 use scion_proto::v1::ErrorReason;
 use scion_store::{MemStore, MetaStore};
-use scion_wc::{ConflictKind, Error, MergeOutcome, PickKind, PickOutcome, Sparse, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{
+    ConflictKind, Error, MergeOutcome, PickKind, PickOutcome, Side, Sparse, Status, SyncOutcome, WorkingCopy,
+};
 use tokio::net::TcpListener;
 
 struct Server {
@@ -1296,6 +1298,119 @@ async fn pick_reverts_and_repeats_a_commit() {
         }
         other => panic!("expected a refusal, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn several_pending_commits_stack_and_rebase_one_by_one() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (a_dir, b_dir) = (tmp.path().join("a"), tmp.path().join("b"));
+    let mut a = WorkingCopy::clone(&c, &srv.url, "mono", "main", &a_dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&a_dir, "x.txt", "x\n");
+    write(&a_dir, "y.txt", "y\n");
+    a.commit(&c, "base", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    let mut b = WorkingCopy::clone(&c, &srv.url, "mono", "main", &b_dir, Sparse::full())
+        .await
+        .expect("clone");
+    let messages = |a: &WorkingCopy| {
+        let c = c.clone();
+        let pending = a.state().pending().expect("pending");
+        async move {
+            let mut out = Vec::new();
+            for id in pending {
+                let e = c
+                    .log(&id.to_string(), None, 1, None)
+                    .await
+                    .expect("log")
+                    .entries
+                    .remove(0);
+                out.push(e.message);
+            }
+            out
+        }
+    };
+
+    // Two commits stack; uncommit and amend touch only the newest
+    write(&a_dir, "x.txt", "x1\n");
+    let one = a.commit(&c, "one", None).await.expect("commit").expect("changes").id;
+    write(&a_dir, "y.txt", "y1\n");
+    a.commit(&c, "two", None).await.expect("commit");
+    assert_eq!(messages(&a).await, ["one", "two"]);
+    a.uncommit(&c).await.expect("uncommit");
+    assert_eq!(a.state().pending().expect("pending"), [one]);
+    assert_eq!(a.status().expect("status").modified, ["y.txt"]);
+    write(&a_dir, "y.txt", "y2\n");
+    a.commit(&c, "two", None).await.expect("commit");
+    write(&a_dir, "y.txt", "y3\n");
+    a.amend(&c, Some("two, amended"), None).await.expect("amend");
+    assert_eq!(messages(&a).await, ["one", "two, amended"]);
+
+    // Upstream moves elsewhere: each commit is rebased and keeps its message
+    write(&b_dir, "z.txt", "z\n");
+    b.commit(&c, "z", None).await.expect("commit");
+    b.land(&c).await.expect("land");
+    assert!(matches!(a.sync(&c).await, Ok(SyncOutcome::Rebased { .. })));
+    assert_eq!(messages(&a).await, ["one", "two, amended"]);
+    assert_eq!(read(&a_dir, "z.txt"), "z\n");
+
+    // Upstream changes the first commit's line: the sync stops there, and the commit that
+    // finishes it goes on with the second
+    b.sync(&c).await.expect("sync");
+    write(&b_dir, "x.txt", "bob\n");
+    b.commit(&c, "bob", None).await.expect("commit");
+    b.land(&c).await.expect("land");
+    let err = a.sync(&c).await.expect_err("conflict");
+    assert!(
+        matches!(&err, Error::Conflict(p) if p == &vec!["x.txt".to_string()]),
+        "{err:?}"
+    );
+    assert!(a.state().pending().expect("pending").is_empty());
+    assert_eq!(a.state().conflict.as_ref().expect("conflict").rest.len(), 1);
+    assert_eq!(read(&a_dir, "y.txt"), "y\n", "the second commit waits");
+    a.resolve(&c, &["x.txt".into()], Some(Side::Ours), false)
+        .await
+        .expect("resolve");
+    a.commit(&c, "", None).await.expect("commit");
+    assert_eq!(messages(&a).await, ["one", "two, amended"]);
+    assert_eq!(
+        (read(&a_dir, "x.txt"), read(&a_dir, "y.txt")),
+        ("x1\n".into(), "y3\n".into())
+    );
+    assert!(a.state().conflict.is_none());
+
+    // A commit whose change is upstream already is dropped
+    b.sync(&c).await.expect("sync");
+    write(&b_dir, "y.txt", "y3\n");
+    b.commit(&c, "same", None).await.expect("commit");
+    b.land(&c).await.expect("land");
+    a.sync(&c).await.expect("sync");
+    assert_eq!(messages(&a).await, ["one"]);
+
+    // The stack lands at once
+    write(&a_dir, "w.txt", "w\n");
+    a.commit(&c, "three", None).await.expect("commit");
+    let landed = a.land(&c).await.expect("land");
+    assert_eq!(landed.landed.len(), 2);
+    assert!(a.state().pending().expect("pending").is_empty());
+
+    // Nothing goes on top of a pending merge
+    a.switch(&c, "feat", true).await.expect("feat");
+    write(&a_dir, "f.txt", "f\n");
+    a.commit(&c, "f", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    a.switch(&c, "main", false).await.expect("main");
+    write(&a_dir, "m.txt", "m\n");
+    a.commit(&c, "m", None).await.expect("commit");
+    a.land(&c).await.expect("land");
+    a.merge(&c, "feat", None, None).await.expect("merge");
+    write(&a_dir, "after.txt", "after\n");
+    assert!(matches!(a.commit(&c, "on top", None).await, Err(Error::OnPendingMerge)));
+    let o = a.pick(&c, PickKind::Revert, one, None, "r".into(), None).await;
+    assert!(matches!(o, Err(Error::OnPendingMerge)), "{o:?}");
 }
 
 #[cfg(unix)]

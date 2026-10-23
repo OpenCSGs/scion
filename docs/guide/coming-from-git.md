@@ -11,7 +11,7 @@ English | [简体中文](coming-from-git.zh-CN.md)
 - **Committing is not publishing.**
   - `scn commit` creates a commit on the server that is not on any branch yet.
   - `scn land` publishes it, like `git push`. If the branch moved, the server rebases the commit, and it lands exactly once.
-- **One pending commit.** A working copy has at most one commit that is committed but not landed. There are no local branches or local commit stacks.
+- **Pending commits stack.** Commits made with `scn commit` and not landed yet pile up on one another, and `scn land` lands them all, in order. There are no local branches: a branch lives on the server (`scn switch -c NAME`).
 - **One remote.** A working copy belongs to one server and one repository, its `origin`; `scn remote set-url` points it at a new address.
 
 ## Command map
@@ -24,12 +24,12 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git status` | `scn status` | git's long format; `-s` gives `A ` / `M ` / `D ` (every change is staged) and `UU` for conflicts. Like git against `origin/main`, it says how many commits the branch on the server has that the working copy lacks (`-sb`: `## main [ahead 1, behind 2]`); that asks the server, which `--no-ahead-behind` skips |
 | `git add`, `git rm`, `git mv` | not needed | Just change the files |
 | `git commit -m MSG`, `-am MSG` | `scn commit -m MSG`, `-am MSG` | `-a` is accepted and changes nothing. The author comes from `--author`, then `scn config`, then git's `user.name` / `user.email` |
-| `git commit --amend` | `scn commit --amend` | Only the pending commit |
-| `git reset --soft HEAD~1` | `scn uncommit` | Drops the pending commit and keeps its changes |
+| `git commit --amend` | `scn commit --amend` | Only the newest pending commit |
+| `git reset --soft HEAD~1` | `scn uncommit` | Drops the newest pending commit and keeps its changes |
 | `git restore [-s REV] PATH`, `git checkout [REV] -- PATH` | `scn restore [-s REV] PATH` | `.` for everything; added files are kept (no `git clean`); `--source REV` takes the files from REV as local changes |
 | `git remote -v`, `git remote set-url origin URL` | `scn remote -v`, `scn remote set-url URL` | The server's new address, or another repository with the same commits (a fork); checked before it is saved |
 | `git push` | `scn land` | The server rebases when the branch moved |
-| `git pull --rebase` | `scn sync` | Moves to the branch tip and rebases the pending commit; no separate `fetch` |
+| `git pull --rebase` | `scn sync` | Moves to the branch tip and rebases the pending commits one by one; no separate `fetch` |
 | `git fetch` + `git log origin/main` | `scn log main` (or `origin/main`), `scn diff HEAD main` | Commands read the server, so there is nothing to fetch; the working copy stays as it is |
 | `git branch` | `scn branch` (or `scn branch ls`) | |
 | `git branch NAME [REV]` | `scn branch NAME [REV]` (or `scn branch create`) | Branches are server refs. A branch named `ls`, `create` or `rm` needs the `create` form |
@@ -96,4 +96,4 @@ Suffixes combine as in git, for example `main~2^2`. A branch whose name literall
 - **Working copy**: checking out an old revision, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
 - **Queries**: annotated tags, `grep`, `bisect`, `reflog`.
 - **Collaboration**: `remote add`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
-- **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. It drops the pending commit, and its changes stay as local changes on top of the new tip.
+- **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. The commit it stopped on becomes local changes on top of the new tip (and the commits rebased before it); `scn commit` finishes it and goes on with the pending commits after it.

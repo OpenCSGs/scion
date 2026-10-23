@@ -665,11 +665,17 @@ impl WorkingCopy {
                 return Err(Error::Unresolved(c.paths.keys().cloned().collect()));
             }
         }
+        if merge.is_none() && self.state.head_merge.is_some() {
+            return Err(Error::OnPendingMerge);
+        }
         let (_, changes) = self.changes()?;
         if changes.is_empty() {
             if conflict.is_some() {
                 self.state.conflict = None;
                 self.paths.save_state(&self.state)?;
+                // A sync that stopped on a commit now left out goes on with the rest
+                self.continue_sync(client, conflict.map(|c| c.rest).unwrap_or_default())
+                    .await?;
             }
             return Ok(None);
         }
@@ -749,13 +755,41 @@ impl WorkingCopy {
         }
         // 先写 dirstate 再写 state：崩溃时最多「已提交的改动在本地显示为未提交」，重新提交得到同一个 id
         self.paths.save_dirstate(&mut dirstate)?;
-        self.state.head = Some(created.id.to_string());
+        self.push_head(created.id);
         self.state.head_message = Some(message.to_owned());
         self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
         self.state.head_merge = merge.map(|m| m.to_string());
         self.state.conflict = None;
         self.paths.save_state(&self.state)?;
+        if let Some(c) = conflict {
+            self.continue_sync(client, c.rest).await?;
+        }
         Ok(Some((created, stat)))
+    }
+
+    /// Makes `id` the newest pending commit, on top of the others.
+    fn push_head(&mut self, id: ObjectId) {
+        if let Some(h) = self.state.head.replace(id.to_string()) {
+            self.state.stack.push(h);
+        }
+    }
+
+    /// After the commit that finished a sync stopped on conflicts: rebases the pending
+    /// commits it had not got to yet onto it.
+    async fn continue_sync(&mut self, client: &Client, rest: Vec<String>) -> Result<()> {
+        if rest.is_empty() {
+            return Ok(());
+        }
+        let rest = rest
+            .iter()
+            .map(|s| s.parse().map_err(|e| Error::Corrupt(format!("conflict rest: {e}"))))
+            .collect::<Result<Vec<ObjectId>>>()?;
+        let (Some(base), Some(at)) = (self.state.base.clone(), self.state.current()?) else {
+            return Err(Error::Corrupt("sync to continue has no base".into()));
+        };
+        let base = base.parse().map_err(|e| Error::Corrupt(format!("base: {e}")))?;
+        let made = self.state.pending()?;
+        self.replay(client, rest, base, at, made, at).await.map(|_| ())
     }
 
     /// Replaces the pending commit with one that also includes the current local changes, with
@@ -801,29 +835,44 @@ impl WorkingCopy {
                 .map_err(|e| Error::Corrupt(format!("head: {e}")))?,
             None => return Err(Error::NoPendingCommit),
         };
+        let parent = self.state.stack.last().or(self.state.base.as_ref()).cloned();
         let sparse = self.sparse()?;
-        let head_files = flatten(client, client.root_tree(&head.to_string()).await?, &sparse).await?;
-        let base_files = match &self.state.base {
-            Some(b) => flatten(client, client.root_tree(b).await?, &sparse).await?,
-            None => BTreeMap::new(),
-        };
-        // The snapshot goes back to base; the files on disk stay as they are. Records of changed
-        // paths get mtime 0 so the next status re-hashes them and reports them as modified.
+        // The snapshot goes back to the parent; the files on disk stay as they are. Records of
+        // changed paths get mtime 0 so the next status re-hashes them and reports them as modified.
         let mut dirstate = self.paths.load_dirstate()?;
-        for (path, change) in diff(&head_files, &base_files) {
-            match change {
+        for c in client.diff(parent.as_deref(), &head.to_string(), None).await? {
+            if !sparse.includes_file(&c.path) {
+                continue;
+            }
+            match tree_file(&c.old) {
                 Some(f) => {
-                    dirstate.files.insert(path, record(f.mode, f.id, 0, 0));
+                    dirstate.files.insert(c.path, record(f.mode, f.id, 0, 0));
                 }
                 None => {
-                    dirstate.files.remove(&path);
+                    dirstate.files.remove(&c.path);
                 }
             }
         }
         // dirstate first: a crash in between leaves the changes visible as uncommitted on top of
         // the old head, never hidden
         self.paths.save_dirstate(&mut dirstate)?;
-        self.clear_head();
+        match self.state.stack.pop() {
+            Some(next) => {
+                // The commit under it becomes the newest; amend reuses its message and author
+                let e = client
+                    .log(&next, None, 1, None)
+                    .await?
+                    .entries
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| Error::Corrupt(format!("pending commit {next} has no history")))?;
+                self.state.head = Some(next);
+                self.state.head_message = Some(e.message);
+                self.state.head_author = Some((e.author.name, e.author.email));
+                self.state.head_merge = None;
+            }
+            None => self.clear_head(),
+        }
         self.paths.save_state(&self.state)?;
         Ok(head)
     }
@@ -955,8 +1004,10 @@ impl WorkingCopy {
         Ok(landed)
     }
 
+    /// Forgets every pending commit.
     fn clear_head(&mut self) {
         self.state.head = None;
+        self.state.stack.clear();
         self.state.head_message = None;
         self.state.head_author = None;
         self.state.head_merge = None;
@@ -1266,6 +1317,7 @@ impl WorkingCopy {
                 merge: Some(theirs.to_string()),
                 created,
                 pick: None,
+                rest: Vec::new(),
             });
             self.paths.save_state(&self.state)?;
             return Err(Error::Conflict(paths));
@@ -1294,44 +1346,14 @@ impl WorkingCopy {
     async fn commit_results(
         &self,
         client: &Client,
-        mut builder: ChangesetBuilder<'_>,
+        builder: ChangesetBuilder<'_>,
         changes: BTreeMap<String, Final>,
         sparse: &Sparse,
     ) -> Result<(CreatedChangeset, usize, usize)> {
-        let taken: Vec<(String, TreeFile)> = changes
-            .iter()
-            .filter_map(|(p, f)| match f {
-                Final::Version(Some(v)) => Some((p.clone(), *v)),
-                _ => None,
-            })
-            .collect();
-        for part in taken.chunks(FETCH_BATCH) {
-            let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
-            for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
-                builder = builder.put_with_mode(path, f.mode.to_entry(), data);
-            }
-        }
-        let mut local = BTreeMap::new();
-        for (path, f) in changes {
-            let file = match f {
-                Final::Version(v) => {
-                    if v.is_none() {
-                        builder = builder.delete(&path);
-                    }
-                    v
-                }
-                Final::Data(v, data) => {
-                    builder = builder.put_with_mode(&path, v.mode.to_entry(), data);
-                    Some(v)
-                }
-                Final::Conflict { .. } => unreachable!("callers return conflicts first"),
-            };
-            if sparse.includes_file(&path) {
-                local.insert(path, file);
-            }
-        }
+        let (builder, files) = add_results(client, builder, changes).await?;
         let created = builder.create().await?;
-
+        let local: BTreeMap<String, Option<TreeFile>> =
+            files.into_iter().filter(|(p, _)| sparse.includes_file(p)).collect();
         let mut dirstate = self.paths.load_dirstate()?;
         let (written, removed) = self.apply(client, &mut dirstate, &local).await?;
         self.paths.save_dirstate(&mut dirstate)?;
@@ -1340,8 +1362,8 @@ impl WorkingCopy {
 
     /// `scn revert` / `scn cherry-pick`: makes a pending commit on the current snapshot that
     /// undoes (`Revert`) or repeats (`CherryPick`) what `commit` changed relative to `parent`
-    /// (None for a root commit). Needs no pending commit and a clean tree, and the paths the
-    /// commit changed inside the sparse checkout. Only those paths are merged, three-way, so
+    /// (None for a root commit), on top of any pending commits. Needs a clean tree, and the
+    /// paths the commit changed inside the sparse checkout. Only those paths are merged, three-way, so
     /// later changes to them are kept (or conflict, like `merge`: the working tree then gets
     /// the results, text conflicts with markers, for `scn resolve` and `scn commit`).
     pub async fn pick(
@@ -1355,8 +1377,8 @@ impl WorkingCopy {
     ) -> Result<PickOutcome> {
         let _lock = self.paths.lock()?;
         self.check_no_conflict()?;
-        if self.state.head.is_some() {
-            return Err(Error::PendingCommit);
+        if self.state.head_merge.is_some() {
+            return Err(Error::OnPendingMerge);
         }
         if !self.changes()?.0.is_clean() {
             return Err(Error::Dirty);
@@ -1376,14 +1398,7 @@ impl WorkingCopy {
         if !outside.is_empty() {
             return Err(Error::PickOutsideSparse(outside));
         }
-        let file = |e: &Option<DirEntry>| {
-            e.as_ref().and_then(|e| {
-                Some(TreeFile {
-                    mode: Mode::from_entry(e.mode)?,
-                    id: e.id,
-                })
-            })
-        };
+        let file = tree_file;
         let (mut before, mut after) = (BTreeMap::new(), BTreeMap::new());
         for c in &changed {
             if let Some(f) = file(&c.old) {
@@ -1422,6 +1437,7 @@ impl WorkingCopy {
                     kind,
                     commit: commit.to_string(),
                 }),
+                rest: Vec::new(),
             });
             self.paths.save_state(&self.state)?;
             return Err(Error::Conflict(paths));
@@ -1431,7 +1447,7 @@ impl WorkingCopy {
             builder = builder.author(name.clone(), email.clone());
         }
         let (created, written, removed) = self.commit_results(client, builder, changes, &sparse).await?;
-        self.state.head = Some(created.id.to_string());
+        self.push_head(created.id);
         self.state.head_message = Some(message);
         self.state.head_author = author;
         self.state.head_merge = None;
@@ -1470,7 +1486,11 @@ impl WorkingCopy {
             if let Some(theirs) = self.head_merge()? {
                 return self.redo_merge(client, tip.changeset, tip.root_tree, theirs).await;
             }
-            return self.rebase(client, tip.changeset, tip.root_tree).await;
+            let local = self.state.current()?.ok_or(Error::NothingToLand)?;
+            let commits = self.state.pending()?;
+            return self
+                .replay(client, commits, tip.changeset, tip.changeset, Vec::new(), local)
+                .await;
         }
         let from = self.state.current()?;
         if from == Some(tip.changeset) {
@@ -1596,136 +1616,117 @@ impl WorkingCopy {
         }
     }
 
-    async fn rebase(&mut self, client: &Client, onto: ObjectId, onto_root: ObjectId) -> Result<SyncOutcome> {
-        // 两边都只比较稀疏范围内的文件：dirstate 里只有这些，范围外的不能当作被删除
+    /// Rebases pending `commits` (as they were made, oldest first) one by one onto `onto`,
+    /// after the already rebased `made`, as `git rebase` does: each is merged three-way with
+    /// its parent as the base, over the paths it or `onto` changed (line level for text). A
+    /// commit whose changes are all upstream already is dropped. `base` becomes the working
+    /// copy's base and `local` is the commit whose files the working tree holds.
+    ///
+    /// On a conflict the working tree moves to the last commit made, with the conflicting
+    /// commit's merged files (text conflicts with markers) as local changes; the commits after
+    /// it wait in [`ConflictState::rest`] for the `scn commit` that finishes it.
+    async fn replay(
+        &mut self,
+        client: &Client,
+        commits: Vec<ObjectId>,
+        base: ObjectId,
+        onto: ObjectId,
+        mut made: Vec<ObjectId>,
+        local: ObjectId,
+    ) -> Result<SyncOutcome> {
         let sparse = self.sparse()?;
-        let base_files = match &self.state.base {
-            Some(b) => flatten(client, client.root_tree(b).await?, &sparse).await?,
-            None => BTreeMap::new(),
-        };
-        let mut dirstate = self.paths.load_dirstate()?;
-        let ours = snapshot(&dirstate)?;
-        let theirs = flatten(client, onto_root, &sparse).await?;
-        let paths: std::collections::BTreeSet<String> = diff(&base_files, &ours)
-            .into_keys()
-            .chain(diff(&base_files, &theirs).into_keys())
-            .collect();
-        let finals = three_way(client, paths.iter().cloned(), &base_files, &ours, &theirs).await?;
-        let sides = sides_of(&finals);
-        if !sides.is_empty() {
-            // Stop: the working tree gets the merged result (conflicts with markers) as
-            // uncommitted changes on top of `onto`; `scn resolve` then `scn commit` finish it
-            let changes: BTreeMap<String, Final> = finals
+        let mut tip = onto;
+        for (i, commit) in commits.iter().enumerate() {
+            let e = client
+                .log(&commit.to_string(), None, 1, None)
+                .await?
+                .entries
                 .into_iter()
-                .filter(|(p, f)| *f != Final::Version(ours.get(p).copied()))
+                .next()
+                .ok_or_else(|| Error::Corrupt(format!("pending commit {commit} has no history")))?;
+            let (b, o, t, paths) = three_sides(client, e.parents.first().copied(), *commit, tip).await?;
+            let changes: BTreeMap<String, Final> = three_way(client, paths, &b, &o, &t)
+                .await?
+                .into_iter()
+                .filter(|(p, f)| *f != Final::Version(t.get(p).copied()))
                 .collect();
-            self.write_results(client, &changes, &ours).await?;
-            for p in &paths {
-                match theirs.get(p) {
-                    Some(f) => {
-                        dirstate.files.insert(p.clone(), record(f.mode, f.id, 0, 0));
-                    }
-                    None => {
-                        dirstate.files.remove(p);
-                    }
+            let sides = sides_of(&changes);
+            if !sides.is_empty() {
+                // Finished from local files, so every change has to be inside the checkout
+                if changes.keys().any(|p| !sparse.includes_file(p)) {
+                    return Err(Error::MergeConflicts(
+                        changes
+                            .iter()
+                            .filter_map(|(path, f)| match f {
+                                Final::Conflict { kind, .. } => Some(MergeConflict {
+                                    path: path.clone(),
+                                    kind: *kind,
+                                }),
+                                _ => None,
+                            })
+                            .collect(),
+                    ));
                 }
+                let mut dirstate = self.paths.load_dirstate()?;
+                self.apply(client, &mut dirstate, &tree_delta(client, local, tip, &sparse).await?)
+                    .await?;
+                self.paths.save_dirstate(&mut dirstate)?;
+                self.write_results(client, &changes, &t).await?;
+                let conflicted: Vec<String> = sides.keys().cloned().collect();
+                self.set_pending(base, &made);
+                self.state.conflict = Some(ConflictState {
+                    paths: sides,
+                    message: Some(e.message),
+                    author: Some((e.author.name, e.author.email)),
+                    merge: None,
+                    created: Vec::new(),
+                    pick: None,
+                    rest: commits[i + 1..].iter().map(ToString::to_string).collect(),
+                });
+                self.paths.save_state(&self.state)?;
+                return Err(Error::Conflict(conflicted));
             }
-            self.paths.save_dirstate(&mut dirstate)?;
-            let conflicted: Vec<String> = sides.keys().cloned().collect();
-            self.state.conflict = Some(ConflictState {
-                paths: sides,
-                message: self.state.head_message.clone(),
-                author: self.state.head_author.clone(),
-                merge: None,
-                created: Vec::new(),
-                pick: None,
-            });
-            self.clear_head();
-            self.state.base = Some(onto.to_string());
-            self.paths.save_state(&self.state)?;
-            return Err(Error::Conflict(conflicted));
-        }
-
-        // The rebased commit: every result that differs from `onto`
-        let mut delta: BTreeMap<String, Option<TreeFile>> = BTreeMap::new();
-        let mut builder = client
-            .changeset(Some(onto))
-            .message(self.state.head_message.clone().unwrap_or_default());
-        if let Some((name, email)) = &self.state.head_author {
-            builder = builder.author(name.clone(), email.clone());
-        }
-        let mut fetch = Vec::new();
-        for (path, f) in &finals {
-            match f {
-                Final::Version(v) if *v == theirs.get(path).copied() => {}
-                Final::Version(None) => {
-                    builder = builder.delete(path);
-                    delta.insert(path.clone(), None);
-                }
-                Final::Version(Some(v)) => {
-                    if ours.get(path) == Some(v) {
-                        // Our version: the local file has it (the tree is clean)
-                        builder = builder.put_with_mode(
-                            path,
-                            v.mode.to_entry(),
-                            fsutil::read_content(self.root(), path, v.mode)?,
-                        );
-                    } else {
-                        fetch.push((path.clone(), *v));
-                    }
-                    delta.insert(path.clone(), Some(*v));
-                }
-                Final::Data(v, data) => {
-                    builder = builder.put_with_mode(path, v.mode.to_entry(), data.clone());
-                    delta.insert(path.clone(), Some(*v));
-                }
-                Final::Conflict { .. } => unreachable!("conflicts handled above"),
+            if changes.is_empty() {
+                continue;
             }
+            let builder = client
+                .changeset(Some(tip))
+                .message(e.message.clone())
+                .author_signature(e.author.clone());
+            let (builder, _) = add_results(client, builder, changes).await?;
+            tip = builder.create().await?.id;
+            made.push(tip);
         }
-        for part in fetch.chunks(FETCH_BATCH) {
-            let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
-            for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
-                builder = builder.put_with_mode(path, f.mode.to_entry(), data);
-            }
-        }
-        let new_head = if delta.is_empty() {
-            None
-        } else {
-            Some(builder.create().await?.id)
-        };
-        let mut target = theirs;
-        for (path, v) in delta {
-            match v {
-                Some(v) => {
-                    target.insert(path, v);
-                }
-                None => {
-                    target.remove(&path);
-                }
-            }
-        }
-        let (written, removed) = self.apply(client, &mut dirstate, &diff(&ours, &target)).await?;
+        let mut dirstate = self.paths.load_dirstate()?;
+        let (written, removed) = self
+            .apply(client, &mut dirstate, &tree_delta(client, local, tip, &sparse).await?)
+            .await?;
         self.paths.save_dirstate(&mut dirstate)?;
-        self.state.base = Some(onto.to_string());
-        match new_head {
-            Some(h) => self.state.head = Some(h.to_string()),
-            None => self.clear_head(),
-        }
+        self.set_pending(base, &made);
         self.paths.save_state(&self.state)?;
-        Ok(match new_head {
-            Some(head) => SyncOutcome::Rebased {
-                onto,
+        Ok(match made.last() {
+            Some(&head) => SyncOutcome::Rebased {
+                onto: base,
                 head,
                 written,
                 removed,
             },
             None => SyncOutcome::Updated {
                 from: None,
-                to: onto,
+                to: base,
                 written,
                 removed,
             },
         })
+    }
+
+    /// The working copy is on `base` with the pending commits `made` (oldest first).
+    fn set_pending(&mut self, base: ObjectId, made: &[ObjectId]) {
+        self.clear_head();
+        self.state.base = Some(base.to_string());
+        for id in made {
+            self.push_head(*id);
+        }
     }
 }
 
@@ -1757,6 +1758,124 @@ fn diff(from: &BTreeMap<String, TreeFile>, to: &BTreeMap<String, TreeFile>) -> B
         out.insert(p.clone(), None);
     }
     out
+}
+
+/// A directory entry as a file (None for no entry, or a directory).
+fn tree_file(e: &Option<DirEntry>) -> Option<TreeFile> {
+    e.as_ref().and_then(|e| {
+        Some(TreeFile {
+            mode: Mode::from_entry(e.mode)?,
+            id: e.id,
+        })
+    })
+}
+
+type Files = BTreeMap<String, TreeFile>;
+
+/// For a three-way merge of `ours` and `theirs` against `base`: the three versions of every
+/// path that either side changed, and those paths, from two diffs instead of tree walks.
+async fn three_sides(
+    client: &Client,
+    base: Option<ObjectId>,
+    ours: ObjectId,
+    theirs: ObjectId,
+) -> Result<(Files, Files, Files, Vec<String>)> {
+    let base = base.map(|b| b.to_string());
+    let (mut b, mut o, mut t) = (Files::new(), Files::new(), Files::new());
+    let mine = client.diff(base.as_deref(), &ours.to_string(), None).await?;
+    let other = client.diff(base.as_deref(), &theirs.to_string(), None).await?;
+    let (mut in_mine, mut in_other) = (std::collections::BTreeSet::new(), std::collections::BTreeSet::new());
+    for c in &mine {
+        in_mine.insert(c.path.clone());
+        if let Some(f) = tree_file(&c.old) {
+            b.insert(c.path.clone(), f);
+        }
+        if let Some(f) = tree_file(&c.new) {
+            o.insert(c.path.clone(), f);
+        }
+    }
+    for c in &other {
+        in_other.insert(c.path.clone());
+        if let Some(f) = tree_file(&c.old) {
+            b.insert(c.path.clone(), f);
+        }
+        if let Some(f) = tree_file(&c.new) {
+            t.insert(c.path.clone(), f);
+        }
+    }
+    // A path only one side changed is the base's on the other
+    for (path, f) in &b {
+        if !in_mine.contains(path) {
+            o.insert(path.clone(), *f);
+        }
+        if !in_other.contains(path) {
+            t.insert(path.clone(), *f);
+        }
+    }
+    let paths = in_mine.union(&in_other).cloned().collect();
+    Ok((b, o, t, paths))
+}
+
+/// The changes from commit `from` to commit `to` inside the sparse checkout, for [`WorkingCopy::apply`].
+async fn tree_delta(
+    client: &Client,
+    from: ObjectId,
+    to: ObjectId,
+    sparse: &Sparse,
+) -> Result<BTreeMap<String, Option<TreeFile>>> {
+    if from == to {
+        return Ok(BTreeMap::new());
+    }
+    Ok(client
+        .diff(Some(&from.to_string()), &to.to_string(), None)
+        .await?
+        .into_iter()
+        .filter(|c| sparse.includes_file(&c.path))
+        .map(|c| {
+            let f = tree_file(&c.new);
+            (c.path, f)
+        })
+        .collect())
+}
+
+/// Adds merge results without conflicts to a commit, fetching the versions it takes from the
+/// server. Returns the builder and each path's new file (None: deleted).
+async fn add_results<'a>(
+    client: &Client,
+    mut builder: ChangesetBuilder<'a>,
+    changes: BTreeMap<String, Final>,
+) -> Result<(ChangesetBuilder<'a>, BTreeMap<String, Option<TreeFile>>)> {
+    let taken: Vec<(String, TreeFile)> = changes
+        .iter()
+        .filter_map(|(p, f)| match f {
+            Final::Version(Some(v)) => Some((p.clone(), *v)),
+            _ => None,
+        })
+        .collect();
+    for part in taken.chunks(FETCH_BATCH) {
+        let ids: Vec<ObjectId> = part.iter().map(|(_, f)| f.id).collect();
+        for ((path, f), data) in part.iter().zip(client.get_objects(&ids).await?) {
+            builder = builder.put_with_mode(path, f.mode.to_entry(), data);
+        }
+    }
+    let mut files = BTreeMap::new();
+    for (path, f) in changes {
+        let file = match f {
+            Final::Version(v) => {
+                if v.is_none() {
+                    builder = builder.delete(&path);
+                }
+                v
+            }
+            Final::Data(v, data) => {
+                builder = builder.put_with_mode(&path, v.mode.to_entry(), data);
+                Some(v)
+            }
+            Final::Conflict { .. } => unreachable!("callers return conflicts first"),
+        };
+        files.insert(path, file);
+    }
+    Ok((builder, files))
 }
 
 fn record(mode: Mode, id: ObjectId, size: u64, mtime_ns: u64) -> FileRecord {

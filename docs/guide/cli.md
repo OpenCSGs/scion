@@ -31,10 +31,11 @@ echo 'target/' > .gitignore         # .gitignore and .scionignore are honored (g
 scn status                          # git's long format, and how far main on the server has moved; `scn status -s`: A  .gitignore, A  README.md
 scn commit -m "add readme"          # or --author "Ada <ada@example.com>"
 scn restore src/main.rs             # discard local changes to tracked files (`.` for all); added files are kept
-scn commit --amend                  # fold more local changes into the pending commit (keeps message and author)
-scn uncommit                        # drop the pending commit, keep its changes as local changes
+scn commit -m "add tests"           # another commit on top: pending commits stack, and `scn land` lands them all
+scn commit --amend                  # fold more local changes into the newest pending commit (keeps message and author)
+scn uncommit                        # drop the newest pending commit, keep its changes as local changes
 scn land                            # land on main; if main moved, the server rebases (three-way merge)
-scn sync                            # pull others' changes; rebases a pending commit (three-way, line level)
+scn sync                            # pull others' changes; rebases the pending commits one by one (three-way, line level)
 scn tag v1.0                        # tag the current commit; `scn tag` lists, `scn log v1.0` uses it
 scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
 scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`

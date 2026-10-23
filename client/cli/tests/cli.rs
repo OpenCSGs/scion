@@ -364,11 +364,18 @@ async fn revert_undoes_a_landed_commit() {
             "{}",
             text(&out)
         );
-        // A dirty tree, or a pending commit, is refused
+        // A dirty tree is refused; a pending commit gets the revert on top
         std::fs::write(wc.join("g.txt"), "g").expect("write");
         assert_eq!(run(&["revert", &last]).status.code(), Some(1));
         json_of(&run(&["commit", "-m", "g", "--json"]));
-        assert!(text(&run(&["revert", &last])).contains("pending commit"));
+        json_of(&run(&["revert", &last, "--json"]));
+        assert_eq!(text(&scn_in(&wc, &["status", "-sb"])), "## main [ahead 2]\n");
+        let v = json_of(&scn_in(&wc, &["status", "--json"]));
+        assert_eq!(v["ahead"], 2);
+        // uncommit drops only the revert
+        json_of(&scn_in(&wc, &["uncommit", "--json"]));
+        json_of(&scn_in(&wc, &["restore", ".", "--json"]));
+        assert_eq!(text(&scn_in(&wc, &["status", "-sb"])), "## main [ahead 1]\n");
         json_of(&scn_in(&wc, &["land", "--json"]));
 
         // The last line changed again since: reverting `last` conflicts
@@ -515,6 +522,80 @@ async fn cherry_pick_applies_a_commit_from_another_branch() {
         json_of(&run(&["cherry-pick", "--abort", "--json"]));
         assert_eq!(read(), "1\n2\nTHREE\n");
         assert!(text(&run(&["cherry-pick", "--abort"])).contains("no cherry-pick is in progress"));
+    })
+    .await
+    .expect("test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn sync_rebases_a_stack_of_commits_one_by_one() {
+    use scion_store::MetaStore;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("app").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, std::future::pending()));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let (a, b) = (root.join("a"), root.join("b"));
+        let author = ["--author", "Ada <ada@example.com>"];
+        let commit = |wc: &std::path::Path, file: &str, content: &str, message: &str| {
+            std::fs::write(wc.join(file), content).expect("write");
+            json_of(&scn_in(
+                wc,
+                &[&["commit", "-m", message, "--json"][..], &author].concat(),
+            ));
+        };
+        let text = |out: &std::process::Output| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "a", "--json"]));
+        commit(&a, "x.txt", "x\n", "base x");
+        commit(&a, "y.txt", "y\n", "base y");
+        json_of(&scn_in(&a, &["land", "--json"]));
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "b", "--json"]));
+        // a stacks two commits; b changes the same lines of both files
+        commit(&a, "x.txt", "ax\n", "a x");
+        commit(&a, "y.txt", "ay\n", "a y");
+        assert_eq!(
+            text(&scn_in(&a, &["status", "-sb", "--no-ahead-behind"])),
+            "## main [ahead 2]\n"
+        );
+        commit(&b, "x.txt", "bx\n", "b x");
+        commit(&b, "y.txt", "by\n", "b y");
+        json_of(&scn_in(&b, &["land", "--json"]));
+
+        let out = scn_in(&a, &["sync"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+        json_of(&scn_in(&a, &["resolve", "--ours", "x.txt", "--json"]));
+        // Finishing the first goes on with the second, which conflicts too
+        let out = scn_in(&a, &["commit"]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+        assert!(text(&out).contains("y.txt"), "{}", text(&out));
+        json_of(&scn_in(&a, &["resolve", "--ours", "y.txt", "--json"]));
+        json_of(&scn_in(&a, &["commit", "--json"]));
+        let log = json_of(&scn_in(&a, &["log", "-n", "3", "--json"]));
+        let subjects: Vec<&str> = log["entries"]
+            .as_array()
+            .expect("entries")
+            .iter()
+            .map(|e| e["message"].as_str().expect("message"))
+            .collect();
+        assert_eq!(subjects, ["a y", "a x", "b y"]);
+        let v = json_of(&scn_in(&a, &["land", "--json"]));
+        assert_eq!(v["rebased"], false);
+        assert_eq!(std::fs::read_to_string(a.join("y.txt")).expect("y"), "ay\n");
     })
     .await
     .expect("test");

@@ -333,8 +333,10 @@ pub struct StatusOut {
     #[serde(rename = "ref")]
     pub reference: String,
     pub base: Option<String>,
-    /// 已提交未合入的提交。
+    /// 已提交未合入的提交（有多个时为最新的一个）。
     pub pending: Option<String>,
+    /// How many commits are pending (committed, not landed).
+    pub ahead: usize,
     pub added: Vec<String>,
     pub modified: Vec<String>,
     pub deleted: Vec<String>,
@@ -438,7 +440,7 @@ impl Render for StatusOut {
         if self.short {
             let mut lines: Vec<String> = Vec::new();
             if self.branch {
-                let ahead = self.pending.is_some().then_some("ahead 1".to_owned());
+                let ahead = (self.ahead > 0).then(|| format!("ahead {}", self.ahead));
                 let behind = self
                     .behind
                     .filter(|b| b.count > 0)
@@ -456,6 +458,11 @@ impl Render for StatusOut {
         }
         let mut head = vec![format!("On branch {}", self.reference)];
         match (&self.pending, &self.base) {
+            (Some(p), _) if self.ahead > 1 => head.push(format!(
+                "Your {} commits are not landed yet; the newest is {}.\n  (use \"scn land\" to publish them)",
+                self.ahead,
+                short(p)
+            )),
             (Some(p), _) => head.push(format!(
                 "Your commit {} is not landed yet.\n  (use \"scn land\" to publish your commit)",
                 short(p)
@@ -469,12 +476,19 @@ impl Render for StatusOut {
                 self.reference,
                 b.commits()
             )),
-            (Some(b), true) if b.count > 0 => head.push(format!(
-                "'{}' on the server has {} that your commit is not based on.\n  \
-                 (\"scn land\" rebases your commit onto them; \"scn sync\" brings them here first)",
-                self.reference,
-                b.commits()
-            )),
+            (Some(b), true) if b.count > 0 => {
+                let (yours, is) = if self.ahead > 1 {
+                    ("your commits", "are")
+                } else {
+                    ("your commit", "is")
+                };
+                head.push(format!(
+                    "'{}' on the server has {} that {yours} {is} not based on.\n  \
+                     (\"scn land\" rebases {yours} onto them; \"scn sync\" brings them here first)",
+                    self.reference,
+                    b.commits()
+                ))
+            }
             _ => {}
         }
         if let Some(p) = &self.pick {
@@ -541,6 +555,7 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
         reference: wc.state().reference.clone(),
         base: wc.state().base.clone(),
         pending: wc.state().head.clone(),
+        ahead: wc.state().stack.len() + usize::from(wc.state().head.is_some()),
         added: s.added,
         modified: s.modified,
         deleted: s.deleted,
@@ -1234,9 +1249,11 @@ pub async fn commit(ctx: &Ctx, message: Option<&str>, author: Option<&str>) -> R
         (a, _) => resolve_author(a)?,
     };
     let root = wc.state().base.is_none() && wc.state().head.is_none();
+    // Finishing a sync goes on rebasing the commits after it, which may stop on conflicts again
     let created = wc
         .commit_with_stat(&client, message, author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())))
-        .await?;
+        .await
+        .map_err(|e| conflicted(&wc, ConflictOp::Sync, e))?;
     Ok(commit_out(&client, &wc, root, created).await)
 }
 
@@ -1820,6 +1837,7 @@ mod tests {
             reference: "main".into(),
             base: None,
             pending: None,
+            ahead: 0,
             added: vec![],
             modified: vec![],
             deleted: vec![],
@@ -1840,6 +1858,7 @@ mod tests {
         let moved = |count, exact, pending: Option<&str>| StatusOut {
             base: Some("c1base".into()),
             pending: pending.map(Into::into),
+            ahead: usize::from(pending.is_some()),
             behind: Some(Behind { count, exact }),
             ..s.clone()
         };
@@ -1970,8 +1989,27 @@ mod tests {
             deleted: vec!["d".into()],
             base: Some("c1base".into()),
             pending: Some("c1pending0000".into()),
+            ahead: 1,
             ..s
         };
+        let three = StatusOut {
+            ahead: 3,
+            behind: Some(Behind { count: 2, exact: true }),
+            ..s.clone()
+        };
+        assert!(three.text().starts_with(
+            "On branch main\nYour 3 commits are not landed yet; the newest is c1pending000.\n  \
+             (use \"scn land\" to publish them)\n'main' on the server has 2 commits that your commits are not based on."
+        ));
+        assert!(
+            StatusOut {
+                short: true,
+                branch: true,
+                ..three
+            }
+            .text()
+            .starts_with("## main [ahead 3, behind 2]")
+        );
         assert_eq!(
             s.text(),
             "On branch main\nYour commit c1pending000 is not landed yet.\n  (use \"scn land\" to publish your commit)\n\n\

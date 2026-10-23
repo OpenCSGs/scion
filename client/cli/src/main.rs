@@ -276,8 +276,9 @@ enum Command {
         /// git's `cherry-pick --continue`: transitional spelling of `scn commit`.
         #[arg(long = "continue", hide = true, conflicts_with = "abort")]
         cont: bool,
-        /// Author as "Name <email>" (default: the original commit's author).
-        #[arg(long, env = "SCION_AUTHOR")]
+        /// Author as "Name <email>" (default: the original commit's author). Not read from
+        /// SCION_AUTHOR, which names who makes new commits, not who wrote this one.
+        #[arg(long)]
         author: Option<String>,
     },
     // ---- Transitional git spellings: run the scn command and print a hint (hidden from --help)

@@ -477,7 +477,15 @@ async fn cherry_pick_applies_a_commit_from_another_branch() {
 
         // On the release branch: the fix arrives with its message and author, not main's other change
         json_of(&run(&["switch", "release", "--json"]));
-        let v = json_of(&run(&["cherry-pick", &fix, "--json"]));
+        // SCION_AUTHOR, an agent's own identity, does not replace the original author
+        let out = Command::new(env!("CARGO_BIN_EXE_scn"))
+            .current_dir(&wc)
+            .args(["cherry-pick", &fix, "--json"])
+            .env("SCION_AUTHOR", me)
+            .env("SCION_NO_DAEMON", "1")
+            .output()
+            .expect("run scn");
+        let v = json_of(&out);
         assert_eq!(v["commit"].as_str(), Some(fix.as_str()));
         assert_eq!(read(), "1\n2\nthree\n");
         let top = json_of(&run(&["log", "-n", "1", "--json"]))["entries"][0].clone();

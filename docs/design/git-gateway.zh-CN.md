@@ -133,7 +133,7 @@ git clone http://scion.example.com:7080/agentlab/app
 
 ## 6. 导入时也保存原始提交
 
-`scn import git` 和以后的 `ImportService` 在 `git.sha1` 之外也记录 `git.commit`，因此签名提交和带其他头的提交从网关出来时逐字节相同。之前导入的、没有这个字段的提交，按 §3 处理。
+当 §3 的规则 2 无法重建提交时（签名提交、`encoding` 头、不是 UTF-8 的说明），`scn import git`（以及以后的 `ImportService`）在 `git.sha1` 之外也记录 `git.commit`，这些提交从网关出来时逐字节相同，其余提交的大小不变。之前导入的、没有这个字段的提交，按 §3 处理。
 
 ## 7. git 用户会看到的错误
 
@@ -158,7 +158,7 @@ git clone http://scion.example.com:7080/agentlab/app
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
 | **G1 拉取**（已完成） | gRPC 端口上的路由器；ref；`upload-pack` v0 和 v2；不带 delta 的 pack；Basic 认证；按 §3 生成 commit 对象 | 在 Mac mini 上 `git clone`、`git fetch`、`git pull` 可用，结果通过 `git fsck --strict` |
-| **G2 推送** | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 也记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
+| **G2 推送** | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 已经记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
 | **G3 效率** | pack 中的 delta；浅克隆（`--depth`）；部分克隆（`--filter=blob:none`）；缓存热门 ref 的最近一个 pack | 克隆 starhub-server 传输的字节不超过 git 的 1.5 倍 |
 | **G4 starhub** | 通过 gRPC 提供 Gitaly 的 `SmartHTTPService` 和 `SSHService`（含 sidechannel），对接 gitlab-workhorse 和 gitlab-shell；除非有需求，不做原生 SSH | starhub 的 git 路由在 Scion 仓库上可用 |
 

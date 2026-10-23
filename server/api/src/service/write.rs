@@ -306,13 +306,19 @@ impl WriteService for WriteSvc {
         self.authorize_paths(&p, &req.repo, &cs).await?;
         // git sha 会被当作这个提交的身份（按 sha 解析版本、事件中的 git_sha），只有导入者可以声明：
         // 否则任何写者都能让任意 sha 指向自己的提交，并抢在真正的导入之前占住它
-        if cs.extensions.contains_key(scion_query::GIT_SHA1_EXTENSION) {
+        // The raw git object decides what git clients see for the commit: the same rule
+        let reserved = [
+            scion_query::GIT_SHA1_EXTENSION,
+            scion_git::objects::GIT_COMMIT_EXTENSION,
+        ]
+        .into_iter()
+        .find(|e| cs.extensions.contains_key(*e));
+        if let Some(ext) = reserved {
             authorize(&self.guard, &p, AuthRequest::repo(&req.repo, Action::Admin))
                 .await
                 .map_err(|s| {
                     Status::permission_denied(format!(
-                        "the {} extension is reserved for git imports and needs admin on the repo: {}",
-                        scion_query::GIT_SHA1_EXTENSION,
+                        "the {ext} extension is reserved for git imports and needs admin on the repo: {}",
                         s.message()
                     ))
                 })?;
@@ -385,6 +391,19 @@ pub(crate) mod tests {
         assert!(err.message().contains("git.sha1"), "{err:?}");
         // 导入者（仓库 admin）可以
         assert!(w.create_changeset(call("importer", true, 3)).await.is_ok());
+        // The raw git object is reserved the same way
+        let raw = |who: &str, n: u8| {
+            let mut r = call(who, false, n);
+            let sp = r.get_mut().changeset.as_mut().expect("spec");
+            sp.extensions.insert(
+                scion_git::objects::GIT_COMMIT_EXTENSION.into(),
+                Bytes::from_static(b"tree x"),
+            );
+            r
+        };
+        let err = w.create_changeset(raw("alice", 4)).await.expect_err("reserved");
+        assert!(err.message().contains("git.commit"), "{err:?}");
+        assert!(w.create_changeset(raw("importer", 5)).await.is_ok());
     }
     use scion_store::MemStore;
     use tonic::Code;

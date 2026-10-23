@@ -89,6 +89,7 @@ scn import git ~/src/my-repo --repo mono --git-ref release/1.x --ref release/1.x
 | 作者 / 提交者 | `author` / `committer` | 姓名、邮箱、时间（精确到秒）和时区都保留 |
 | 提交说明 | `message` | 原样保留；非 UTF-8 字节按有损方式转换 |
 | 提交 sha | 扩展字段 `git.sha1` | 20 字节，可据此从 Scion 提交反查 git 提交 |
+| 签名、`encoding` 等其他头 | 扩展字段 `git.commit` | 原始 commit 对象，只在上面的字段无法重建时保存，[git 客户端](git-clients.zh-CN.md)因此能拿回 SHA 相同的提交 |
 | — | `change_id` | 取 git sha 的前 16 字节 |
 | 普通文件 `100644`（及旧格式 `100664`） | 文件 | |
 | 可执行文件 `100755` | 可执行文件 | |

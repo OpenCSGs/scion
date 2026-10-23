@@ -17,10 +17,14 @@ pub struct Ident {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Commit {
+    /// The tree header: the git SHA of the commit's root directory.
+    pub tree: String,
     pub parents: Vec<String>,
     pub author: Ident,
     pub committer: Ident,
     pub message: String,
+    /// The commit object as git wrote it.
+    pub raw: Vec<u8>,
 }
 
 /// 文件类型（git mode）。
@@ -247,6 +251,7 @@ pub fn parse_commit(data: &[u8]) -> Result<Commit> {
     let text = String::from_utf8_lossy(data);
     let (headers, message) = text.split_once("\n\n").unwrap_or((&text, ""));
     let mut parents = Vec::new();
+    let mut tree = String::new();
     let (mut author, mut committer) = (None, None);
     for line in headers.lines() {
         // 以空格开头的是上一个头部的续行（如 gpgsig），忽略
@@ -254,6 +259,7 @@ pub fn parse_commit(data: &[u8]) -> Result<Commit> {
             continue;
         }
         match line.split_once(' ') {
+            Some(("tree", sha)) => tree = sha.to_owned(),
             Some(("parent", sha)) => parents.push(sha.to_owned()),
             Some(("author", v)) => author = Some(parse_ident(v)?),
             Some(("committer", v)) => committer = Some(parse_ident(v)?),
@@ -261,10 +267,12 @@ pub fn parse_commit(data: &[u8]) -> Result<Commit> {
         }
     }
     Ok(Commit {
+        tree,
         parents,
         author: author.ok_or_else(|| Error::Parse("commit without author".into()))?,
         committer: committer.ok_or_else(|| Error::Parse("commit without committer".into()))?,
         message: message.to_owned(),
+        raw: data.to_vec(),
     })
 }
 

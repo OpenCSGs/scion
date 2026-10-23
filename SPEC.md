@@ -140,6 +140,7 @@ Constraints:
 - `delta` describes only **the changes against the first parent**. Directories are implicit: putting a file creates its parent directories, and a directory that becomes empty disappears. Conflicting paths in one delta (putting both `a` and `a/b`, say) are a semantic error reported when trees are built, not checked by the encoding.
 - `extensions` are in strictly ascending byte order of `key`, with no duplicates. Unknown keys must be kept as they are.
 - Reserved extension key: `git.sha1`, whose value is the 20-byte git commit SHA, written by the git importer. The server maps git SHAs to commit ids with it, so every API that takes a revision accepts a 40-digit lowercase hex git SHA.
+- Reserved extension key: `git.commit`, whose value is the git commit object exactly as git wrote it, written by the git importer when the commit's fields cannot rebuild it (a signature, an `encoding` header, a message that is not UTF-8). The git gateway serves it to git clients. Like `git.sha1`, only repository admins may write it.
 - Reserved extension key: `scion.rebased-from`, whose value is the id of the commit as it was made (the 34-byte binary ObjectId, §1), written by the server on a commit it rebased while landing it.
 - A changeset's id does **not include** the root tree. The root tree is derived data; see §4.3 of the server design document.
 

@@ -364,6 +364,46 @@ async fn imported_history_comes_back_object_for_object() {
     )
     .await;
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    // A commit in another encoding, then a signed one (written by hand: no gpg needed)
+    std::fs::write(src.join("top.txt"), "top 3\n").expect("write");
+    ok(&src, &["add", "-A"]).await;
+    ok(
+        &src,
+        &[
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@x",
+            "-c",
+            "i18n.commitEncoding=ISO-8859-1",
+            "commit",
+            "-qm",
+            "latin",
+        ],
+    )
+    .await;
+    let head = ok(&src, &["cat-file", "commit", "HEAD"]).await;
+    let parent = ok(&src, &["rev-parse", "HEAD"]).await;
+    let (headers, _) = head.split_once("\n\n").expect("commit");
+    let tree = headers.lines().next().expect("tree line");
+    let signed = format!(
+        "{tree}\nparent {}\nauthor Ada <ada@x> 1600000000 +0000\ncommitter Ada <ada@x> 1600000000 +0000\n\
+         gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\nsigned\n",
+        parent.trim()
+    );
+    std::fs::write(root.join("signed.txt"), signed).expect("write");
+    let sha = ok(
+        &src,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            root.join("signed.txt").to_str().expect("path"),
+        ],
+    )
+    .await;
+    ok(&src, &["update-ref", "refs/heads/main", sha.trim()]).await;
 
     let store = Arc::new(MemStore::new());
     store.create_repo("imported").await.expect("repo");

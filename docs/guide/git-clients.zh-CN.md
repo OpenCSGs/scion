@@ -44,7 +44,7 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 
 每个提交只有一个 git SHA，就是 `GetGitShas` 和 SDK 的 `git_shas` 返回的那个（见 [git SHA](git-sha.zh-CN.md)）：
 
-- **从 git 导入的提交**保留原来的 SHA，克隆得到的对象和源仓库完全一致。带签名（`gpgsig`）或子模块的导入提交暂时无法重建（见下文）。
+- **从 git 导入的提交**保留原来的 SHA，克隆得到的对象和源仓库完全一致，签名提交也一样。含子模块的提交，以及 0.1.11 之前导入的签名提交，暂时无法提供（见下文）。
 - **用 `scn` 创建的提交**的 SHA 由内容计算得出，commit 对象中带一行 `scion-id` 头，`git fsck --strict` 可以通过。
 
 ## 暂不支持
@@ -53,7 +53,7 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 |---|---|
 | `git push` | 拒绝，提示 `pushing with git is not supported yet; push with scn` |
 | 浅克隆（`--depth`）和部分克隆（`--filter`） | 服务端没有提供这两种能力，git 自己会拒绝 |
-| 从 git 导入的签名提交或含子模块的提交 | 拉取失败，提示 `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| 含子模块的提交，或 0.1.11 之前导入的签名提交 | 拉取失败，提示 `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | 历史中包含被 [redact](redaction.zh-CN.md) 的文件 | 拉取失败：文件的 SHA 覆盖的内容已不允许任何人读取 |
 | SSH URL | 请使用 HTTP(S) |
 

@@ -19,6 +19,8 @@ pub const TAG_PREFIX: &str = "tags/";
 
 /// 记录 git 提交 sha 的扩展字段。
 pub const GIT_SHA1_EXTENSION: &str = "git.sha1";
+/// The extension holding a commit's git object, for commits Scion's fields cannot rebuild.
+pub const GIT_COMMIT_EXTENSION: &str = "git.commit";
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -68,6 +70,28 @@ fn entry_mode(m: GitMode) -> Option<EntryMode> {
         GitMode::Symlink => Some(EntryMode::Symlink),
         GitMode::Gitlink => None,
     }
+}
+
+/// Whether the commit object comes back byte for byte from the fields Scion keeps, as the git
+/// gateway rebuilds it. When not (a signature, an `encoding` header, a message that is not
+/// UTF-8, an unusual identity), the import keeps the raw object too.
+fn rebuilds(c: &Commit) -> bool {
+    let sha = |s: &str| {
+        let mut out = [0u8; 20];
+        hex::decode_to_slice(s, &mut out).ok().map(|()| out)
+    };
+    let Some(tree) = sha(&c.tree) else { return false };
+    let Some(parents) = c.parents.iter().map(|p| sha(p)).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    let sig = |i: &Ident| scion_object::Signature {
+        name: i.name.clone(),
+        email: i.email.clone(),
+        time_ms: i.time_ms,
+        tz_offset_minutes: i.tz_offset_minutes,
+    };
+    let body = scion_object::git::commit_body(None, &tree, &parents, &sig(&c.author), &sig(&c.committer), &c.message);
+    body == c.raw
 }
 
 /// 由 git sha 推导 change_id 与扩展字段值。
@@ -163,6 +187,9 @@ pub async fn import_with(
             .committer_signature(signature(&commit.committer))
             .change_id(change_id)
             .extension(GIT_SHA1_EXTENSION, raw_sha);
+        if !rebuilds(&commit) {
+            b = b.extension(GIT_COMMIT_EXTENSION, commit.raw.clone());
+        }
         for p in parents.iter().skip(1) {
             b = b.parent(*p);
         }
@@ -287,6 +314,27 @@ async fn land_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_the_raw_object_only_when_fields_cannot_rebuild_it() {
+        let plain = format!(
+            "tree {}\nparent {}\nauthor A <a@x> 1700000000 +0800\ncommitter C <c@x> 1700000001 -0130\n\nmsg\n",
+            "ab".repeat(20),
+            "cd".repeat(20)
+        );
+        assert!(rebuilds(&parse_commit(plain.as_bytes()).expect("parse")));
+        let signed = plain.replace("\n\nmsg", "\ngpgsig -----BEGIN-----\n x\n -----END-----\n\nmsg");
+        assert!(!rebuilds(&parse_commit(signed.as_bytes()).expect("parse")));
+        let encoded = plain.replace("\n\nmsg", "\nencoding ISO-8859-1\n\nmsg");
+        assert!(!rebuilds(&parse_commit(encoded.as_bytes()).expect("parse")));
+        // git writes -0000 for an unknown zone; Scion keeps +0000
+        let minus = plain.replace("+0800", "-0000");
+        assert!(!rebuilds(&parse_commit(minus.as_bytes()).expect("parse")));
+        let bad_tree = plain.replace(&"ab".repeat(20), "nope");
+        assert!(!rebuilds(&parse_commit(bad_tree.as_bytes()).expect("parse")));
+        let bad_parent = plain.replace(&"cd".repeat(20), "nope");
+        assert!(!rebuilds(&parse_commit(bad_parent.as_bytes()).expect("parse")));
+    }
 
     #[test]
     fn sha_bytes_cases() {

@@ -44,7 +44,7 @@ Or let a credential helper keep the token (`git config --global credential.helpe
 
 Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` report ([git SHAs](git-sha.md)):
 
-- **Commits imported from git** keep their original SHAs, so a clone has exactly the source repository's objects. Commits imported with signatures (`gpgsig`) or submodules cannot be rebuilt yet (see below).
+- **Commits imported from git** keep their original SHAs, so a clone has exactly the source repository's objects, signed commits included. Commits with submodules cannot be served yet, nor signed commits imported before 0.1.11 (see below).
 - **Commits made with `scn`** get a SHA computed from their content, with a `scion-id` header in the commit object. `git fsck --strict` accepts it.
 
 ## Not available yet
@@ -53,7 +53,7 @@ Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` repo
 |---|---|
 | `git push` | Refused with `pushing with git is not supported yet; push with scn` |
 | Shallow clones (`--depth`) and partial clones (`--filter`) | git refuses them, since the server does not offer them |
-| Signed commits or submodules imported from git | The fetch fails with `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| Commits with submodules, or signed commits imported before 0.1.11 | The fetch fails with `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | History containing a [redacted](redaction.md) file | The fetch fails: the file's SHA covers content nobody may read any more |
 | SSH URLs | Use HTTP(S) |
 

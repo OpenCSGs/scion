@@ -13,7 +13,7 @@ use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::pin::Pin;
 
-use scion_object::{Changeset, EntryMode, ObjectId, Signature, Tree};
+use scion_object::{Changeset, EntryMode, ObjectId, Tree};
 use scion_store::{BlobStore, ChangesetRecord, MetaStore};
 use sha1::{Digest, Sha1};
 
@@ -31,7 +31,7 @@ pub const GIT_TREE_KIND: &str = "git-tree";
 pub const GIT_BLOB_KIND: &str = "git-blob";
 pub const GIT_OBJECT_VERSION: u32 = 1;
 /// 计算得到的 commit 对象里记录 Scion 提交 id 的头。
-pub const SCION_ID_HEADER: &str = "scion-id";
+pub const SCION_ID_HEADER: &str = scion_object::git::SCION_ID_HEADER;
 
 /// 40 位小写十六进制的 git sha。
 pub fn parse_git_sha(s: &str) -> Option<[u8; 20]> {
@@ -106,28 +106,6 @@ pub fn git_tree_body(entries: &[(String, EntryMode, [u8; 20])]) -> Vec<u8> {
     out
 }
 
-/// `name <email> 秒 ±hhmm`。git 不允许名字和邮箱中出现 `<`、`>` 和换行，这里直接去掉。
-fn git_ident(s: &Signature) -> String {
-    let clean = |v: &str| {
-        v.chars()
-            .filter(|c| !matches!(c, '<' | '>' | '\n'))
-            .collect::<String>()
-            .trim()
-            .to_string()
-    };
-    let tz = s.tz_offset_minutes;
-    let sign = if tz < 0 { '-' } else { '+' };
-    let abs = tz.unsigned_abs();
-    format!(
-        "{} <{}> {} {sign}{:02}{:02}",
-        clean(&s.name),
-        clean(&s.email),
-        s.time_ms.div_euclid(1000),
-        abs / 60,
-        abs % 60
-    )
-}
-
 /// 计算得到的 git commit 对象的内容。
 pub fn git_commit_body(id: ObjectId, cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20]]) -> Vec<u8> {
     commit_body(Some(id), cs, tree, parents)
@@ -140,18 +118,7 @@ pub fn git_commit_body_plain(cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20
 }
 
 fn commit_body(id: Option<ObjectId>, cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20]]) -> Vec<u8> {
-    let mut out = format!("tree {}\n", hex::encode(tree));
-    for p in parents {
-        out.push_str(&format!("parent {}\n", hex::encode(p)));
-    }
-    out.push_str(&format!("author {}\n", git_ident(&cs.author)));
-    out.push_str(&format!("committer {}\n", git_ident(&cs.committer)));
-    if let Some(id) = id {
-        out.push_str(&format!("{SCION_ID_HEADER} {id}\n"));
-    }
-    out.push('\n');
-    out.push_str(&cs.message);
-    out.into_bytes()
+    scion_object::git::commit_body(id, tree, parents, &cs.author, &cs.committer, &cs.message)
 }
 
 async fn cached(meta: &dyn MetaStore, repo: &str, kind: &str, id: &ObjectId) -> Result<Option<[u8; 20]>> {
@@ -432,8 +399,6 @@ mod tests {
             "22".repeat(20)
         );
         assert_eq!(String::from_utf8(body).expect("utf8"), expect);
-        // 1970 年之前：秒数向下取整
-        assert_eq!(git_ident(&sig("B", -1, 0)), "B <b@x> -1 +0000");
     }
 
     #[tokio::test]

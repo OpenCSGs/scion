@@ -89,6 +89,7 @@ Commits the branches share are not uploaded twice, and get the same Scion commit
 | Author / committer | `author` / `committer` | Name, email, time (to the second) and time zone kept |
 | Message | `message` | Kept as it is; non-UTF-8 bytes are converted lossily |
 | Commit SHA | The extension field `git.sha1` | 20 bytes, to find the git commit of a Scion commit |
+| Signatures, `encoding` and other headers | The extension field `git.commit` | The raw commit object, only for commits the fields above cannot rebuild, so [git clients](git-clients.md) get them back with the same SHA |
 | — | `change_id` | The first 16 bytes of the git SHA |
 | Files `100644` (and the old `100664`) | Files | |
 | Executables `100755` | Executables | |

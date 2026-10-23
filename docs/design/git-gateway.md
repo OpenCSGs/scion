@@ -133,7 +133,7 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 
 ## 6. Importing keeps the raw commit too
 
-`scn import git` and the later `ImportService` record `git.commit` alongside `git.sha1`, so signed commits and commits with other headers come out of the gateway byte for byte. Commits already imported without it are served as §3 describes.
+`scn import git` (and the later `ImportService`) records `git.commit` alongside `git.sha1` when rule 2 of §3 would not rebuild the commit: signed commits, `encoding` headers, messages that are not UTF-8. They then come out of the gateway byte for byte, while the other commits stay as small as before. Commits already imported without it are served as §3 describes.
 
 ## 7. Errors a git user sees
 
@@ -158,7 +158,7 @@ They go to the client as `ERR` packets, or `ng` lines for pushes, and git prints
 | Stage | What | Done when |
 |---|---|---|
 | **G1 Fetch** (done) | The router on the gRPC listener; refs; `upload-pack` v0 and v2; packs without deltas; Basic auth; commit objects as §3 | `git clone`, `git fetch` and `git pull` work against the Mac mini, and `git fsck --strict` passes on the result |
-| **G2 Push** | The `git-tree-id`/`git-blob-id` lookups; `receive-pack`: parsing packs, turning git commits into Scion commits, fast-forward lands, creating and deleting refs, `git.commit` (also in `scn import git`) | `git push` of new commits, branches and tags; signed commits keep their SHAs; non-fast-forwards are refused |
+| **G2 Push** | The `git-tree-id`/`git-blob-id` lookups; `receive-pack`: parsing packs, turning git commits into Scion commits, fast-forward lands, creating and deleting refs, `git.commit` (`scn import git` records it already) | `git push` of new commits, branches and tags; signed commits keep their SHAs; non-fast-forwards are refused |
 | **G3 Efficiency** | Deltas in packs; shallow clones (`--depth`); partial clones (`--filter=blob:none`); caching the last pack of a busy ref | A clone of starhub-server moves no more than 1.5 times git's bytes |
 | **G4 starhub** | Gitaly's `SmartHTTPService` and `SSHService` over gRPC (with sidechannel), for gitlab-workhorse and gitlab-shell; native SSH stays out unless asked for | starhub's git routes work on a Scion repository |
 

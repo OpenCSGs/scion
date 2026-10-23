@@ -140,6 +140,7 @@ Extension:
 - `delta` 只描述**相对 first parent 的改动**。目录是隐式的：Put 一个文件会自动创建其上级目录，目录变空时自动消失。「同一个 delta 里路径冲突」（例如同时 Put `a` 和 `a/b`）属于语义错误，由建树阶段报告，不在编码层检查。
 - `extensions` 按 `key` 的字节序严格升序排列，不允许重复。未知 key 必须原样保留。
 - 保留的 extension key：`git.sha1`，值为 20 字节的 git 提交 sha，由 git 导入写入。服务端据此建立 git sha → 提交 id 的映射，所有接受版本号的接口都可以使用 40 位小写十六进制的 git sha。
+- 保留的 extension key：`git.commit`，值为 git 写出的原始 commit 对象，由 git 导入在无法用提交字段重建该对象时写入（带签名、`encoding` 头，或说明不是 UTF-8）。git 网关把它提供给 git 客户端。和 `git.sha1` 一样，只有仓库 admin 可以写入。
 - 保留的 extension key：`scion.rebased-from`，值为提交原来的 id（34 字节的二进制 ObjectId，§1），由服务端在合入时 rebase 提交时写入。
 - Changeset 的 ID **不包含** root tree。root tree 是派生数据，见服务端设计文档 §4.3。
 

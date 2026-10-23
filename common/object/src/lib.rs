@@ -7,6 +7,7 @@ mod changeset;
 mod chunklist;
 mod codec;
 mod error;
+pub mod git;
 mod id;
 mod path;
 mod tree;

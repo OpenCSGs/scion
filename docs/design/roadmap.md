@@ -89,12 +89,8 @@ Legend: 🔵 has an initial design, ⚪ idea only.
 - **Renames and merges in history**: path log and blame follow only the first-parent chain, and path log does not follow renames. Add rename tracking for path log, and blame through merges.
 - **A path cursor for ListLastCommits**: when one generation fills a whole page of index rows, it currently falls back to a scan. The result is correct, just slower.
 
-### 2.5 Git compatibility (`git-gateway`) 🔵
-- **What**: a new `scion git-gateway` role serving git smart HTTP and SSH (info-refs, upload-pack, receive-pack).
-  - Git objects are produced on demand from the GitSha derived data.
-  - Pushed packfiles are parsed into changesets and landed.
-- **Why it waits**: `scn` already covers reads and writes, and this is the largest server task.
-- **Start when**: git clients need transparent access to Scion repositories (starhub phase S3). See the [starhub integration design](starhub-integration.md).
+### 2.5 Git compatibility (`git-gateway`): in progress
+- Moved to the [git gateway design](git-gateway.md), which starts with stage G1 (fetch).
 
 ### 2.6 Server-side import (`ImportService`) ⚪
 - **What**: incremental import from a git remote or a local path, run by the server, for mirrors and bulk migration. Import currently runs in the client (`scn import git`).

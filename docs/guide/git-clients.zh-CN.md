@@ -39,7 +39,7 @@ git push origin :old-branch     # 删除分支
 - **提交保留 SHA。** 推送的每个提交都变成一个 Scion 提交，`scn log` 可以看到，作者、提交者、时间和说明都不变；git、`scn` 和 `GetGitShas` 看到的都是推送时的 SHA。签名提交保留签名。
 - **分支只能快进。** 推送和 `scn land` 一样合入，但不做 rebase：别人先合入时，git 会提示 `rejected … (fetch first)`，执行 `git pull --rebase` 后再推送即可。`git push --force` 可以强制移动分支，所需权限和 `scn` 一样，是该分支的 `land` 权限。
 - **权限：** 推送需要仓库的 `write` 权限（策略按路径限制时，需要改动路径的权限），以及每个 ref 的 `land` 权限，和 `scn` 相同。合入前检查和 ref 事件同样适用于推送。
-- **限制：** 每次推送最多 1 GiB，单个文件不超过服务端的上传限制（`max_upload_object_bytes`）。
+- **限制：** 每次推送最多 16 GiB（服务端会先写入临时文件），单个文件不超过服务端的上传限制（`max_upload_object_bytes`）。
 
 ## 凭据
 

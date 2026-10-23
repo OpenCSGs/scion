@@ -2,9 +2,9 @@
 //! same pack (the gateway advertises `no-thin`), each object's SHA computed, the trailer checked.
 
 use std::collections::HashMap;
+use std::io::{BufRead, Read, Write};
 
 use bytes::Bytes;
-use flate2::{Decompress, FlushDecompress, Status};
 use sha1::{Digest, Sha1};
 
 use crate::{Error, Result};
@@ -29,118 +29,239 @@ impl ObjType {
     }
 }
 
-/// The objects of a pack by git SHA.
-#[derive(Debug, Default)]
-pub struct Unpacked {
-    pub objects: HashMap<[u8; 20], (ObjType, Bytes)>,
+/// Where a resolved object's content is: in memory, or in the spill file.
+#[derive(Debug, Clone, Copy)]
+enum Content {
+    Mem(usize),
+    Spilled { offset: u64, len: usize },
 }
 
-enum Entry {
-    Whole(ObjType, Bytes),
-    OfsDelta(usize, Bytes),
-    RefDelta([u8; 20], Bytes),
+/// Contents kept in memory up to a budget, then in a temporary file.
+#[derive(Debug, Default)]
+struct Store {
+    mem: Vec<Bytes>,
+    mem_bytes: usize,
+    budget: usize,
+    spill: Option<std::fs::File>,
+    spill_len: u64,
+}
+
+impl Store {
+    fn put(&mut self, data: Bytes) -> Result<Content> {
+        if self.mem_bytes + data.len() <= self.budget {
+            self.mem_bytes += data.len();
+            self.mem.push(data);
+            return Ok(Content::Mem(self.mem.len() - 1));
+        }
+        let file = match &mut self.spill {
+            Some(f) => f,
+            None => self
+                .spill
+                .insert(tempfile::tempfile().map_err(|e| Error::Internal(format!("spill file: {e}")))?),
+        };
+        file.write_all(&data)
+            .map_err(|e| Error::Internal(format!("spill file: {e}")))?;
+        let c = Content::Spilled {
+            offset: self.spill_len,
+            len: data.len(),
+        };
+        self.spill_len += data.len() as u64;
+        Ok(c)
+    }
+
+    fn get(&self, c: Content) -> Result<Bytes> {
+        match c {
+            Content::Mem(i) => Ok(self.mem[i].clone()),
+            Content::Spilled { offset, len } => {
+                use std::os::unix::fs::FileExt;
+                let mut buf = vec![0; len];
+                let file = self
+                    .spill
+                    .as_ref()
+                    .ok_or_else(|| Error::Internal("no spill file".into()))?;
+                file.read_exact_at(&mut buf, offset)
+                    .map_err(|e| Error::Internal(format!("spill file: {e}")))?;
+                Ok(Bytes::from(buf))
+            }
+        }
+    }
+}
+
+/// The objects of a pack by git SHA, in memory up to a budget and in a temporary file beyond it.
+#[derive(Debug, Default)]
+pub struct Unpacked {
+    objects: HashMap<[u8; 20], (ObjType, Content)>,
+    store: Store,
+}
+
+impl Unpacked {
+    /// An object's type and content.
+    pub fn get(&self, sha: &[u8; 20]) -> Result<Option<(ObjType, Bytes)>> {
+        match self.objects.get(sha) {
+            Some((t, c)) => Ok(Some((*t, self.store.get(*c)?))),
+            None => Ok(None),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    fn add(&mut self, t: ObjType, content: Bytes) -> Result<[u8; 20]> {
+        let sha = object_sha(t, &content);
+        if !self.objects.contains_key(&sha) {
+            let c = self.store.put(content)?;
+            self.objects.insert(sha, (t, c));
+        }
+        Ok(sha)
+    }
+}
+
+enum Base {
+    Offset(u64),
+    Sha([u8; 20]),
 }
 
 fn bad(msg: impl Into<String>) -> Error {
     Error::Protocol(format!("bad pack: {}", msg.into()))
 }
 
-/// Parses and resolves a whole pack. `max_object` limits each object's size.
-pub fn unpack(data: &[u8], max_object: u64) -> Result<Unpacked> {
-    if data.len() < 32 || &data[..4] != b"PACK" {
+/// A reader that counts and hashes what is consumed from it.
+struct Hashing<R> {
+    inner: R,
+    hash: Sha1,
+    pos: u64,
+}
+
+impl<R: BufRead> Read for Hashing<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = {
+            let avail = self.fill_buf()?;
+            let n = avail.len().min(buf.len());
+            buf[..n].copy_from_slice(&avail[..n]);
+            n
+        };
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for Hashing<R> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, n: usize) {
+        // The buffer is filled already: this returns it without reading
+        if let Ok(b) = self.inner.fill_buf() {
+            self.hash.update(&b[..n.min(b.len())]);
+        }
+        self.pos += n as u64;
+        self.inner.consume(n);
+    }
+}
+
+/// The memory a push's objects may take before they go to a temporary file.
+pub const MEMORY_BUDGET: usize = 256 << 20;
+
+/// Parses and resolves a pack read from `input`. `max_object` limits each object's size.
+pub fn unpack<R: BufRead>(input: R, max_object: u64) -> Result<Unpacked> {
+    unpack_with(input, max_object, MEMORY_BUDGET)
+}
+
+pub fn unpack_with<R: BufRead>(input: R, max_object: u64, budget: usize) -> Result<Unpacked> {
+    let io = |e: std::io::Error| bad(e.to_string());
+    let mut r = Hashing {
+        inner: input,
+        hash: Sha1::new(),
+        pos: 0,
+    };
+    let mut head = [0u8; 12];
+    r.read_exact(&mut head).map_err(|_| bad("no PACK header"))?;
+    if &head[..4] != b"PACK" {
         return Err(bad("no PACK header"));
     }
-    let version = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    let version = u32::from_be_bytes([head[4], head[5], head[6], head[7]]);
     if version != 2 && version != 3 {
         return Err(bad(format!("version {version}")));
     }
-    let count = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
-    let body_end = data.len() - 20;
-    if Sha1::digest(&data[..body_end])[..] != data[body_end..] {
-        return Err(bad("checksum mismatch"));
-    }
-    let mut entries: Vec<(usize, Entry)> = Vec::with_capacity(count.min(1 << 20));
-    let mut pos = 12;
+    let count = u32::from_be_bytes([head[8], head[9], head[10], head[11]]);
+    let mut out = Unpacked {
+        store: Store {
+            budget,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut by_offset: HashMap<u64, [u8; 20]> = HashMap::new();
+    let mut pending: Vec<(u64, Base, Content)> = Vec::new();
     for _ in 0..count {
-        let start = pos;
-        let (kind, size, used) = entry_header(&data[pos..body_end])?;
-        pos += used;
+        let start = r.pos;
+        let (kind, size) = entry_header(&mut r)?;
         if size > max_object {
             return Err(Error::Unsupported(format!(
                 "an object of {size} bytes is larger than the {max_object}-byte limit"
             )));
         }
-        let entry = match kind {
+        match kind {
             1..=4 => {
-                let (content, used) = inflate(&data[pos..body_end], size)?;
-                pos += used;
                 let t = [ObjType::Commit, ObjType::Tree, ObjType::Blob, ObjType::Tag][kind as usize - 1];
-                Entry::Whole(t, content)
+                let content = inflate(&mut r, size)?;
+                let sha = out.add(t, content)?;
+                by_offset.insert(start, sha);
             }
             6 => {
-                let (back, used) = ofs(&data[pos..body_end])?;
-                pos += used;
+                let back = ofs(&mut r)?;
                 let base = start
                     .checked_sub(back)
                     .ok_or_else(|| bad("delta base before the pack"))?;
-                let (delta, used) = inflate(&data[pos..body_end], size)?;
-                pos += used;
-                Entry::OfsDelta(base, delta)
+                let delta = inflate(&mut r, size)?;
+                pending.push((start, Base::Offset(base), out.store.put(delta)?));
             }
             7 => {
-                let sha: [u8; 20] = data
-                    .get(pos..pos + 20)
-                    .and_then(|s| s.try_into().ok())
-                    .ok_or_else(|| bad("truncated delta base"))?;
-                pos += 20;
-                let (delta, used) = inflate(&data[pos..body_end], size)?;
-                pos += used;
-                Entry::RefDelta(sha, delta)
+                let mut sha = [0u8; 20];
+                r.read_exact(&mut sha).map_err(|_| bad("truncated delta base"))?;
+                let delta = inflate(&mut r, size)?;
+                pending.push((start, Base::Sha(sha), out.store.put(delta)?));
             }
             k => return Err(bad(format!("object type {k}"))),
-        };
-        entries.push((start, entry));
-    }
-    if pos != body_end {
-        return Err(bad("trailing bytes"));
-    }
-    resolve(entries, max_object)
-}
-
-/// Resolves deltas, bases first: an ofs-delta's base comes earlier in the pack, a ref-delta's
-/// base may come anywhere, so passes repeat until nothing is left.
-fn resolve(entries: Vec<(usize, Entry)>, max_object: u64) -> Result<Unpacked> {
-    let mut by_offset: HashMap<usize, (ObjType, Bytes)> = HashMap::new();
-    let mut out = Unpacked::default();
-    let mut pending: Vec<(usize, Entry)> = Vec::new();
-    for (off, e) in entries {
-        match e {
-            Entry::Whole(t, content) => {
-                out.objects.insert(object_sha(t, &content), (t, content.clone()));
-                by_offset.insert(off, (t, content));
-            }
-            other => pending.push((off, other)),
         }
     }
+    let digest = r.hash.clone().finalize();
+    let mut trailer = [0u8; 20];
+    r.read_exact(&mut trailer).map_err(|_| bad("truncated pack"))?;
+    if digest[..] != trailer {
+        return Err(bad("checksum mismatch"));
+    }
+    let mut rest = [0u8; 1];
+    if r.read(&mut rest).map_err(io)? != 0 {
+        return Err(bad("trailing bytes"));
+    }
+    // Deltas, bases first: an ofs-delta's base comes earlier in the pack, a ref-delta's base
+    // may come anywhere, so passes repeat until nothing is left
     while !pending.is_empty() {
         let before = pending.len();
         let mut left = Vec::new();
-        for (off, e) in pending {
-            let base = match &e {
-                Entry::OfsDelta(base, _) => by_offset.get(base).cloned(),
-                Entry::RefDelta(sha, _) => out.objects.get(sha).cloned(),
-                Entry::Whole(..) => unreachable!("whole objects are resolved first"),
+        for (off, base, delta) in pending {
+            let base_sha = match &base {
+                Base::Offset(o) => by_offset.get(o).copied(),
+                Base::Sha(s) => out.objects.contains_key(s).then_some(*s),
             };
-            let Some((t, base)) = base else {
-                left.push((off, e));
+            let Some((t, base_content)) = (match base_sha {
+                Some(s) => out.get(&s)?,
+                None => None,
+            }) else {
+                left.push((off, base, delta));
                 continue;
             };
-            let (Entry::OfsDelta(_, delta) | Entry::RefDelta(_, delta)) = &e else {
-                unreachable!("only deltas are pending")
-            };
-            let content = Bytes::from(apply_delta(&base, delta, max_object)?);
-            out.objects.insert(object_sha(t, &content), (t, content.clone()));
-            by_offset.insert(off, (t, content));
+            let d = out.store.get(delta)?;
+            let content = Bytes::from(apply_delta(&base_content, &d, max_object)?);
+            let sha = out.add(t, content)?;
+            by_offset.insert(off, sha);
         }
         if left.len() == before {
             return Err(Error::Unsupported(
@@ -159,70 +280,59 @@ pub fn object_sha(t: ObjType, content: &[u8]) -> [u8; 20] {
     h.finalize().into()
 }
 
-/// An entry's type, inflated size and header length.
-fn entry_header(b: &[u8]) -> Result<(u8, u64, usize)> {
-    let first = *b.first().ok_or_else(|| bad("truncated entry"))?;
+fn byte<R: Read>(r: &mut R, what: &str) -> Result<u8> {
+    let mut b = [0u8; 1];
+    r.read_exact(&mut b).map_err(|_| bad(format!("truncated {what}")))?;
+    Ok(b[0])
+}
+
+/// An entry's type and inflated size.
+fn entry_header<R: Read>(r: &mut R) -> Result<(u8, u64)> {
+    let first = byte(r, "entry")?;
     let kind = (first >> 4) & 7;
     let mut size = u64::from(first & 0x0f);
     let mut shift = 4;
-    let mut i = 1;
-    let mut byte = first;
-    while byte & 0x80 != 0 {
-        byte = *b.get(i).ok_or_else(|| bad("truncated entry size"))?;
+    let mut b = first;
+    while b & 0x80 != 0 {
+        b = byte(r, "entry size")?;
         if shift > 57 {
             return Err(bad("entry size overflows"));
         }
-        size |= u64::from(byte & 0x7f) << shift;
+        size |= u64::from(b & 0x7f) << shift;
         shift += 7;
-        i += 1;
     }
-    Ok((kind, size, i))
+    Ok((kind, size))
 }
 
 /// An ofs-delta's distance back to its base: big-endian 7-bit groups, each continuation adding one.
-fn ofs(b: &[u8]) -> Result<(usize, usize)> {
-    let mut i = 0;
-    let mut byte = *b.first().ok_or_else(|| bad("truncated delta offset"))?;
-    let mut v = usize::from(byte & 0x7f);
-    while byte & 0x80 != 0 {
-        i += 1;
-        byte = *b.get(i).ok_or_else(|| bad("truncated delta offset"))?;
+fn ofs<R: Read>(r: &mut R) -> Result<u64> {
+    let mut b = byte(r, "delta offset")?;
+    let mut v = u64::from(b & 0x7f);
+    while b & 0x80 != 0 {
+        b = byte(r, "delta offset")?;
         v = v
             .checked_add(1)
             .and_then(|v| v.checked_mul(128))
             .ok_or_else(|| bad("delta offset overflows"))?
-            | usize::from(byte & 0x7f);
+            | u64::from(b & 0x7f);
     }
-    Ok((v, i + 1))
+    Ok(v)
 }
 
-/// Inflates one zlib stream of `size` bytes; returns it and how many input bytes it took.
-fn inflate(input: &[u8], size: u64) -> Result<(Bytes, usize)> {
-    let size = usize::try_from(size).map_err(|_| bad("object too large"))?;
-    // One spare byte: more output than the header declares fills it, and is an error
-    let mut out = Vec::with_capacity(size + 1);
-    let mut z = Decompress::new(true);
-    loop {
-        let (inp, outp) = (z.total_in(), z.total_out());
-        let status = z
-            .decompress_vec(&input[inp as usize..], &mut out, FlushDecompress::None)
-            .map_err(|e| bad(format!("zlib: {e}")))?;
-        if status == Status::StreamEnd {
-            break;
-        }
-        if out.len() > size {
-            break;
-        }
-        if z.total_in() == inp && z.total_out() == outp {
-            return Err(bad("truncated zlib stream"));
-        }
-    }
-    if out.len() != size {
+/// Inflates one zlib stream of `size` bytes, consuming exactly the stream from `r`.
+fn inflate<R: BufRead>(r: &mut R, size: u64) -> Result<Bytes> {
+    let mut out = Vec::with_capacity(usize::try_from(size.min(1 << 24)).unwrap_or(0));
+    // One spare byte: more output than the header declares is an error
+    flate2::bufread::ZlibDecoder::new(r)
+        .take(size + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| bad(format!("zlib: {e}")))?;
+    if out.len() as u64 != size {
         return Err(bad(format!(
             "an object's size does not match its header ({size} bytes)"
         )));
     }
-    Ok((Bytes::from(out), z.total_in() as usize))
+    Ok(Bytes::from(out))
 }
 
 fn varint(d: &[u8], pos: &mut usize) -> Result<u64> {
@@ -314,10 +424,10 @@ mod tests {
     #[test]
     fn reads_whole_objects() {
         let pack = pack_of(&[(Kind::Blob, b"hello\n"), (Kind::Tree, b"")]);
-        let u = unpack(&pack, 1 << 20).expect("unpack");
+        let u = unpack(&pack[..], 1 << 20).expect("unpack");
         let blob = scion_query::parse_git_sha("ce013625030ba8dba906f756967f9e9ca394464a").expect("sha");
-        assert_eq!(u.objects[&blob], (ObjType::Blob, Bytes::from_static(b"hello\n")));
-        assert_eq!(u.objects.len(), 2);
+        assert_eq!(u.get(&blob), Ok(Some((ObjType::Blob, Bytes::from_static(b"hello\n")))));
+        assert_eq!(u.len(), 2);
     }
 
     #[test]
@@ -333,9 +443,12 @@ mod tests {
             ("checksum", corrupt),
             ("version", bad_version),
         ] {
-            assert!(unpack(&p, 1 << 20).is_err(), "{name}");
+            assert!(unpack(&p[..], 1 << 20).is_err(), "{name}");
         }
-        assert!(matches!(unpack(&good, 0), Err(Error::Unsupported(_))));
+        assert!(matches!(unpack(&good[..], 0), Err(Error::Unsupported(_))));
+        let mut trailing = good.clone();
+        trailing.push(0);
+        assert!(unpack(&trailing[..], 1 << 20).is_err());
     }
 
     fn delta(base_len: usize, dst: &[u8], ops: &[u8]) -> Vec<u8> {
@@ -391,10 +504,16 @@ mod tests {
         pack.extend_from_slice(&raw_entry(7, &d2, None, Some(&mid)));
         let sum = Sha1::digest(&pack);
         pack.extend_from_slice(&sum);
-        let u = unpack(&pack, 1 << 20).expect("unpack");
-        assert_eq!(u.objects[&mid].1, Bytes::from_static(b"hello gitd"));
+        let u = unpack(&pack[..], 1 << 20).expect("unpack");
         assert_eq!(
-            u.objects[&object_sha(ObjType::Blob, b"hello")].1,
+            u.get(&mid).expect("get").expect("mid").1,
+            Bytes::from_static(b"hello gitd")
+        );
+        assert_eq!(
+            u.get(&object_sha(ObjType::Blob, b"hello"))
+                .expect("get")
+                .expect("hello")
+                .1,
             Bytes::from_static(b"hello")
         );
         // A ref-delta on an object the pack lacks: a thin pack
@@ -403,7 +522,7 @@ mod tests {
         thin.extend_from_slice(&raw_entry(7, &d2, None, Some(&[9; 20])));
         let sum = Sha1::digest(&thin);
         thin.extend_from_slice(&sum);
-        assert!(matches!(unpack(&thin, 1 << 20), Err(Error::Unsupported(m)) if m.contains("thin")));
+        assert!(matches!(unpack(&thin[..], 1 << 20), Err(Error::Unsupported(m)) if m.contains("thin")));
     }
 
     fn encode_ofs(mut v: usize) -> Vec<u8> {
@@ -444,9 +563,29 @@ mod tests {
     #[test]
     fn decodes_offsets() {
         for v in [0usize, 1, 127, 128, 300, 16511, 1 << 20] {
-            assert_eq!(ofs(&encode_ofs(v)).expect("ofs").0, v, "{v}");
+            assert_eq!(ofs(&mut &encode_ofs(v)[..]).expect("ofs"), v as u64, "{v}");
         }
-        assert!(ofs(&[0x80]).is_err());
-        assert!(entry_header(&[0x90]).is_err());
+        assert!(ofs(&mut &[0x80][..]).is_err());
+        assert!(entry_header(&mut &[0x90][..]).is_err());
+    }
+
+    #[test]
+    fn spills_past_the_memory_budget() {
+        let big = vec![b'x'; 5000];
+        let (mut w, head) = PackWriter::new(3);
+        let mut pack = head.to_vec();
+        for k in [&b"small"[..], &big, b"another"] {
+            pack.extend_from_slice(&w.object(Kind::Blob, k));
+        }
+        pack.extend_from_slice(&w.finish());
+        // A budget of 10 bytes: "small" stays in memory, the rest goes to the file
+        let u = unpack_with(&pack[..], 1 << 20, 10).expect("unpack");
+        for k in [&b"small"[..], &big, b"another"] {
+            let got = u.get(&object_sha(ObjType::Blob, k)).expect("get").expect("object");
+            assert_eq!(&got.1[..], k);
+        }
+        assert!(u.store.spill.is_some());
+        assert!(!u.is_empty());
+        assert_eq!(u.get(&[0; 20]), Ok(None));
     }
 }

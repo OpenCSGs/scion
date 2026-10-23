@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆和 delta 已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
+状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆、delta 和推送落盘已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -104,7 +104,7 @@ git clone http://scion.example.com:7080/agentlab/app
 - 另外声明 `no-thin`：客户端就会发送自包含的 pack。其中的 delta 只能以同一个 pack 里的对象为基准，网关不需要为了应用 delta 去重建已有对象。
 
 **接收 pack。**
-- 在内存中解析，每次推送最多 1 GiB（G3 可能把更大的 pack 写入临时文件）：
+- 边接收边写入临时文件（每次推送最多 16 GiB），再在阻塞线程中从文件读取。解出的对象在 256 MiB 以内留在内存，超出部分写入另一个临时文件；实测 1 GB 的推送服务端内存峰值 555 MB，400 MB 的推送为 457 MB：
   - 完整对象，以及基准在同一 pack 中的 `ofs-delta`、`ref-delta` 条目；
   - 计算每个对象的 SHA，并校验 pack 末尾的校验和；
   - 单个文件最大为 `max_upload_object_bytes`，与 `scn` 上传的限制相同。

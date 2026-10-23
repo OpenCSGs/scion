@@ -153,8 +153,8 @@ mod tests {
         pack.extend_from_slice(&w.ref_delta(&target_sha, &d2));
         assert_eq!(w.offset() as usize, pack.len());
         pack.extend_from_slice(&w.finish());
-        let u = crate::unpack::unpack(&pack, 1 << 20).expect("unpack");
-        assert_eq!(&u.objects[&target_sha].1[..], &target[..]);
-        assert_eq!(&u.objects[&base_sha].1[..], &base[..]);
+        let u = crate::unpack::unpack(&pack[..], 1 << 20).expect("unpack");
+        assert_eq!(&u.get(&target_sha).expect("get").expect("target").1[..], &target[..]);
+        assert_eq!(&u.get(&base_sha).expect("get").expect("base").1[..], &base[..]);
     }
 }

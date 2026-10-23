@@ -39,7 +39,7 @@ git push origin :old-branch     # deletes a branch
 - **Commits keep their SHAs.** Each pushed commit becomes a Scion commit that `scn log` shows, with the same author, committer, times and message; git, `scn` and `GetGitShas` all see the SHA that was pushed. Signed commits keep their signatures.
 - **Branches only fast-forward.** A push lands like `scn land` with no rebase: when someone landed first, git says `rejected … (fetch first)`; run `git pull --rebase` and push again. `git push --force` moves the branch anyway, with the same `land` permission on the branch as `scn` needs.
 - **Permissions:** pushing needs `write` on the repository (on the changed paths, when the policy limits paths) and `land` on each ref, as for `scn`. Pre-land checks and ref events apply to pushes too.
-- **Limits:** a push may be up to 1 GiB, and each file up to the server's upload limit (`max_upload_object_bytes`).
+- **Limits:** a push may be up to 16 GiB (the server spools it to a temporary file), and each file up to the server's upload limit (`max_upload_object_bytes`).
 
 ## Credentials
 

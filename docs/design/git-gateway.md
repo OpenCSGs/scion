@@ -2,7 +2,7 @@
 
 English | [简体中文](git-gateway.zh-CN.md)
 
-Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones and deltas are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
+Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones, deltas and spooled pushes are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
 
 Scion's own client is `scn`, but many tools speak only git: CI systems, IDEs, package managers, `git submodule`, starhub's users. The gateway lets the git CLI clone, fetch and push a Scion repository at the URL `scn` already uses:
 
@@ -104,7 +104,7 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 - Also `no-thin`: the client then sends a self-contained pack. Its deltas can name only objects in the same pack, so the gateway never has to rebuild an existing object to apply a delta.
 
 **Receiving the pack.**
-- Parsed in memory, up to 1 GiB per push (G3 may spill larger packs to a temporary file):
+- Spooled to a temporary file as it arrives (up to 16 GiB per push), then read from it on a blocking thread. Resolved objects stay in memory up to 256 MiB and go to a second temporary file beyond that; a 1 GB push peaked at 555 MB of server memory, a 400 MB one at 457 MB:
   - whole objects and `ofs-delta`/`ref-delta` entries whose bases are in the pack;
   - each object's SHA computed, and the pack's trailer checked;
   - each file at most `max_upload_object_bytes`, the same limit as `scn` uploads.

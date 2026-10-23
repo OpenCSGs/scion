@@ -13,7 +13,7 @@ use scion_query::{
 use scion_store::{BlobStore, ChangesetRecord, MetaStore};
 
 use crate::objects::{GIT_COMMIT_EXTENSION, Objects};
-use crate::pkt::{self, Pkt, Reader};
+use crate::pkt;
 use crate::unpack::{ObjType, Unpacked};
 use crate::upload::{Advertised, TAG_PREFIX};
 use crate::{Error, Result};
@@ -93,13 +93,44 @@ pub struct Command {
     pub git_ref: String,
 }
 
-/// A parsed push: the commands, the client's capabilities and the pack after them.
+/// A parsed push: the commands and the client's capabilities. The pack follows them.
 #[derive(Debug, Default)]
-pub struct PushRequest<'a> {
+pub struct PushRequest {
     pub commands: Vec<Command>,
     pub side_band: bool,
     pub quiet: bool,
-    pub pack: &'a [u8],
+}
+
+/// The next pkt-line of a stream, without its newline: `None` for a flush or the end.
+fn read_line<R: std::io::Read>(r: &mut R) -> Result<Option<Vec<u8>>> {
+    let mut head = [0u8; 4];
+    match r.read_exact(&mut head) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(Error::Protocol(format!("reading the push: {e}"))),
+    }
+    let len = std::str::from_utf8(&head)
+        .ok()
+        .and_then(|h| usize::from_str_radix(h, 16).ok())
+        .ok_or_else(|| {
+            Error::Protocol(format!(
+                "malformed pkt-line: bad length {:?}",
+                String::from_utf8_lossy(&head)
+            ))
+        })?;
+    match len {
+        0 => Ok(None),
+        1..=3 => Err(Error::Protocol("unexpected packet in commands".into())),
+        _ => {
+            let mut line = vec![0u8; len - 4];
+            r.read_exact(&mut line)
+                .map_err(|_| Error::Protocol("malformed pkt-line: truncated packet".into()))?;
+            if line.last() == Some(&b'\n') {
+                line.pop();
+            }
+            Ok(Some(line))
+        }
+    }
 }
 
 fn oid(s: &str) -> Result<[u8; 20]> {
@@ -108,45 +139,38 @@ fn oid(s: &str) -> Result<[u8; 20]> {
     Ok(out)
 }
 
-pub fn parse_request(body: &[u8]) -> Result<PushRequest<'_>> {
+/// Reads the commands, leaving `r` at the start of the pack.
+pub fn parse_request<R: std::io::Read>(r: &mut R) -> Result<PushRequest> {
     let mut req = PushRequest::default();
-    let mut r = Reader::new(body);
     let mut first = true;
-    loop {
-        match r.read()? {
-            Some(Pkt::Data(l)) => {
-                let line = String::from_utf8_lossy(l);
-                if line.starts_with("shallow ") {
-                    return Err(Error::Unsupported(
-                        "pushing from a shallow clone is not supported".into(),
-                    ));
-                }
-                let (cmd, caps) = line.split_once('\0').unwrap_or((&line, ""));
-                if first {
-                    for c in caps.split_whitespace() {
-                        match c {
-                            "side-band-64k" | "side-band" => req.side_band = true,
-                            "quiet" => req.quiet = true,
-                            _ => {}
-                        }
-                    }
-                    first = false;
-                }
-                let mut it = cmd.split(' ');
-                let (Some(old), Some(new), Some(git_ref), None) = (it.next(), it.next(), it.next(), it.next()) else {
-                    return Err(Error::Protocol(format!("bad command {cmd:?}")));
-                };
-                req.commands.push(Command {
-                    old: oid(old)?,
-                    new: oid(new)?,
-                    git_ref: git_ref.to_string(),
-                });
-            }
-            Some(Pkt::Flush) | None => break,
-            Some(Pkt::Delim | Pkt::End) => return Err(Error::Protocol("unexpected packet in commands".into())),
+    while let Some(l) = read_line(r)? {
+        let line = String::from_utf8_lossy(&l);
+        if line.starts_with("shallow ") {
+            return Err(Error::Unsupported(
+                "pushing from a shallow clone is not supported".into(),
+            ));
         }
+        let (cmd, caps) = line.split_once('\0').unwrap_or((&line, ""));
+        if first {
+            for c in caps.split_whitespace() {
+                match c {
+                    "side-band-64k" | "side-band" => req.side_band = true,
+                    "quiet" => req.quiet = true,
+                    _ => {}
+                }
+            }
+            first = false;
+        }
+        let mut it = cmd.split(' ');
+        let (Some(old), Some(new), Some(git_ref), None) = (it.next(), it.next(), it.next(), it.next()) else {
+            return Err(Error::Protocol(format!("bad command {cmd:?}")));
+        };
+        req.commands.push(Command {
+            old: oid(old)?,
+            new: oid(new)?,
+            git_ref: git_ref.to_string(),
+        });
     }
-    req.pack = r.rest();
     Ok(req)
 }
 
@@ -233,6 +257,15 @@ fn entry_mode(mode: u32, path: &str) -> Result<EntryMode> {
     }
 }
 
+/// Files are stored in batches of about this many bytes while a commit is converted.
+const STORE_BATCH: usize = 16 << 20;
+
+/// Who a push's files are stored for, and where.
+struct Sink<'a> {
+    p: &'a Principal,
+    backend: &'a dyn PushBackend,
+}
+
 /// Turns the pushed commits into Scion commits, parents first.
 pub struct Converter<'a> {
     pub meta: &'a dyn MetaStore,
@@ -244,6 +277,7 @@ pub struct Converter<'a> {
     commits: HashMap<[u8; 20], ObjectId>,
     /// Pack files to store before the commit that needs them.
     pending_files: Vec<(ObjectId, Bytes)>,
+    pending_bytes: usize,
     stored: HashSet<ObjectId>,
     /// Commits whose trees were indexed by git SHA, when a lookup missed.
     indexed: HashSet<ObjectId>,
@@ -259,6 +293,7 @@ impl<'a> Converter<'a> {
             objects: Objects::new(meta, blobs, repo),
             commits: HashMap::new(),
             pending_files: Vec::new(),
+            pending_bytes: 0,
             stored: HashSet::new(),
             indexed: HashSet::new(),
         }
@@ -311,9 +346,9 @@ impl<'a> Converter<'a> {
     }
 
     fn git_commit(&self, sha: &[u8; 20]) -> Result<GitCommit> {
-        match self.pack.objects.get(sha) {
+        match self.pack.get(sha)? {
             Some((ObjType::Commit, raw)) => {
-                parse_commit(raw).ok_or_else(|| Error::Protocol(format!("malformed commit {}", hex::encode(sha))))
+                parse_commit(&raw).ok_or_else(|| Error::Protocol(format!("malformed commit {}", hex::encode(sha))))
             }
             Some((ObjType::Tag, _)) => Err(Error::Unsupported(
                 "annotated tags are not supported; push a lightweight tag".into(),
@@ -332,8 +367,8 @@ impl<'a> Converter<'a> {
             return Ok(id);
         }
         for sha in self.order(tip).await? {
-            let raw = match self.pack.objects.get(&sha) {
-                Some((_, raw)) => raw.clone(),
+            let raw = match self.pack.get(&sha)? {
+                Some((_, raw)) => raw,
                 None => return Err(Error::Internal("ordered commit missing".into())),
             };
             let c = self.git_commit(&sha)?;
@@ -351,12 +386,10 @@ impl<'a> Converter<'a> {
             };
             let mut delta = Vec::new();
             let root = base.as_ref().map(|r| r.root_tree);
-            self.diff(c.tree, root, "", base.as_ref().map(|r| r.id), &mut delta)
+            let sink = Sink { p, backend };
+            self.diff(&sink, c.tree, root, "", base.as_ref().map(|r| r.id), &mut delta)
                 .await?;
-            let files = std::mem::take(&mut self.pending_files);
-            if !files.is_empty() {
-                backend.store(p, self.repo, files).await.map_err(Error::Unservable)?;
-            }
+            self.flush(&sink).await?;
             let mut ext = BTreeMap::from([(GIT_SHA1_EXTENSION.to_string(), sha.to_vec())]);
             if !rebuilds(&raw, &c) {
                 ext.insert(GIT_COMMIT_EXTENSION.to_string(), raw.to_vec());
@@ -401,11 +434,11 @@ impl<'a> Converter<'a> {
 
     /// A git tree's entries: from the pack, or rebuilt from a Scion directory with that SHA.
     async fn git_tree(&mut self, sha: [u8; 20], base_commit: Option<ObjectId>) -> Result<Vec<GitEntry>> {
-        if let Some((t, body)) = self.pack.objects.get(&sha) {
-            if *t != ObjType::Tree {
+        if let Some((t, body)) = self.pack.get(&sha)? {
+            if t != ObjType::Tree {
                 return Err(Error::Protocol(format!("{} is not a tree", hex::encode(sha))));
             }
-            return parse_tree(body);
+            return parse_tree(&body);
         }
         let id = self.lookup(GIT_TREE_ID_KIND, sha, base_commit).await?;
         let tree = self.load(id).await?;
@@ -413,17 +446,35 @@ impl<'a> Converter<'a> {
         parse_tree(&body)
     }
 
+    /// Stores the pack files gathered so far.
+    async fn flush(&mut self, sink: &Sink<'_>) -> Result<()> {
+        let files = std::mem::take(&mut self.pending_files);
+        self.pending_bytes = 0;
+        if files.is_empty() {
+            return Ok(());
+        }
+        sink.backend
+            .store(sink.p, self.repo, files)
+            .await
+            .map_err(Error::Unservable)
+    }
+
     /// A file by git SHA: from the pack (to be stored), or one the repository has.
-    async fn file(&mut self, sha: [u8; 20], base_commit: Option<ObjectId>) -> Result<(ObjectId, u64)> {
-        if let Some((t, content)) = self.pack.objects.get(&sha) {
-            if *t != ObjType::Blob {
+    async fn file(&mut self, sink: &Sink<'_>, sha: [u8; 20], base_commit: Option<ObjectId>) -> Result<(ObjectId, u64)> {
+        if let Some((t, content)) = self.pack.get(&sha)? {
+            if t != ObjType::Blob {
                 return Err(Error::Protocol(format!("{} is not a blob", hex::encode(sha))));
             }
-            let id = ObjectId::of_blob(content);
+            let id = ObjectId::of_blob(&content);
+            let len = content.len() as u64;
             if self.stored.insert(id) {
-                self.pending_files.push((id, content.clone()));
+                self.pending_bytes += content.len();
+                self.pending_files.push((id, content));
+                if self.pending_bytes >= STORE_BATCH {
+                    self.flush(sink).await?;
+                }
             }
-            return Ok((id, content.len() as u64));
+            return Ok((id, len));
         }
         let id = self.lookup(GIT_BLOB_ID_KIND, sha, base_commit).await?;
         let size = self
@@ -493,6 +544,7 @@ impl<'a> Converter<'a> {
     /// The changes from the Scion directory `base` to the git tree `git`, at `prefix`.
     async fn diff(
         &mut self,
+        sink: &Sink<'_>,
         git: [u8; 20],
         base: Option<ObjectId>,
         prefix: &str,
@@ -543,7 +595,7 @@ impl<'a> Converter<'a> {
                         self.delete_all(w.id, &format!("{path}/"), out).await?;
                     }
                 }
-                let (id, size) = self.file(e.sha, base_commit).await?;
+                let (id, size) = self.file(sink, e.sha, base_commit).await?;
                 out.push(FileChange::put(&path, mode, id, size));
             }
             for e in &base_entries {
@@ -600,21 +652,24 @@ mod tests {
         );
         body.extend_from_slice(pkt::FLUSH);
         body.extend_from_slice(b"PACK...");
-        let r = parse_request(&body).expect("parse");
+        let mut rest = &body[..];
+        let r = parse_request(&mut rest).expect("parse");
         assert_eq!(r.commands.len(), 2);
         assert_eq!(r.commands[0].new, [0xab; 20]);
         assert_eq!(r.commands[1].git_ref, "refs/tags/v1");
         assert!(r.side_band && r.quiet);
-        assert_eq!(r.pack, b"PACK...");
+        assert_eq!(rest, b"PACK...");
         for bad in ["x y", &format!("{} zz refs/heads/x", "00".repeat(20))] {
             let mut b = BytesMut::new();
             pkt::put_line(&mut b, bad);
-            assert!(parse_request(&b).is_err(), "{bad}");
+            assert!(parse_request(&mut &b[..]).is_err(), "{bad}");
         }
         let mut b = BytesMut::new();
         pkt::put_line(&mut b, &format!("shallow {}", "00".repeat(20)));
-        assert!(matches!(parse_request(&b), Err(Error::Unsupported(_))));
-        assert!(parse_request(b"0001").is_err());
+        assert!(matches!(parse_request(&mut &b[..]), Err(Error::Unsupported(_))));
+        assert!(parse_request(&mut &b"0001"[..]).is_err());
+        assert!(parse_request(&mut &b"zzzz"[..]).is_err());
+        assert!(parse_request(&mut &b"0010abc"[..]).is_err());
     }
 
     #[test]

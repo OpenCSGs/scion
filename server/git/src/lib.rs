@@ -58,8 +58,8 @@ pub type Body = BoxBody<Bytes, Infallible>;
 
 /// The largest fetch request accepted: wants and haves, after gzip.
 const MAX_REQUEST: usize = 16 << 20;
-/// The largest push accepted: the commands and the pack.
-const MAX_PUSH: usize = 1 << 30;
+/// The largest push accepted: the commands and the pack, spooled to a temporary file.
+const MAX_PUSH: usize = 16 << 30;
 
 /// The endpoints of the smart HTTP protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,14 +173,17 @@ impl Gateway {
                 self.info_refs(&repo, &default, v2).await
             };
         }
-        let limit = if push { MAX_PUSH } else { MAX_REQUEST };
-        let body = match read_body(&parts.headers, body, limit).await {
+        if push {
+            let file = match spool_body(&parts.headers, body, MAX_PUSH).await {
+                Ok(f) => f,
+                Err(r) => return *r,
+            };
+            return self.receive_pack(&principal, &repo, &default, file).await;
+        }
+        let body = match read_body(&parts.headers, body, MAX_REQUEST).await {
             Ok(b) => b,
             Err(r) => return *r,
         };
-        if push {
-            return self.receive_pack(&principal, &repo, &default, &body).await;
-        }
         self.upload_pack(repo, default, v2, body).await
     }
 
@@ -243,20 +246,30 @@ impl Gateway {
     }
 
     /// A push: unpacks, turns the new commits into Scion commits, updates each ref and reports.
-    async fn receive_pack(&self, p: &Principal, repo: &str, default: &str, body: &[u8]) -> Response<Body> {
+    async fn receive_pack(&self, p: &Principal, repo: &str, default: &str, body: std::fs::File) -> Response<Body> {
         const RESULT: &str = "application/x-git-receive-pack-result";
         let Some((backend, max_file)) = &self.push else {
             return text(StatusCode::FORBIDDEN, "this server does not accept git pushes");
         };
-        let req = match receive::parse_request(body) {
-            Ok(r) => r,
-            Err(e) => return git_response(RESULT, full(err_pkt(&e))),
-        };
-        let deletes_only = req.commands.iter().all(|c| c.new == receive::ZERO);
-        let unpacked = if deletes_only && req.pack.is_empty() {
-            Ok(unpack::Unpacked::default())
-        } else {
-            unpack::unpack(req.pack, *max_file)
+        // Reading the pack is blocking work: files and inflating
+        let max_file = *max_file;
+        let parsed = tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            let mut r = std::io::BufReader::with_capacity(1 << 16, body);
+            let req = receive::parse_request(&mut r)?;
+            let empty = r.fill_buf().map(|b| b.is_empty()).unwrap_or(true);
+            let unpacked = if empty && req.commands.iter().all(|c| c.new == receive::ZERO) {
+                Ok(unpack::Unpacked::default())
+            } else {
+                unpack::unpack(r, max_file)
+            };
+            Ok::<_, Error>((req, unpacked))
+        })
+        .await;
+        let (req, unpacked) = match parsed {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => return git_response(RESULT, full(err_pkt(&e))),
+            Err(e) => return failed(&Error::Internal(format!("reading the push: {e}"))),
         };
         let (unpack_status, results) = match &unpacked {
             Ok(pack) => {
@@ -622,6 +635,54 @@ where
         return Err(Box::new(text(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")));
     }
     Ok(Bytes::from(out))
+}
+
+/// Writes a push's body to a temporary file, gunzipped when git compressed it, and returns
+/// it rewound. More than `limit` bytes is refused.
+async fn spool_body<B>(
+    headers: &HeaderMap,
+    body: B,
+    limit: usize,
+) -> std::result::Result<std::fs::File, Box<Response<Body>>>
+where
+    B: http_body::Body<Data = Bytes> + Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    use std::io::{Seek, Write};
+    let io = |e: std::io::Error| Box::new(failed(&Error::Internal(format!("spooling the push: {e}"))));
+    let file = tempfile::tempfile().map_err(io)?;
+    let gzip = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("gzip"));
+    let mut out: Box<dyn Write + Send> = if gzip {
+        Box::new(flate2::write::GzDecoder::new(file.try_clone().map_err(io)?))
+    } else {
+        Box::new(file.try_clone().map_err(io)?)
+    };
+    let mut body = std::pin::pin!(body);
+    let mut total = 0usize;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| {
+            let e: Box<dyn std::error::Error + Send + Sync> = e.into();
+            Box::new(text(StatusCode::BAD_REQUEST, &format!("request body: {e}")))
+        })?;
+        let Ok(data) = frame.into_data() else { continue };
+        total += data.len();
+        if total > limit {
+            return Err(Box::new(text(StatusCode::PAYLOAD_TOO_LARGE, "the push is too large")));
+        }
+        if let Err(e) = out.write_all(&data) {
+            return Err(Box::new(text(StatusCode::BAD_REQUEST, &format!("request body: {e}"))));
+        }
+    }
+    if let Err(e) = out.flush() {
+        return Err(Box::new(text(StatusCode::BAD_REQUEST, &format!("request body: {e}"))));
+    }
+    drop(out);
+    let mut file = file;
+    file.rewind().map_err(io)?;
+    Ok(file)
 }
 
 fn full(b: Bytes) -> Body {

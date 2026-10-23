@@ -645,7 +645,21 @@ async fn git_pushes_land_as_scion_commits() {
     commit_all(&w, "late").await;
     let e = fails(&w, &["push", "-q", "origin", "main"]).await;
     assert!(e.contains("rejected") || e.contains("fetch first"), "{e}");
-    ok(&w, &["pull", "-q", "--rebase", "origin", "main"]).await;
+    ok(
+        &w,
+        &[
+            "-c",
+            "user.name=Grace",
+            "-c",
+            "user.email=grace@x",
+            "pull",
+            "-q",
+            "--rebase",
+            "origin",
+            "main",
+        ],
+    )
+    .await;
     ok(&w, &["push", "-q", "origin", "main"]).await;
     assert_eq!(read("other.txt").await.as_deref(), Some("other\n"));
     assert_eq!(read("late.txt").await.as_deref(), Some("late\n"));

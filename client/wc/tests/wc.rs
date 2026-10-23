@@ -1259,13 +1259,13 @@ async fn pick_reverts_and_repeats_a_commit() {
     let read = || std::fs::read_to_string(full_dir.join("a/x.txt")).expect("read");
 
     let (revert, again) = (PickKind::Revert, PickKind::CherryPick);
-    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None).await;
+    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None, None).await;
     assert!(matches!(o, Ok(PickOutcome::Picked { written: 1, .. })), "{o:?}");
     assert_eq!(read(), "x\n");
     full.land(&c).await.expect("land revert");
-    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None).await;
+    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None, None).await;
     assert!(matches!(o, Ok(PickOutcome::Empty)), "{o:?}");
-    let o = full.pick(&c, again, edit, Some(parent), "m".into(), None).await;
+    let o = full.pick(&c, again, edit, Some(parent), "m".into(), None, None).await;
     assert!(matches!(o, Ok(PickOutcome::Picked { .. })), "{o:?}");
     assert_eq!(read(), "x2\n");
     full.land(&c).await.expect("land pick");
@@ -1287,7 +1287,7 @@ async fn pick_reverts_and_repeats_a_commit() {
     sparse.sync(&c).await.expect("sync");
     let parent = c.resolve_revision(&outside.to_string()).await.expect("rev").parents[0];
     match sparse
-        .pick(&c, PickKind::Revert, outside, Some(parent), "m".into(), None)
+        .pick(&c, PickKind::Revert, outside, Some(parent), "m".into(), None, None)
         .await
     {
         Err(e @ Error::PickOutsideSparse(_)) => {
@@ -1409,7 +1409,7 @@ async fn several_pending_commits_stack_and_rebase_one_by_one() {
     a.merge(&c, "feat", None, None).await.expect("merge");
     write(&a_dir, "after.txt", "after\n");
     assert!(matches!(a.commit(&c, "on top", None).await, Err(Error::OnPendingMerge)));
-    let o = a.pick(&c, PickKind::Revert, one, None, "r".into(), None).await;
+    let o = a.pick(&c, PickKind::Revert, one, None, "r".into(), None, None).await;
     assert!(matches!(o, Err(Error::OnPendingMerge)), "{o:?}");
 }
 

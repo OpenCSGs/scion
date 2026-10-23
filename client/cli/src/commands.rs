@@ -1118,7 +1118,7 @@ pub async fn pick(
     author: Option<&str>,
     record_origin: bool,
 ) -> Result<PickOut, CliError> {
-    let author = match (kind, author) {
+    let given = match (kind, author) {
         (PickKind::CherryPick, None) => None,
         (_, a) => resolve_author(a)?,
     };
@@ -1142,18 +1142,18 @@ pub async fn pick(
         ),
         PickKind::CherryPick => commit.message.clone(),
     };
-    let author = author
-        .or_else(|| (kind == PickKind::CherryPick).then(|| (commit.author.name.clone(), commit.author.email.clone())));
+    // A cherry-pick keeps the author, with the time it was written; whoever applies it commits
+    let (author, committer) = match given {
+        Some((name, email)) => (Some(signature_now(name, email)), None),
+        None if kind == PickKind::CherryPick => (
+            Some(commit.author.clone()),
+            own_author().map(|(name, email)| signature_now(name, email)),
+        ),
+        None => (None, None),
+    };
     let new_subject = message.lines().next().unwrap_or("").to_owned();
     let o = wc
-        .pick(
-            &client,
-            kind,
-            commit.id,
-            parent,
-            message,
-            author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())),
-        )
+        .pick(&client, kind, commit.id, parent, message, author, committer)
         .await
         .map_err(|e| conflicted(&wc, ConflictOp::Pick(kind, commit.id.to_string()), e))?;
     let (changeset, written, removed) = match o {
@@ -1170,6 +1170,28 @@ pub async fn pick(
         subject: new_subject,
         kind,
     })
+}
+
+/// A signature made now, in UTC.
+fn signature_now(name: String, email: String) -> scion_client::Signature {
+    let time_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    scion_client::Signature {
+        name,
+        email,
+        time_ms,
+        tz_offset_minutes: 0,
+    }
+}
+
+/// Who makes new commits here: SCION_AUTHOR, else the configured author; no hint when unset.
+fn own_author() -> Option<(String, String)> {
+    if let Some(a) = std::env::var("SCION_AUTHOR").ok().and_then(|a| parse_author(&a).ok()) {
+        return Some(a);
+    }
+    let settings = crate::config::load(&crate::config::path(|k| std::env::var(k).ok())).ok()?;
+    crate::config::author(&settings, crate::config::git_config)
 }
 
 /// `scn revert --abort`: only while a revert waits on its conflicts.

@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bytes::Bytes;
-use scion_client::{ChangesetBuilder, Client, CreatedChangeset, DirEntry, Landed};
+use scion_client::{ChangesetBuilder, Client, CreatedChangeset, DirEntry, Landed, Signature};
 use scion_object::{EntryMode, ObjectId, Tree};
 
 pub use error::{Error, Result};
@@ -1366,6 +1366,9 @@ impl WorkingCopy {
     /// paths the commit changed inside the sparse checkout. Only those paths are merged, three-way, so
     /// later changes to them are kept (or conflict, like `merge`: the working tree then gets
     /// the results, text conflicts with markers, for `scn resolve` and `scn commit`).
+    /// `author` and `committer` default as for any commit; a cherry-pick passes the original
+    /// author, with its time, and who applies it as the committer.
+    #[allow(clippy::too_many_arguments)]
     pub async fn pick(
         &mut self,
         client: &Client,
@@ -1373,7 +1376,8 @@ impl WorkingCopy {
         commit: ObjectId,
         parent: Option<ObjectId>,
         message: String,
-        author: Option<(&str, &str)>,
+        author: Option<Signature>,
+        committer: Option<Signature>,
     ) -> Result<PickOutcome> {
         let _lock = self.paths.lock()?;
         self.check_no_conflict()?;
@@ -1422,7 +1426,7 @@ impl WorkingCopy {
         if changes.is_empty() {
             return Ok(PickOutcome::Empty);
         }
-        let author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
+        let names = author.as_ref().map(|a| (a.name.clone(), a.email.clone()));
         let sides = sides_of(&changes);
         if !sides.is_empty() {
             let created = self.write_results(client, &changes, &ours).await?;
@@ -1430,7 +1434,7 @@ impl WorkingCopy {
             self.state.conflict = Some(ConflictState {
                 paths: sides,
                 message: Some(message),
-                author,
+                author: names,
                 merge: None,
                 created,
                 pick: Some(Pick {
@@ -1443,13 +1447,16 @@ impl WorkingCopy {
             return Err(Error::Conflict(paths));
         }
         let mut builder = client.changeset(Some(current)).message(message.clone());
-        if let Some((name, email)) = &author {
-            builder = builder.author(name.clone(), email.clone());
+        if let Some(a) = author {
+            builder = builder.author_signature(a);
+        }
+        if let Some(c) = committer {
+            builder = builder.committer_signature(c);
         }
         let (created, written, removed) = self.commit_results(client, builder, changes, &sparse).await?;
         self.push_head(created.id);
         self.state.head_message = Some(message);
-        self.state.head_author = author;
+        self.state.head_author = names;
         self.state.head_merge = None;
         self.paths.save_state(&self.state)?;
         Ok(PickOutcome::Picked {

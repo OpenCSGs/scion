@@ -494,6 +494,7 @@ async fn cherry_pick_applies_a_commit_from_another_branch() {
             (top["author"].as_str(), top["email"].as_str()),
             (Some("Bob"), Some("bob@example.com"))
         );
+        assert_eq!(top["committer"].as_str(), Some("Ada"), "who applied it commits");
         json_of(&run(&["uncommit", "--json"]));
         json_of(&run(&["restore", ".", "--json"]));
         // -x names the original; --author overrides

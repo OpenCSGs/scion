@@ -2,7 +2,7 @@
 
 English | [简体中文](git-gateway.zh-CN.md)
 
-Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
+Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones and deltas are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
 
 Scion's own client is `scn`, but many tools speak only git: CI systems, IDEs, package managers, `git submodule`, starhub's users. The gateway lets the git CLI clone, fetch and push a Scion repository at the URL `scn` already uses:
 
@@ -67,7 +67,7 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 
 **Advertising refs.**
 - **v2** (git 2.26 and newer by default): `ls-refs` with `ref-prefix`, `symrefs` and `peel`; the `fetch` command.
-- **v0/v1:** the ref list with the capabilities `multi_ack_detailed`, `side-band-64k`, `ofs-delta`, `no-done`, `shallow`, `deepen-since`, `symref`, `agent`; v2 offers `fetch=shallow`.
+- **v0/v1:** the ref list with the capabilities `multi_ack_detailed`, `side-band-64k`, `thin-pack`, `ofs-delta`, `no-done`, `shallow`, `deepen-since`, `symref`, `agent`; v2 offers `fetch=shallow`.
 - Each ref's SHA comes from `GetGitShas`; a commit not derived yet is derived first.
 
 **Negotiation.**
@@ -88,8 +88,11 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 
 **The pack.**
 - Format: pack version 2, written as a stream with no temporary file; its trailer is the SHA-1 of the pack.
-- G1 sends whole objects, zlib-compressed. A clone moves more bytes than it would from git, but no work is spent finding deltas.
-- G3 adds deltas (`ofs-delta`), within a commit's changed paths: the new and old versions of a file.
+- **Deltas only along paths.** A tree or file that a commit changed is sent as a delta against the object at the same path in a parent, when the delta is clearly smaller; no other candidates are searched, so finding deltas costs one comparison per changed object.
+  - The base is named by offset (`ofs-delta`) when it is earlier in the pack, by SHA (`ref-delta`) when it comes later or, with `thin-pack`, when the client has it: an incremental fetch sends changed files as deltas against the client's copies.
+  - Trees and files go oldest first, so bases mostly come first. Recently written contents (64 MiB) are kept for deltas; other bases are read again.
+  - The delta indexes the base by 16-byte blocks and extends each match both ways. Files over 32 MiB are sent whole.
+  - Measured on this repository (254 commits): a clone's pack is 10.0 MB against git's 9.1 MB (whole objects: 22 MB), and the clone is faster than without deltas (3.6 s against 5.9 s), since fewer bytes are compressed and sent.
 - Output goes through side band 1, with progress on side band 2 (`Counting objects`, `Writing objects`).
 - **Memory stays bounded.** Objects are streamed as they are read. The sets of SHAs already sent hold 20 bytes per object.
 

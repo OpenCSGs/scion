@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
+状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆和 delta 已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -67,7 +67,7 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **公布 ref。**
 - **v2**（git 2.26 起默认使用）：支持 `ls-refs`（含 `ref-prefix`、`symrefs`、`peel`）和 `fetch` 命令。
-- **v0/v1**：ref 列表，能力为 `multi_ack_detailed`、`side-band-64k`、`ofs-delta`、`no-done`、`shallow`、`deepen-since`、`symref`、`agent`；v2 提供 `fetch=shallow`。
+- **v0/v1**：ref 列表，能力为 `multi_ack_detailed`、`side-band-64k`、`thin-pack`、`ofs-delta`、`no-done`、`shallow`、`deepen-since`、`symref`、`agent`；v2 提供 `fetch=shallow`。
 - 每个 ref 的 SHA 来自 `GetGitShas`；还没算过的提交先计算。
 
 **协商。**
@@ -88,8 +88,11 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **pack。**
 - 格式为 pack 第 2 版，边生成边发送，不写临时文件；末尾是整个 pack 的 SHA-1。
-- G1 只发完整对象（zlib 压缩）。克隆传输的字节比从 git 服务器克隆多，但不花时间计算 delta。
-- G3 加入 delta（`ofs-delta`），只在提交改动的路径上计算，即同一文件的新旧版本之间。
+- **只沿路径找 delta。** 提交改动的目录树或文件，以父提交同一路径上的对象为基准发送 delta（delta 明显更小时）；不搜索其他候选，所以每个改动的对象只比较一次。
+  - 基准在 pack 中更靠前时按偏移引用（`ofs-delta`）；基准在后面，或者客户端声明了 `thin-pack` 且已有基准时，按 SHA 引用（`ref-delta`）：增量拉取时，改动的文件以客户端已有的版本为基准发送 delta。
+  - 目录树和文件按从旧到新的顺序写入，基准大多先出现。最近写出的内容（64 MiB）留作 delta 基准，其余基准重新读取。
+  - delta 按 16 字节分块索引基准，每个匹配向前后扩展。超过 32 MiB 的文件整体发送。
+  - 以本仓库（254 个提交）实测：克隆的 pack 为 10.0 MB，git 为 9.1 MB（不用 delta 时为 22 MB）；克隆也比不用 delta 快（3.6 秒对 5.9 秒），因为压缩和发送的字节更少。
 - 数据走 side band 1，进度走 side band 2（`Counting objects`、`Writing objects`）。
 - **内存有上限。** 对象边读边发；记录已发送 SHA 的集合每个对象占 20 字节。
 

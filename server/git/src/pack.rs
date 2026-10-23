@@ -1,5 +1,5 @@
-//! Writing git packfiles (version 2): a header, whole zlib-compressed objects and the SHA-1 of
-//! everything before the trailer.
+//! Writing git packfiles (version 2): a header, whole zlib-compressed objects or deltas, and the
+//! SHA-1 of everything before the trailer.
 
 use std::io::Write;
 
@@ -30,6 +30,8 @@ impl Kind {
 pub struct PackWriter {
     hash: Sha1,
     level: Compression,
+    /// Where the next entry starts.
+    offset: u64,
 }
 
 impl PackWriter {
@@ -46,15 +48,44 @@ impl PackWriter {
         let w = Self {
             hash,
             level: Compression::fast(),
+            offset: head.len() as u64,
         };
         (w, head.freeze())
     }
 
+    /// Where the next entry will start: what an ofs-delta names its base by.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
     /// One whole object: its type and size header, then the compressed content.
     pub fn object(&mut self, kind: Kind, data: &[u8]) -> Bytes {
-        let mut out = BytesMut::with_capacity(data.len() / 2 + 16);
+        self.entry(kind as u8, &[], data)
+    }
+
+    /// A delta against the entry at `base` (an offset this writer returned earlier).
+    pub fn ofs_delta(&mut self, base: u64, delta: &[u8]) -> Bytes {
+        let mut back = self.offset - base;
+        let mut enc = vec![(back & 0x7f) as u8];
+        back >>= 7;
+        while back > 0 {
+            back -= 1;
+            enc.push(0x80 | (back & 0x7f) as u8);
+            back >>= 7;
+        }
+        enc.reverse();
+        self.entry(6, &enc, delta)
+    }
+
+    /// A delta against the object with this git SHA, in the pack or (in a thin pack) on the client.
+    pub fn ref_delta(&mut self, base: &[u8; 20], delta: &[u8]) -> Bytes {
+        self.entry(7, base, delta)
+    }
+
+    fn entry(&mut self, kind: u8, extra: &[u8], data: &[u8]) -> Bytes {
+        let mut out = BytesMut::with_capacity(data.len() / 2 + 32);
         let mut size = data.len() as u64;
-        let mut byte = ((kind as u8) << 4) | (size & 0x0f) as u8;
+        let mut byte = (kind << 4) | (size & 0x0f) as u8;
         size >>= 4;
         while size > 0 {
             out.put_u8(byte | 0x80);
@@ -62,11 +93,13 @@ impl PackWriter {
             size >>= 7;
         }
         out.put_u8(byte);
+        out.put_slice(extra);
         let mut z = ZlibEncoder::new((&mut out).writer(), self.level);
         // Writing to memory cannot fail.
         z.write_all(data).expect("zlib into memory");
         z.finish().expect("zlib into memory");
         self.hash.update(&out);
+        self.offset += out.len() as u64;
         out.freeze()
     }
 
@@ -102,5 +135,26 @@ mod tests {
         all.update(&big);
         assert_eq!(&trailer[..], &all.finalize()[..]);
         assert_eq!(Kind::Commit.name(), "commit");
+    }
+
+    #[test]
+    fn writes_deltas_that_unpack() {
+        let base = b"0123456789abcdef0123456789abcdef the base".to_vec();
+        let target = b"0123456789abcdef0123456789abcdef the target".to_vec();
+        let d = crate::delta::delta(&base, &target).expect("delta");
+        let target_sha = crate::unpack::object_sha(crate::unpack::ObjType::Blob, &target);
+        let base_sha = crate::unpack::object_sha(crate::unpack::ObjType::Blob, &base);
+        let (mut w, head) = PackWriter::new(3);
+        let mut pack = head.to_vec();
+        let at = w.offset();
+        pack.extend_from_slice(&w.object(Kind::Blob, &base));
+        pack.extend_from_slice(&w.ofs_delta(at, &d));
+        let d2 = crate::delta::delta(&target, &base).expect("delta");
+        pack.extend_from_slice(&w.ref_delta(&target_sha, &d2));
+        assert_eq!(w.offset() as usize, pack.len());
+        pack.extend_from_slice(&w.finish());
+        let u = crate::unpack::unpack(&pack, 1 << 20).expect("unpack");
+        assert_eq!(&u.objects[&target_sha].1[..], &target[..]);
+        assert_eq!(&u.objects[&base_sha].1[..], &base[..]);
     }
 }

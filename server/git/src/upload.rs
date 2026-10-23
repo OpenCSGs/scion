@@ -58,8 +58,9 @@ pub async fn advertised(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str,
 
 /// The v0 advertisement after the service line: refs with capabilities on the first line.
 pub fn advertise_v0(adv: &Advertised, agent: &str) -> BytesMut {
-    let mut caps =
-        String::from("multi_ack_detailed no-done side-band-64k ofs-delta shallow deepen-since object-format=sha1");
+    let mut caps = String::from(
+        "multi_ack_detailed no-done side-band-64k thin-pack ofs-delta shallow deepen-since object-format=sha1",
+    );
     if let Some((target, _)) = &adv.head {
         caps.push_str(&format!(" symref=HEAD:{target}"));
     }
@@ -184,6 +185,9 @@ pub struct FetchRequest {
     /// v0: the request ended with its wants, before any haves. A shallow client asks this
     /// first, and expects only the shallow update back.
     pub wants_only: bool,
+    /// Deltas may name objects the client has (`thin-pack`), and earlier entries by offset.
+    pub thin_pack: bool,
+    pub ofs_delta: bool,
 }
 
 /// How deep a shallow fetch goes.
@@ -258,6 +262,10 @@ pub fn parse_fetch_v2(args: &[&[u8]]) -> Result<FetchRequest> {
             req.done = true;
         } else if *a == b"no-progress" {
             req.no_progress = true;
+        } else if *a == b"thin-pack" {
+            req.thin_pack = true;
+        } else if *a == b"ofs-delta" {
+            req.ofs_delta = true;
         }
     }
     Ok(req)
@@ -294,6 +302,8 @@ pub fn parse_fetch_v0(body: &[u8]) -> Result<FetchRequest> {
                     match c {
                         "side-band-64k" | "side-band" => req.side_band = true,
                         "no-progress" => req.no_progress = true,
+                        "thin-pack" => req.thin_pack = true,
+                        "ofs-delta" => req.ofs_delta = true,
                         "multi_ack_detailed" => req.multi_ack = true,
                         "no-done" => req.no_done = true,
                         _ => {}
@@ -342,12 +352,13 @@ pub async fn resolve_wants(meta: &dyn MetaStore, repo: &str, wants: &[[u8; 20]])
     Ok(found.into_iter().map(|(_, id)| id).collect())
 }
 
-/// What a pack holds: commits newest first, then trees, then files.
+/// What a pack holds: commits newest first, then trees, then files. Each tree and file comes
+/// with the object at the same path in a parent, a base to send it as a delta against.
 #[derive(Debug, Default)]
 pub struct Plan {
     pub commits: Vec<ChangesetRecord>,
-    pub trees: Vec<ObjectId>,
-    pub files: Vec<ObjectId>,
+    pub trees: Vec<(ObjectId, Option<ObjectId>)>,
+    pub files: Vec<(ObjectId, Option<ObjectId>)>,
 }
 
 impl Plan {
@@ -475,7 +486,7 @@ pub async fn plan(
             if bases.contains(&tree) || !seen.insert(tree) {
                 continue;
             }
-            plan.trees.push(tree);
+            plan.trees.push((tree, bases.first().copied()));
             let t = load_tree(blobs, tree).await?;
             let mut base_entries: Vec<HashMap<String, TreeEntry>> = Vec::with_capacity(bases.len());
             for b in &bases {
@@ -499,7 +510,8 @@ pub async fn plan(
                     stack.push((e.id, sub));
                 } else if seen.insert(e.id) {
                     check_blob(e.id)?;
-                    plan.files.push(e.id);
+                    let base = same.iter().find(|b| b.mode != EntryMode::Tree).map(|b| b.id);
+                    plan.files.push((e.id, base));
                 }
             }
         }
@@ -595,7 +607,8 @@ pub async fn shallow(
 }
 
 /// Refuses a pack with redacted files: their git SHAs cover content nobody may read any more.
-pub async fn check_redactions(meta: &dyn MetaStore, repo: &str, files: &[ObjectId]) -> Result<()> {
+pub async fn check_redactions(meta: &dyn MetaStore, repo: &str, files: &[(ObjectId, Option<ObjectId>)]) -> Result<()> {
+    let files: Vec<ObjectId> = files.iter().map(|(id, _)| *id).collect();
     for chunk in files.chunks(1000) {
         let found = meta.get_redactions(repo, chunk).await?;
         if let Some(r) = found.iter().find(|r| r.active) {
@@ -662,8 +675,116 @@ impl Out {
     }
 }
 
-/// Writes the plan as a pack. Returns early, with no error, when the client goes away.
-pub async fn write_pack(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str, plan: &Plan, out: &Out) -> Result<()> {
+/// A file's git blob SHA, from derived data or computed from its content.
+async fn blob_sha(meta: &dyn MetaStore, repo: &str, id: ObjectId, content: &[u8]) -> Result<[u8; 20]> {
+    let found = meta
+        .get_derived(
+            repo,
+            scion_query::GIT_BLOB_KIND,
+            scion_query::GIT_OBJECT_VERSION,
+            &id.to_bytes(),
+        )
+        .await?;
+    Ok(match found.and_then(|v| <[u8; 20]>::try_from(v.as_slice()).ok()) {
+        Some(sha) => sha,
+        None => scion_query::git_hash("blob", content),
+    })
+}
+
+/// How a pack may refer to other objects.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PackOptions {
+    /// Deltas against objects the client has.
+    pub thin: bool,
+    /// Deltas naming earlier entries by offset (otherwise by SHA).
+    pub ofs: bool,
+}
+
+/// Contents written recently, for deltas against them, within a byte budget.
+struct Recent {
+    map: HashMap<ObjectId, (u64, Bytes)>,
+    order: std::collections::VecDeque<ObjectId>,
+    bytes: usize,
+}
+
+/// What the cache of written contents may hold.
+const RECENT_BYTES: usize = 64 << 20;
+
+impl Recent {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: Default::default(),
+            bytes: 0,
+        }
+    }
+
+    fn insert(&mut self, id: ObjectId, offset: u64, content: Bytes) {
+        if content.len() > crate::delta::MAX_DELTA_INPUT {
+            return;
+        }
+        self.bytes += content.len();
+        self.map.insert(id, (offset, content));
+        self.order.push_back(id);
+        while self.bytes > RECENT_BYTES {
+            let Some(old) = self.order.pop_front() else { break };
+            if let Some((_, c)) = self.map.remove(&old) {
+                self.bytes -= c.len();
+            }
+        }
+    }
+}
+
+/// One tree or file entry: a delta when it pays off and the base can be named, else whole.
+struct Deltas {
+    opts: PackOptions,
+    /// Everything the pack holds, which deltas may name whatever the order.
+    planned: HashSet<ObjectId>,
+    written: HashMap<ObjectId, u64>,
+    recent: Recent,
+}
+
+impl Deltas {
+    /// The pack entry for `content`, given its base's content and git SHA when known.
+    fn entry(
+        &mut self,
+        w: &mut PackWriter,
+        kind: Kind,
+        id: ObjectId,
+        content: &Bytes,
+        base: Option<(ObjectId, &[u8], [u8; 20])>,
+    ) -> Bytes {
+        let at = w.offset();
+        let entry = base
+            .and_then(|(bid, bytes, sha)| {
+                let d = crate::delta::delta(bytes, content)?;
+                match self.written.get(&bid) {
+                    Some(off) if self.opts.ofs => Some(w.ofs_delta(*off, &d)),
+                    _ => Some(w.ref_delta(&sha, &d)),
+                }
+            })
+            .unwrap_or_else(|| w.object(kind, content));
+        self.written.insert(id, at);
+        self.recent.insert(id, at, content.clone());
+        entry
+    }
+
+    /// Whether a delta may name `base`: it is in the pack, or the client has it and takes a thin pack.
+    fn can_name(&self, base: ObjectId) -> bool {
+        self.planned.contains(&base) || self.opts.thin
+    }
+}
+
+/// Writes the plan as a pack. Trees and files go oldest first, so that a delta's base usually
+/// comes before it. Returns early, with no error, when the client goes away.
+pub async fn write_pack(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    repo: &str,
+    plan: &Plan,
+    out: &Out,
+    opts: PackOptions,
+) -> Result<()> {
     let total = plan.len();
     if !out.progress(&format!("Counting objects: {total}, done.\n")).await {
         return Ok(());
@@ -682,25 +803,75 @@ pub async fn write_pack(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str,
             return Ok(());
         }
     }
-    for t in &plan.trees {
+    let mut d = Deltas {
+        opts,
+        planned: plan.trees.iter().chain(&plan.files).map(|(id, _)| *id).collect(),
+        written: HashMap::new(),
+        recent: Recent::new(),
+    };
+    for (t, base) in plan.trees.iter().rev() {
         let tree = load_tree(blobs, *t).await?;
-        let body = objects.tree(*t, &tree).await?;
-        if !out.data(w.object(Kind::Tree, &body)).await {
+        let body = Bytes::from(objects.tree(*t, &tree).await?);
+        let base = match base.filter(|b| d.can_name(*b)) {
+            Some(b) => {
+                let bytes = match d.recent.map.get(&b) {
+                    Some((_, c)) => c.clone(),
+                    None => Bytes::from(objects.tree(b, &load_tree(blobs, b).await?).await?),
+                };
+                Some((b, bytes, objects.tree_sha(b).await?))
+            }
+            None => None,
+        };
+        let entry = d.entry(
+            &mut w,
+            Kind::Tree,
+            *t,
+            &body,
+            base.as_ref().map(|(b, c, s)| (*b, &c[..], *s)),
+        );
+        if !out.data(entry).await {
             return Ok(());
         }
     }
-    let files = futures::stream::iter(plan.files.iter().copied())
-        .map(|id| async move {
-            blobs
+    // Each read also fetches the base and its SHA: the loop below must not touch storage while
+    // reads are in flight, or they could hold every connection it needs
+    let can_name = |b: &ObjectId| d.can_name(*b);
+    let wanted: Vec<(ObjectId, Option<ObjectId>)> = plan
+        .files
+        .iter()
+        .rev()
+        .map(|(id, base)| (*id, base.filter(|b| can_name(b))))
+        .collect();
+    let files = futures::stream::iter(wanted)
+        .map(|(id, base)| async move {
+            let content = blobs
                 .get(&id)
                 .await?
-                .ok_or_else(|| Error::Unservable(format!("the content of file {id} is missing (purged?)")))
+                .ok_or_else(|| Error::Unservable(format!("the content of file {id} is missing (purged?)")))?;
+            let base = match base.filter(|_| content.len() <= crate::delta::MAX_DELTA_INPUT) {
+                Some(b) => match blobs.get(&b).await? {
+                    Some(bytes) => {
+                        let sha = blob_sha(meta, repo, b, &bytes).await?;
+                        Some((b, bytes, sha))
+                    }
+                    None => None,
+                },
+                None => None,
+            };
+            Ok::<_, Error>((id, content, base))
         })
         .buffered(READ_AHEAD);
     let mut files = std::pin::pin!(files);
     let mut sent = 0usize;
-    while let Some(content) = files.try_next().await? {
-        if !out.data(w.object(Kind::Blob, &content)).await {
+    while let Some((id, content, base)) = files.try_next().await? {
+        let entry = d.entry(
+            &mut w,
+            Kind::Blob,
+            id,
+            &content,
+            base.as_ref().map(|(b, c, s)| (*b, &c[..], *s)),
+        );
+        if !out.data(entry).await {
             return Ok(());
         }
         sent += 1;
@@ -891,7 +1062,7 @@ mod tests {
         let s = scion_store::MemStore::new();
         s.create_repo("r").await.expect("repo");
         let id = ObjectId::of_blob(b"secret");
-        assert_eq!(check_redactions(&s, "r", &[id]).await, Ok(()));
+        assert_eq!(check_redactions(&s, "r", &[(id, None)]).await, Ok(()));
         s.put_redactions(&[scion_store::Redaction {
             id,
             repo: "r".into(),
@@ -906,7 +1077,7 @@ mod tests {
         }])
         .await
         .expect("redact");
-        let e = check_redactions(&s, "r", &[id]).await.expect_err("redacted");
+        let e = check_redactions(&s, "r", &[(id, None)]).await.expect_err("redacted");
         assert!(e.to_string().contains("red-1"), "{e}");
         let e = resolve_wants(&s, "r", &[sha(7)]).await.expect_err("unknown");
         assert!(e.to_string().contains(&"07".repeat(20)), "{e}");

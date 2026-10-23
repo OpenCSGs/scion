@@ -3,6 +3,7 @@
 //! [`Gateway::serve`] answers `GET /<repo>/info/refs?service=…` and `POST /<repo>/git-upload-pack`
 //! (protocol v0 and v2) and, with a [`receive::PushBackend`], `POST /<repo>/git-receive-pack`.
 
+pub mod delta;
 pub mod objects;
 pub mod pack;
 pub mod pkt;
@@ -403,7 +404,7 @@ async fn fetch(
     if req.wants.is_empty() {
         return;
     }
-    let (wants, haves, cut) = match negotiate(meta, blobs, repo, req, v2).await {
+    let selection = match negotiate(meta, blobs, repo, req, v2).await {
         Ok((head, found)) => {
             if tx.send(head.freeze()).await.is_err() {
                 return;
@@ -420,7 +421,11 @@ async fn fetch(
         }
     };
     let out = Out::new(tx.clone(), req.side_band, !req.no_progress);
-    match send_pack(meta, blobs, repo, &wants, &haves, &cut, &out).await {
+    let opts = upload::PackOptions {
+        thin: req.thin_pack,
+        ofs: req.ofs_delta,
+    };
+    match send_pack(meta, blobs, repo, &selection, opts, &out).await {
         Ok(()) => out.flush().await,
         Err(e) => {
             tracing::warn!(%repo, error = %e, "git fetch failed");
@@ -429,9 +434,15 @@ async fn fetch(
     }
 }
 
-/// Wanted and common commits and the shallow boundary, once ready to send the pack (`None`
-/// when the client should send more haves).
-type Found = Option<(Vec<ObjectId>, Vec<ObjectId>, std::collections::HashSet<ObjectId>)>;
+/// What the pack is to hold: the wanted and common commits, and the shallow boundary.
+struct Selection {
+    wants: Vec<ObjectId>,
+    haves: Vec<ObjectId>,
+    cut: std::collections::HashSet<ObjectId>,
+}
+
+/// The selection once ready to send the pack (`None` when the client should send more haves).
+type Found = Option<Selection>;
 
 /// The acknowledgments, and what the pack is to hold. Wants this repository does not have are
 /// refused before anything else is sent.
@@ -481,7 +492,14 @@ async fn negotiate(
             head.extend_from_slice(pkt::DELIM);
         }
         pkt::put_line(&mut head, "packfile");
-        return Ok((head, Some((wants, ids, shallow.cut))));
+        return Ok((
+            head,
+            Some(Selection {
+                wants,
+                haves: ids,
+                cut: shallow.cut,
+            }),
+        ));
     }
     // v0: the shallow update comes first, in every response of a stateless exchange
     if req.deepen.is_some() {
@@ -510,21 +528,27 @@ async fn negotiate(
         Some(l) => pkt::put_line(&mut head, &format!("ACK {l}")),
         None => pkt::put_line(&mut head, "NAK"),
     }
-    Ok((head, Some((wants, ids, shallow.cut))))
+    Ok((
+        head,
+        Some(Selection {
+            wants,
+            haves: ids,
+            cut: shallow.cut,
+        }),
+    ))
 }
 
 async fn send_pack(
     meta: &dyn MetaStore,
     blobs: &dyn BlobStore,
     repo: &str,
-    wants: &[ObjectId],
-    haves: &[ObjectId],
-    cut: &std::collections::HashSet<ObjectId>,
+    sel: &Selection,
+    opts: upload::PackOptions,
     out: &Out,
 ) -> Result<()> {
-    let plan = upload::plan(meta, blobs, repo, wants, haves, cut).await?;
+    let plan = upload::plan(meta, blobs, repo, &sel.wants, &sel.haves, &sel.cut).await?;
     upload::check_redactions(meta, repo, &plan.files).await?;
-    upload::write_pack(meta, blobs, repo, &plan, out).await
+    upload::write_pack(meta, blobs, repo, &plan, out, opts).await
 }
 
 /// The token in `Authorization`: the password of Basic credentials, or a Bearer token.

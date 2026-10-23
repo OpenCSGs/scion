@@ -34,6 +34,12 @@ async fn git(dir: &Path, args: &[&str]) -> Output {
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("no_proxy", "*")
             .env("LC_ALL", "C")
+            // No background gc or maintenance rewriting packs while a test reads them
+            .env("GIT_CONFIG_COUNT", "2")
+            .env("GIT_CONFIG_KEY_0", "gc.auto")
+            .env("GIT_CONFIG_VALUE_0", "0")
+            .env("GIT_CONFIG_KEY_1", "maintenance.auto")
+            .env("GIT_CONFIG_VALUE_1", "false")
             .output()
             .expect("run git")
     })
@@ -787,4 +793,120 @@ async fn git_pushes_land_as_scion_commits() {
     ok(&m, &["fetch", "-q", "origin", "+refs/heads/*:refs/heads/*"]).await;
     assert_eq!(ok(&m, &["rev-parse", "main"]).await.trim(), sha.trim());
     ok(&m, &["fsck", "--strict", "--no-dangling"]).await;
+}
+
+/// Number of delta entries in the packs of a repository.
+async fn deltas(dir: &Path) -> usize {
+    let mut n = 0;
+    for e in std::fs::read_dir(dir.join("objects/pack")).expect("packs").flatten() {
+        let p = e.path();
+        if p.extension().is_some_and(|x| x == "idx") {
+            let out = ok(dir, &["verify-pack", "-v", p.to_str().expect("path")]).await;
+            n += out.lines().filter(|l| l.split_whitespace().count() >= 7).count();
+        }
+    }
+    n
+}
+
+/// Packs carry deltas: a clone against earlier versions in the pack, a fetch against objects
+/// the client has (a thin pack).
+#[tokio::test(flavor = "multi_thread")]
+async fn packs_send_changed_files_as_deltas() {
+    if !have_git() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let store = Arc::new(MemStore::new());
+    store.create_repo("mono").await.expect("repo");
+    let (url, _stop) = start(ServerConfig::default(), store).await;
+    let c = Client::builder()
+        .endpoint(&url)
+        .repo("mono")
+        .build()
+        .await
+        .expect("connect");
+    let text = |edit: usize| -> String {
+        (0..3000)
+            .map(|i| {
+                if i == edit {
+                    "an edited line\n".to_string()
+                } else {
+                    format!("line {i} of a long file\n")
+                }
+            })
+            .collect()
+    };
+    let mut parent = None;
+    let mut ids = Vec::new();
+    for (i, edit) in [usize::MAX, 10, 2000].into_iter().enumerate() {
+        let cs = c
+            .changeset(parent)
+            .put("big.txt", text(edit))
+            .put(format!("dir{i}/small.txt"), "x\n")
+            .message(format!("v{i}\n"))
+            .create()
+            .await
+            .expect("commit");
+        c.land("main", &cs.id).await.expect("land");
+        parent = Some(cs.id);
+        ids.push(cs.id);
+    }
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path();
+    ok(root, &["clone", "-q", "--bare", &format!("{url}/mono"), "full.git"]).await;
+    let full = root.join("full.git");
+    assert!(deltas(&full).await >= 2, "the two edits of big.txt are deltas");
+    let size: u64 = std::fs::read_dir(full.join("objects/pack"))
+        .expect("packs")
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
+        .map(|e| e.metadata().expect("meta").len())
+        .sum();
+    assert!(size < 40_000, "three versions of a 70 KB file in {size} bytes");
+    ok(&full, &["fsck", "--strict", "--no-dangling"]).await;
+
+    // A fetch of one new version: a thin pack, whose delta names the client's copy
+    ok(
+        root,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            "--depth",
+            "1",
+            &format!("{url}/mono"),
+            "thin.git",
+        ],
+    )
+    .await;
+    let thin = root.join("thin.git");
+    let cs = c
+        .changeset(parent)
+        .put("big.txt", text(2999))
+        .message("v3\n")
+        .create()
+        .await
+        .expect("commit");
+    c.land("main", &cs.id).await.expect("land");
+    let before = deltas(&thin).await;
+    ok(
+        &thin,
+        &["-c", "fetch.unpackLimit=1", "fetch", "-q", "origin", "main:main"],
+    )
+    .await;
+    assert!(deltas(&thin).await > before, "the new version came as a delta");
+    ok(&thin, &["fsck", "--no-dangling"]).await;
+    // The same over protocol v0
+    let v0 = [
+        "-c",
+        "protocol.version=0",
+        "-c",
+        "transfer.unpackLimit=1",
+        "clone",
+        "-q",
+        "--bare",
+    ];
+    ok(root, &[&v0[..], &[&format!("{url}/mono"), "v0.git"]].concat()).await;
+    let n = deltas(&root.join("v0.git")).await;
+    assert!(n >= 3, "{n} deltas");
 }

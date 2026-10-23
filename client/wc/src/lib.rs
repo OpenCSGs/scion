@@ -154,8 +154,16 @@ async fn three_way(
             let f = match merge::merge_lines(&bd, &od, &td) {
                 Ok(merged) => {
                     let merged = Bytes::from(merged);
-                    let id = ObjectId::of_blob(&merged);
-                    Final::Data(TreeFile { mode: *mode, id }, merged)
+                    let file = TreeFile {
+                        mode: *mode,
+                        id: ObjectId::of_blob(&merged),
+                    };
+                    // Theirs brought nothing ours lacks
+                    if Some(file) == *o {
+                        Final::Version(*o)
+                    } else {
+                        Final::Data(file, merged)
+                    }
                 }
                 Err((kind, marked)) => Final::Conflict {
                     kind: if b.is_none() && kind == ConflictKind::Content {

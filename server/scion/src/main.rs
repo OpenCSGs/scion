@@ -185,6 +185,10 @@ struct ServerArgs {
     /// Repository to create at startup if missing (repeatable).
     #[arg(long = "repo", value_name = "NAME")]
     repos: Vec<String>,
+    /// Do not serve git clients: without it, git's smart HTTP protocol (clone and fetch) is served on
+    /// the same address, at each repository's URL.
+    #[arg(long, env = "SCION_NO_GIT")]
+    no_git: bool,
     /// Cluster mode: this node's address for other nodes (such as http://10.0.0.5:7080). Nodes that share one
     /// metadata store and object storage land each ref on the node holding its lease; others forward to it.
     #[arg(long, value_name = "URL", env = "SCION_ADVERTISE_URL", conflicts_with = "lite")]
@@ -618,6 +622,7 @@ async fn build_app(args: &ServerArgs, env: impl Fn(&str) -> Option<String>) -> a
             repo_delete_grace: args.repo_delete_grace,
             events: args.events.config()?,
             pre_land: args.events.pre_land()?,
+            git: !args.no_git,
             ..ServerConfig::default()
         }),
         meta,
@@ -997,9 +1002,22 @@ mod tests {
         .expect("parse");
         assert_eq!(cli.log_format, LogFormat::Json);
         match cli.command {
-            Command::Server(a) => assert_eq!(a.repos, ["a", "b/c"]),
+            Command::Server(a) => {
+                assert_eq!(a.repos, ["a", "b/c"]);
+                assert!(!a.no_git);
+            }
             _ => panic!("expected server"),
         }
+    }
+
+    #[tokio::test]
+    async fn no_git_turns_the_gateway_off() {
+        let a = args(&["--no-git", "--meta", "mem", "--blobs", "mem"]);
+        let (app, _) = build_app(&a, |_| None).await.expect("app");
+        assert!(!app.config.git);
+        let a = args(&["--meta", "mem", "--blobs", "mem"]);
+        let (app, _) = build_app(&a, |_| None).await.expect("app");
+        assert!(app.config.git);
     }
 
     #[test]

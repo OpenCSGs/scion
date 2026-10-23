@@ -95,5 +95,5 @@ Suffixes combine as in git, for example `main~2^2`. A branch whose name literall
 
 - **Working copy**: checking out an old revision, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
 - **Queries**: annotated tags, `grep`, `bisect`, `reflog`.
-- **Collaboration**: `remote add`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
+- **Collaboration**: `remote add`, `fetch`. The git CLI itself can clone and fetch a Scion repository (see [git clients](git-clients.md)), but cannot push to it yet.
 - **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. The commit it stopped on becomes local changes on top of the new tip (and the commits rebased before it); `scn commit` finishes it and goes on with the pending commits after it.

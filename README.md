@@ -68,7 +68,7 @@ Without `--server`, the script installs only the client, `scn`. From source inst
 
 **Know git?** Most git commands work in scn as you type them, starting with `scn clone http://host/REPO`: see [git commands in scn](docs/guide/git-commands.md) for the full list.
 
-[A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) explains how the model differs.
+[A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) explains how the model differs. Tools that only speak git can clone and fetch the same URL: see [git clients](docs/guide/git-clients.md).
 
 ## Deployment
 
@@ -127,7 +127,7 @@ With an OIDC provider or a GitHub OAuth app configured, people sign in with `scn
 
 | | |
 |---|---|
-| **Use** | [Deploy](docs/guide/deploy.md) · [CLI tour](docs/guide/cli.md) · [Git commands](docs/guide/git-commands.md) · [Coming from git](docs/guide/coming-from-git.md) · [Git import](docs/guide/git-import.md) · [Sparse checkout](docs/guide/sparse-checkout.md) · [Repos](docs/guide/repos.md) · [Archives](docs/guide/archive.md) · [Browse](docs/guide/browse.md) · [Git SHAs](docs/guide/git-sha.md) |
+| **Use** | [Deploy](docs/guide/deploy.md) · [CLI tour](docs/guide/cli.md) · [Git commands](docs/guide/git-commands.md) · [Coming from git](docs/guide/coming-from-git.md) · [Git import](docs/guide/git-import.md) · [Sparse checkout](docs/guide/sparse-checkout.md) · [Repos](docs/guide/repos.md) · [Archives](docs/guide/archive.md) · [Browse](docs/guide/browse.md) · [Git SHAs](docs/guide/git-sha.md) · [git clients](docs/guide/git-clients.md) |
 | **Operate** | [Storage](docs/guide/object-storage.md) · [Clusters](docs/guide/cluster.md) · [Caching](docs/guide/cache.md) · [Auth](docs/guide/auth.md) · [Redaction](docs/guide/redaction.md) · [Events](docs/guide/events.md) · [Observability](docs/guide/observability.md) |
 | **Design** | [Server](docs/design/rust-server-architecture.md) · [Client](docs/design/rust-client-architecture.md) · [starhub](docs/design/starhub-integration.md) · [Object format](SPEC.md) · [Protocol](proto/scion/v1/) |
 

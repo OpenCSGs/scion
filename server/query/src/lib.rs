@@ -14,8 +14,8 @@ pub use archive::{ArchiveFormat, ArchiveOptions, Emit, redacted_placeholder, wri
 pub use blame::{BLAME_KIND, BLAME_VERSION, BlameResult, blame};
 pub use gitsha::{
     GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_SHA1_EXTENSION, GIT_TREE_KIND, GITSHA_KIND, GITSHA_VERSION,
-    SCION_ID_HEADER, cached_git_shas, derive_git_sha, git_commit_body, git_hash, git_sha_of, git_tree_body,
-    index_git_sha, lookup_git_sha, parse_git_sha,
+    SCION_ID_HEADER, cached_git_shas, derive_git_sha, git_commit_body, git_commit_body_plain, git_hash, git_sha_of,
+    git_tree_body, index_git_sha, lookup_git_sha, parse_git_sha, tree_git_sha,
 };
 pub use lastcommit::{LAST_COMMIT_KIND, LAST_COMMIT_VERSION, last_commits};
 pub use reindex::{ReindexStats, all_records, describe, reindex};

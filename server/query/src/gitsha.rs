@@ -130,13 +130,26 @@ fn git_ident(s: &Signature) -> String {
 
 /// 计算得到的 git commit 对象的内容。
 pub fn git_commit_body(id: ObjectId, cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20]]) -> Vec<u8> {
+    commit_body(Some(id), cs, tree, parents)
+}
+
+/// The commit object rebuilt from the commit's fields without the `scion-id` header: what an
+/// imported commit's object was, when git wrote no other headers.
+pub fn git_commit_body_plain(cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20]]) -> Vec<u8> {
+    commit_body(None, cs, tree, parents)
+}
+
+fn commit_body(id: Option<ObjectId>, cs: &Changeset, tree: &[u8; 20], parents: &[[u8; 20]]) -> Vec<u8> {
     let mut out = format!("tree {}\n", hex::encode(tree));
     for p in parents {
         out.push_str(&format!("parent {}\n", hex::encode(p)));
     }
     out.push_str(&format!("author {}\n", git_ident(&cs.author)));
     out.push_str(&format!("committer {}\n", git_ident(&cs.committer)));
-    out.push_str(&format!("{SCION_ID_HEADER} {id}\n\n"));
+    if let Some(id) = id {
+        out.push_str(&format!("{SCION_ID_HEADER} {id}\n"));
+    }
+    out.push('\n');
     out.push_str(&cs.message);
     out.into_bytes()
 }
@@ -217,6 +230,13 @@ pub async fn derive_git_sha(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &
 }
 
 type ShaFuture<'a> = Pin<Box<dyn Future<Output = Result<[u8; 20]>> + Send + 'a>>;
+
+/// A directory's git tree SHA, computing and caching it (and its subdirectories' and files')
+/// when it is not cached yet. Commits imported from git get their SHA without their trees', so
+/// their trees may need this.
+pub async fn tree_git_sha(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str, id: ObjectId) -> Result<[u8; 20]> {
+    tree_sha(meta, blobs, repo, id).await
+}
 
 /// 目录树的 git sha（递归，深度等于目录层数）。
 fn tree_sha<'a>(meta: &'a dyn MetaStore, blobs: &'a dyn BlobStore, repo: &'a str, id: ObjectId) -> ShaFuture<'a> {

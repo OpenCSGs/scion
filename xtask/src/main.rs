@@ -40,8 +40,9 @@ fn server_rank(name: &str) -> Option<u32> {
         "scion-tree" => 3,
         "scion-merge" | "scion-derive" | "scion-query" => 4,
         "scion-land" => 5,
-        "scion-api" => 6,
-        "scion" => 7,
+        "scion-git" => 6,
+        "scion-api" => 7,
+        "scion" => 8,
         _ => return None,
     })
 }

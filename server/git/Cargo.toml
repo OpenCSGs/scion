@@ -1,0 +1,29 @@
+[package]
+name = "scion-git"
+description = "Git gateway: git's smart HTTP protocol on Scion repositories"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64 = "0.22"
+bytes.workspace = true
+flate2 = "1"
+futures.workspace = true
+hex.workspace = true
+http.workspace = true
+http-body = "1"
+http-body-util = "0.1"
+scion-auth.workspace = true
+scion-object.workspace = true
+scion-query.workspace = true
+scion-store.workspace = true
+sha1 = "0.10"
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

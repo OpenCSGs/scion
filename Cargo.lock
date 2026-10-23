@@ -3286,11 +3286,14 @@ dependencies = [
  "hex",
  "hmac",
  "http",
+ "http-body",
  "jsonwebtoken",
  "moka",
  "reqwest",
  "scion-auth",
  "scion-client",
+ "scion-git",
+ "scion-gitimport",
  "scion-land",
  "scion-merge",
  "scion-object",
@@ -3302,6 +3305,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -3438,6 +3442,29 @@ name = "scion-flight"
 version = "0.1.10"
 dependencies = [
  "tokio",
+]
+
+[[package]]
+name = "scion-git"
+version = "0.1.10"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "flate2",
+ "futures",
+ "hex",
+ "http",
+ "http-body",
+ "http-body-util",
+ "scion-auth",
+ "scion-object",
+ "scion-query",
+ "scion-store",
+ "sha1",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]

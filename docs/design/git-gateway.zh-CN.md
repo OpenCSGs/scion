@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：设计中，从 G1 阶段开始实现。本文原是[路线图](roadmap.md)的 2.5 项。
+状态：G1（拉取）已实现，下一步是 G2（推送）。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -157,8 +157,8 @@ git clone http://scion.example.com:7080/agentlab/app
 
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
-| **G1 拉取** | gRPC 端口上的路由器；ref；`upload-pack` v0 和 v2；不带 delta 的 pack；Basic 认证；按 §3 生成 commit 对象（规则 2 和 3）；`git-tree-id`、`git-blob-id` 反向查找 | 在 Mac mini 上 `git clone`、`git fetch`、`git pull` 可用，结果通过 `git fsck --strict` |
-| **G2 推送** | `receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 也记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
+| **G1 拉取**（已完成） | gRPC 端口上的路由器；ref；`upload-pack` v0 和 v2；不带 delta 的 pack；Basic 认证；按 §3 生成 commit 对象 | 在 Mac mini 上 `git clone`、`git fetch`、`git pull` 可用，结果通过 `git fsck --strict` |
+| **G2 推送** | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 也记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
 | **G3 效率** | pack 中的 delta；浅克隆（`--depth`）；部分克隆（`--filter=blob:none`）；缓存热门 ref 的最近一个 pack | 克隆 starhub-server 传输的字节不超过 git 的 1.5 倍 |
 | **G4 starhub** | 通过 gRPC 提供 Gitaly 的 `SmartHTTPService` 和 `SSHService`（含 sidechannel），对接 gitlab-workhorse 和 gitlab-shell；除非有需求，不做原生 SSH | starhub 的 git 路由在 Scion 仓库上可用 |
 

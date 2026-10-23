@@ -95,5 +95,5 @@ hint: `scn push` is a transitional git-style spelling; use `scn land` instead
 
 - **工作副本**：检出旧版本、`stash`、`clean`、交互式 rebase、部分提交（`add -p`）。
 - **查询**：附注标签、`grep`、`bisect`、`reflog`。
-- **协作**：`remote add`、`fetch`。git 客户端目前还不能直接访问 Scion 仓库，这是[路线图](../design/roadmap.md)里的 git 网关。
+- **协作**：`remote add`、`fetch`。git 命令行本身可以克隆和拉取 Scion 仓库（见 [git 客户端](git-clients.zh-CN.md)），但暂时不能推送。
 - **rebase 冲突**：停在冲突上的 sync 没有 `--abort`。停下的那个提交变成本地改动，留在新的最新提交（以及它之前已经 rebase 好的提交）之上；`scn commit` 完成它，并接着 rebase 后面的待合入提交。

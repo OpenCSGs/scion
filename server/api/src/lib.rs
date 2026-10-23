@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod config;
 pub mod events;
+pub mod git;
 pub mod limit;
 pub mod prehook;
 pub mod redaction;
@@ -296,7 +297,7 @@ pub async fn serve(
             .with_pre_land(pre_land),
     );
     let query = QueryServiceServer::new(
-        QuerySvc::new(app.config.clone(), app.meta.clone(), app.blobs).with_guard(guard.clone()),
+        QuerySvc::new(app.config.clone(), app.meta.clone(), app.blobs.clone()).with_guard(guard.clone()),
     )
     .max_encoding_message_size(max_msg);
     let auth_svc = AuthServiceServer::new(AuthSvc::new(guard.clone()));
@@ -315,8 +316,19 @@ pub async fn serve(
         app.config.max_concurrent_per_tenant,
     )
     .with_cluster_secret(cluster_secret);
-    // 从外到内：追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务（§5.3）
+    // git's smart HTTP requests go to the git gateway before any gRPC layer
+    let gateway = app.config.git.then(|| {
+        Arc::new(scion_git::Gateway::new(
+            app.meta.clone(),
+            app.blobs.clone(),
+            guard.clone(),
+            &app.config.server_version,
+        ))
+    });
+    // 从外到内：git → 追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务（§5.3）
     let result = tonic::transport::Server::builder()
+        .accept_http1(app.config.git)
+        .layer(git::GitLayer::new(gateway))
         .layer(scion_obs::trace::TraceLayer)
         .layer(scion_obs::grpc::MetricsLayer::new(
             scion_proto::METHODS

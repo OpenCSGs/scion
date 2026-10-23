@@ -22,6 +22,8 @@ scion-store.workspace = true
 scion-auth.workspace = true
 scion-tree.workspace = true
 scion-query.workspace = true
+scion-git.workspace = true
+http-body = "1"
 scion-land.workspace = true
 scion-merge.workspace = true
 hex.workspace = true
@@ -36,6 +38,8 @@ moka.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
+scion-gitimport.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 scion-client.workspace = true
 scion-auth = { workspace = true, features = ["testing"] }

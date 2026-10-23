@@ -15,6 +15,7 @@ members = [
     "server/merge",
     "server/land",
     "server/query",
+    "server/git",
     "server/cache",
     "server/api",
     "server/scion",
@@ -47,6 +48,7 @@ scion-tree = { path = "server/tree" }
 scion-merge = { path = "server/merge" }
 scion-land = { path = "server/land" }
 scion-query = { path = "server/query" }
+scion-git = { path = "server/git" }
 scion-cache = { path = "server/cache" }
 scion-api = { path = "server/api" }
 scion-client = { path = "client/sdk" }

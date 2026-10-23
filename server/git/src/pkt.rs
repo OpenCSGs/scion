@@ -58,6 +58,11 @@ impl<'a> Reader<'a> {
         Self { buf }
     }
 
+    /// What follows the packets read so far (a push's pack).
+    pub fn rest(&self) -> &'a [u8] {
+        self.buf
+    }
+
     /// The next packet, or `None` at the end of the body.
     pub fn read(&mut self) -> Result<Option<Pkt<'a>>, PktError> {
         if self.buf.is_empty() {

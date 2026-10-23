@@ -1,11 +1,13 @@
 //! The git gateway: git's smart HTTP protocol on Scion repositories ([design](../../../docs/design/git-gateway.md)).
 //!
-//! [`Gateway::serve`] answers `GET /<repo>/info/refs?service=git-upload-pack` and
-//! `POST /<repo>/git-upload-pack`, with protocol v0 and v2. Pushing comes in stage G2.
+//! [`Gateway::serve`] answers `GET /<repo>/info/refs?service=…` and `POST /<repo>/git-upload-pack`
+//! (protocol v0 and v2) and, with a [`receive::PushBackend`], `POST /<repo>/git-receive-pack`.
 
 pub mod objects;
 pub mod pack;
 pub mod pkt;
+pub mod receive;
+pub mod unpack;
 pub mod upload;
 
 use std::convert::Infallible;
@@ -53,8 +55,10 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// The response body: whole for advertisements and errors, streamed for packs.
 pub type Body = BoxBody<Bytes, Infallible>;
 
-/// The largest request body accepted: wants and haves, after gzip.
+/// The largest fetch request accepted: wants and haves, after gzip.
 const MAX_REQUEST: usize = 16 << 20;
+/// The largest push accepted: the commands and the pack.
+const MAX_PUSH: usize = 1 << 30;
 
 /// The endpoints of the smart HTTP protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +100,8 @@ pub struct Gateway {
     blobs: Arc<dyn BlobStore>,
     guard: Arc<Guard>,
     agent: String,
+    /// Where pushes go, and the largest file a push may hold; without it pushes are refused.
+    push: Option<(Arc<dyn receive::PushBackend>, u64)>,
 }
 
 impl Gateway {
@@ -105,7 +111,14 @@ impl Gateway {
             blobs,
             guard,
             agent: format!("scion/{version}"),
+            push: None,
         }
+    }
+
+    /// Accepts pushes, written through `backend`, with files up to `max_file` bytes.
+    pub fn with_push(mut self, backend: Arc<dyn receive::PushBackend>, max_file: u64) -> Self {
+        self.push = Some((backend, max_file));
+        self
     }
 
     /// Answers one git request (one that [`route`] recognized).
@@ -125,17 +138,19 @@ impl Gateway {
             Endpoint::UploadPack => Some("git-upload-pack"),
             Endpoint::ReceivePack => Some("git-receive-pack"),
         };
-        match service {
-            Some("git-upload-pack") => {}
+        let push = match service {
+            Some("git-upload-pack") => false,
+            Some("git-receive-pack") if self.push.is_some() => true,
             Some("git-receive-pack") => {
                 return text(
                     StatusCode::FORBIDDEN,
-                    "pushing with git is not supported yet; push with scn",
+                    "this server does not accept git pushes; push with scn",
                 );
             }
             _ => return text(StatusCode::FORBIDDEN, "only git's smart HTTP protocol is supported"),
-        }
-        let principal = match self.check(&parts.headers, &repo).await {
+        };
+        let action = if push { Action::Write } else { Action::Read };
+        let principal = match self.check(&parts.headers, &repo, action).await {
             Ok(p) => p,
             Err(r) => return *r,
         };
@@ -151,24 +166,43 @@ impl Gateway {
             .is_some_and(|v| v.split(':').any(|p| p == "version=2"));
         tracing::debug!(%repo, subject = %principal.subject, ?endpoint, v2, "git request");
         if endpoint == Endpoint::InfoRefs {
-            return self.info_refs(&repo, &default, v2).await;
+            return if push {
+                self.receive_refs(&repo, &default).await
+            } else {
+                self.info_refs(&repo, &default, v2).await
+            };
         }
-        let body = match read_body(&parts.headers, body).await {
+        let limit = if push { MAX_PUSH } else { MAX_REQUEST };
+        let body = match read_body(&parts.headers, body, limit).await {
             Ok(b) => b,
             Err(r) => return *r,
         };
+        if push {
+            return self.receive_pack(&principal, &repo, &default, &body).await;
+        }
         self.upload_pack(repo, default, v2, body).await
     }
 
-    /// Authenticates the request and checks it may read the repository. Missing or bad
+    /// Authenticates the request and checks it may read (or write) the repository. Missing or bad
     /// credentials get a 401 that makes git ask for them.
-    async fn check(&self, headers: &HeaderMap, repo: &str) -> std::result::Result<Principal, Box<Response<Body>>> {
+    async fn check(
+        &self,
+        headers: &HeaderMap,
+        repo: &str,
+        action: Action,
+    ) -> std::result::Result<Principal, Box<Response<Body>>> {
         let token = credentials(headers);
         let p = match self.guard.authenticate(token.as_deref()).await {
             Ok(p) => p,
             Err(e) => return Err(Box::new(auth_error(e, true))),
         };
-        match self.guard.authorize(&p, &AuthRequest::repo(repo, Action::Read)).await {
+        let checked = if action == Action::Read {
+            self.guard.authorize(&p, &AuthRequest::repo(repo, action)).await
+        } else {
+            // Writing may be allowed on some paths only: each commit is checked when it is made
+            self.guard.authorize_any(&p, repo, action).await
+        };
+        match checked {
             Ok(()) => Ok(p),
             Err(e) => Err(Box::new(auth_error(e, token.is_none()))),
         }
@@ -193,6 +227,125 @@ impl Gateway {
             out.extend_from_slice(&upload::advertise_v0(&adv, &self.agent));
         }
         git_response("application/x-git-upload-pack-advertisement", full(out.freeze()))
+    }
+
+    async fn receive_refs(&self, repo: &str, default: &str) -> Response<Body> {
+        let adv = match self.advertised(repo, default).await {
+            Ok(a) => a,
+            Err(e) => return failed(&e),
+        };
+        let mut out = BytesMut::new();
+        pkt::put_line(&mut out, "# service=git-receive-pack");
+        out.extend_from_slice(pkt::FLUSH);
+        out.extend_from_slice(&receive::advertise(&adv, &self.agent));
+        git_response("application/x-git-receive-pack-advertisement", full(out.freeze()))
+    }
+
+    /// A push: unpacks, turns the new commits into Scion commits, updates each ref and reports.
+    async fn receive_pack(&self, p: &Principal, repo: &str, default: &str, body: &[u8]) -> Response<Body> {
+        const RESULT: &str = "application/x-git-receive-pack-result";
+        let Some((backend, max_file)) = &self.push else {
+            return text(StatusCode::FORBIDDEN, "this server does not accept git pushes");
+        };
+        let req = match receive::parse_request(body) {
+            Ok(r) => r,
+            Err(e) => return git_response(RESULT, full(err_pkt(&e))),
+        };
+        let deletes_only = req.commands.iter().all(|c| c.new == receive::ZERO);
+        let unpacked = if deletes_only && req.pack.is_empty() {
+            Ok(unpack::Unpacked::default())
+        } else {
+            unpack::unpack(req.pack, *max_file)
+        };
+        let (unpack_status, results) = match &unpacked {
+            Ok(pack) => {
+                let mut conv = receive::Converter::new(self.meta.as_ref(), self.blobs.as_ref(), repo, pack);
+                let mut results = Vec::with_capacity(req.commands.len());
+                for c in &req.commands {
+                    let r = self.apply(p, repo, backend.as_ref(), &mut conv, c).await;
+                    if let Err(e) = &r {
+                        tracing::info!(%repo, git_ref = %c.git_ref, error = %e, "git push refused");
+                    }
+                    results.push((c.git_ref.clone(), r));
+                }
+                (Ok(()), results)
+            }
+            Err(e) => (
+                Err(e.to_string()),
+                req.commands
+                    .iter()
+                    .map(|c| (c.git_ref.clone(), Err("unpacker error".to_string())))
+                    .collect(),
+            ),
+        };
+        tracing::info!(%repo, subject = %p.subject, default, commands = results.len(), "git push");
+        let report = receive::report(unpack_status, &results);
+        let body = if req.side_band {
+            let mut out = BytesMut::new();
+            for chunk in report.chunks(pkt::MAX_BAND_DATA) {
+                out.extend_from_slice(&pkt::band(1, chunk));
+            }
+            out.extend_from_slice(pkt::FLUSH);
+            out.freeze()
+        } else {
+            report.freeze()
+        };
+        git_response(RESULT, full(body))
+    }
+
+    /// One ref command: checks the old value, converts the new commits, updates the ref.
+    async fn apply(
+        &self,
+        p: &Principal,
+        repo: &str,
+        backend: &dyn receive::PushBackend,
+        conv: &mut receive::Converter<'_>,
+        c: &receive::Command,
+    ) -> std::result::Result<(), String> {
+        let name = receive::scion_ref_name(&c.git_ref)?;
+        let current = self.meta.get_ref(repo, &name).await.map_err(|e| e.to_string())?;
+        let current_sha = match &current {
+            Some(state) => {
+                let mut objects = objects::Objects::new(self.meta.as_ref(), self.blobs.as_ref(), repo);
+                objects.commit_sha(state.target).await.map_err(|e| e.to_string())?
+            }
+            None => receive::ZERO,
+        };
+        if c.old != current_sha {
+            return Err("fetch first".into());
+        }
+        if c.new == receive::ZERO {
+            let state = current.ok_or("no such ref")?;
+            return backend
+                .update(
+                    p,
+                    repo,
+                    receive::RefUpdate::Delete {
+                        name,
+                        version: state.version,
+                    },
+                )
+                .await;
+        }
+        let new = conv.convert(p, backend, c.new).await.map_err(|e| e.to_string())?;
+        let update = match current {
+            None => receive::RefUpdate::Create { name, new },
+            Some(state) => {
+                let ff = scion_query::is_ancestor(self.meta.as_ref(), repo, state.target, new)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if ff {
+                    receive::RefUpdate::Land { name, new }
+                } else {
+                    receive::RefUpdate::Move {
+                        name,
+                        new,
+                        version: state.version,
+                    }
+                }
+            }
+        };
+        backend.update(p, repo, update).await
     }
 
     async fn upload_pack(&self, repo: String, default: String, v2: bool, body: Bytes) -> Response<Body> {
@@ -377,12 +530,12 @@ fn unauthorized(msg: &str) -> Response<Body> {
 }
 
 /// The request body, gunzipped when git compressed it.
-async fn read_body<B>(headers: &HeaderMap, body: B) -> std::result::Result<Bytes, Box<Response<Body>>>
+async fn read_body<B>(headers: &HeaderMap, body: B, limit: usize) -> std::result::Result<Bytes, Box<Response<Body>>>
 where
     B: http_body::Body<Data = Bytes> + Send,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
-    let raw = match Limited::new(body, MAX_REQUEST).collect().await {
+    let raw = match Limited::new(body, limit).collect().await {
         Ok(c) => c.to_bytes(),
         Err(e) => {
             return Err(Box::new(text(
@@ -400,14 +553,14 @@ where
     }
     use std::io::Read;
     let mut out = Vec::new();
-    let mut dec = flate2::read::GzDecoder::new(&raw[..]).take(MAX_REQUEST as u64 + 1);
+    let mut dec = flate2::read::GzDecoder::new(&raw[..]).take(limit as u64 + 1);
     if let Err(e) = dec.read_to_end(&mut out) {
         return Err(Box::new(text(
             StatusCode::BAD_REQUEST,
             &format!("gzip request body: {e}"),
         )));
     }
-    if out.len() > MAX_REQUEST {
+    if out.len() > limit {
         return Err(Box::new(text(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")));
     }
     Ok(Bytes::from(out))
@@ -527,11 +680,13 @@ mod tests {
         z.write_all(b"0009done\n").expect("gzip");
         let gz = z.finish().expect("gzip");
         let h = headers(&[("content-encoding", "gzip")]);
-        let body = read_body(&h, Full::new(Bytes::from(gz))).await.expect("body");
+        let body = read_body(&h, Full::new(Bytes::from(gz)), MAX_REQUEST)
+            .await
+            .expect("body");
         assert_eq!(&body[..], b"0009done\n");
-        let plain = read_body(&HeaderMap::new(), Full::new(Bytes::from_static(b"x"))).await;
+        let plain = read_body(&HeaderMap::new(), Full::new(Bytes::from_static(b"x")), MAX_REQUEST).await;
         assert_eq!(plain.expect("body"), Bytes::from_static(b"x"));
-        let bad = read_body(&h, Full::new(Bytes::from_static(b"not gzip"))).await;
+        let bad = read_body(&h, Full::new(Bytes::from_static(b"not gzip")), MAX_REQUEST).await;
         assert_eq!(bad.expect_err("bad gzip").status(), StatusCode::BAD_REQUEST);
     }
 
@@ -611,5 +766,248 @@ mod tests {
         )
         .await;
         assert!(String::from_utf8_lossy(&got).contains("not our ref"), "{got:?}");
+    }
+
+    /// Writes through the store directly and records ref updates.
+    struct Stub {
+        writer: scion_land::ChangesetWriter,
+        updates: std::sync::Mutex<Vec<receive::RefUpdate>>,
+    }
+
+    #[async_trait::async_trait]
+    impl receive::PushBackend for Stub {
+        async fn store(
+            &self,
+            _: &Principal,
+            repo: &str,
+            objects: Vec<(ObjectId, Bytes)>,
+        ) -> std::result::Result<(), String> {
+            self.writer.store(repo, &objects).await.map_err(|e| e.to_string())
+        }
+        async fn create(
+            &self,
+            _: &Principal,
+            repo: &str,
+            cs: &scion_object::Changeset,
+        ) -> std::result::Result<scion_store::ChangesetRecord, String> {
+            self.writer.create(repo, cs).await.map_err(|e| e.to_string())
+        }
+        async fn update(&self, _: &Principal, _: &str, u: receive::RefUpdate) -> std::result::Result<(), String> {
+            self.updates.lock().expect("lock").push(u);
+            Ok(())
+        }
+    }
+
+    async fn pushing() -> (Gateway, Arc<Stub>) {
+        let s = Arc::new(scion_store::MemStore::new());
+        s.create_repo("r").await.expect("repo");
+        let stub = Arc::new(Stub {
+            writer: scion_land::ChangesetWriter::new(s.clone(), s.clone()),
+            updates: Default::default(),
+        });
+        let g = Gateway::new(s.clone(), s, Guard::disabled(), "0.0.0").with_push(stub.clone(), 1 << 20);
+        (g, stub)
+    }
+
+    async fn push(g: &Gateway, body: Vec<u8>) -> String {
+        let req = http::Request::builder()
+            .method(Method::POST)
+            .uri("/r/git-receive-pack")
+            .body(Full::new(Bytes::from(body)))
+            .expect("request");
+        let resp = g.serve(req, "r".into(), Endpoint::ReceivePack).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let b = resp.into_body().collect().await.expect("body").to_bytes();
+        String::from_utf8_lossy(&b).into_owned()
+    }
+
+    fn commands(lines: &[String], pack: &[u8]) -> Vec<u8> {
+        let mut b = BytesMut::new();
+        for (i, l) in lines.iter().enumerate() {
+            let l = if i == 0 {
+                format!("{l}\0report-status")
+            } else {
+                l.clone()
+            };
+            pkt::put_line(&mut b, &l);
+        }
+        b.extend_from_slice(pkt::FLUSH);
+        b.extend_from_slice(pack);
+        b.to_vec()
+    }
+
+    #[tokio::test]
+    async fn reports_each_ref_of_a_push() {
+        let (g, stub) = pushing().await;
+        let (st, adv) = call(&g, Method::GET, "/r/info/refs?service=git-receive-pack", false, b"").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&adv).contains("report-status"));
+        let zero = "0".repeat(40);
+        // A pack that is not one: every ref fails
+        let out = push(
+            &g,
+            commands(&[format!("{zero} {} refs/heads/main", "ab".repeat(20))], b"PACKjunk"),
+        )
+        .await;
+        assert!(
+            out.contains("unpack protocol error: bad pack") && out.contains("ng refs/heads/main unpacker error"),
+            "{out}"
+        );
+        // Deletes need no pack; stale old values, missing refs and other namespaces are refused
+        let out = push(
+            &g,
+            commands(
+                &[
+                    format!("{zero} {zero} refs/heads/gone"),
+                    format!("{} {zero} refs/heads/stale", "01".repeat(20)),
+                    format!("{zero} {zero} refs/notes/x"),
+                ],
+                b"",
+            ),
+        )
+        .await;
+        assert!(out.contains("unpack ok"), "{out}");
+        assert!(out.contains("ng refs/heads/gone no such ref"), "{out}");
+        assert!(out.contains("ng refs/heads/stale fetch first"), "{out}");
+        assert!(out.contains("ng refs/notes/x only refs/heads/*"), "{out}");
+        // A real commit: a file, a tree and the commit, then the same commit on a second branch
+        let blob = b"hello\n";
+        let blob_sha = unpack::object_sha(unpack::ObjType::Blob, blob);
+        let mut tree = b"100644 a.txt\0".to_vec();
+        tree.extend_from_slice(&blob_sha);
+        let tree_sha = unpack::object_sha(unpack::ObjType::Tree, &tree);
+        let commit = format!(
+            "tree {}\nauthor A <a@x> 1700000000 +0000\ncommitter A <a@x> 1700000000 +0000\n\nfirst\n",
+            hex::encode(tree_sha)
+        );
+        let commit_sha = hex::encode(unpack::object_sha(unpack::ObjType::Commit, commit.as_bytes()));
+        let (mut w, head) = pack::PackWriter::new(3);
+        let mut p = head.to_vec();
+        p.extend_from_slice(&w.object(pack::Kind::Blob, blob));
+        p.extend_from_slice(&w.object(pack::Kind::Tree, &tree));
+        p.extend_from_slice(&w.object(pack::Kind::Commit, commit.as_bytes()));
+        p.extend_from_slice(&w.finish());
+        let out = push(
+            &g,
+            commands(
+                &[
+                    format!("{zero} {commit_sha} refs/heads/main"),
+                    format!("{zero} {commit_sha} refs/tags/v1"),
+                ],
+                &p,
+            ),
+        )
+        .await;
+        assert!(
+            out.contains("ok refs/heads/main") && out.contains("ok refs/tags/v1"),
+            "{out}"
+        );
+        let updates = stub.updates.lock().expect("lock").clone();
+        assert!(
+            matches!(&updates[..], [
+            receive::RefUpdate::Create { name: a, .. },
+            receive::RefUpdate::Create { name: b, .. },
+        ] if a == "main" && b == "tags/v1"),
+            "{updates:?}"
+        );
+        // A malformed request
+        let (_, out) = call(&g, Method::POST, "/r/git-receive-pack", false, b"zzzz").await;
+        assert!(String::from_utf8_lossy(&out).contains("ERR "));
+    }
+
+    /// A tree derived before the reverse mappings existed: a push that renames its directory
+    /// sends neither the directory nor its file, and the gateway indexes the parent to find them.
+    #[tokio::test]
+    async fn finds_unsent_objects_in_trees_derived_without_reverse_mappings() {
+        use scion_object::{Changeset, EntryMode, FileChange, Signature, Tree};
+        use scion_query::{
+            GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_TREE_KIND, GITSHA_KIND, GITSHA_VERSION,
+        };
+        let (g, stub) = pushing().await;
+        let meta = g.meta.clone();
+        let content = b"a\n";
+        let file = ObjectId::of_blob(content);
+        stub.writer
+            .store("r", &[(file, Bytes::from_static(content))])
+            .await
+            .expect("store");
+        let sig = Signature {
+            name: "A".into(),
+            email: "a@x".into(),
+            time_ms: 1_700_000_000_000,
+            tz_offset_minutes: 0,
+        };
+        let cs = Changeset::new(
+            vec![],
+            sig.clone(),
+            sig,
+            "base\n",
+            [3; 16],
+            vec![FileChange::put("docs/a.txt", EntryMode::File, file, 2)],
+            Default::default(),
+        )
+        .expect("cs");
+        let rec = stub.writer.create("r", &cs).await.expect("create");
+        meta.cas_ref("r", "main", scion_store::RefExpect::Absent, rec.id)
+            .await
+            .expect("ref");
+        // The old derivation: forward entries only
+        let root = Tree::decode(&g.blobs.get(&rec.root_tree).await.expect("get").expect("root")).expect("tree");
+        let docs = root.entries()[0].id;
+        let blob_sha = scion_query::git_hash("blob", content);
+        let docs_sha = scion_query::git_hash(
+            "tree",
+            &scion_query::git_tree_body(&[("a.txt".into(), EntryMode::File, blob_sha)]),
+        );
+        let root_sha = scion_query::git_hash(
+            "tree",
+            &scion_query::git_tree_body(&[("docs".into(), EntryMode::Tree, docs_sha)]),
+        );
+        let base_sha = scion_query::git_hash("commit", &scion_query::git_commit_body(rec.id, &cs, &root_sha, &[]));
+        for (kind, key, value) in [
+            (GIT_BLOB_KIND, file.to_bytes().to_vec(), blob_sha.to_vec()),
+            (GIT_TREE_KIND, docs.to_bytes().to_vec(), docs_sha.to_vec()),
+            (GIT_TREE_KIND, rec.root_tree.to_bytes().to_vec(), root_sha.to_vec()),
+            (GIT_COMMIT_KIND, rec.id.to_bytes().to_vec(), base_sha.to_vec()),
+        ] {
+            meta.put_derived("r", kind, GIT_OBJECT_VERSION, &key, &value)
+                .await
+                .expect("put");
+        }
+        meta.put_derived("r", GITSHA_KIND, GITSHA_VERSION, &base_sha, &rec.id.to_bytes())
+            .await
+            .expect("put");
+        // The push: a new root naming the same directory "manual"
+        let tree = {
+            let mut t = b"40000 manual\0".to_vec();
+            t.extend_from_slice(&docs_sha);
+            t
+        };
+        let tree_sha = unpack::object_sha(unpack::ObjType::Tree, &tree);
+        let commit = format!(
+            "tree {}\nparent {}\nauthor A <a@x> 1700000001 +0000\ncommitter A <a@x> 1700000001 +0000\n\nrename\n",
+            hex::encode(tree_sha),
+            hex::encode(base_sha)
+        );
+        let new_sha = hex::encode(unpack::object_sha(unpack::ObjType::Commit, commit.as_bytes()));
+        let (mut w, head) = pack::PackWriter::new(2);
+        let mut p = head.to_vec();
+        p.extend_from_slice(&w.object(pack::Kind::Tree, &tree));
+        p.extend_from_slice(&w.object(pack::Kind::Commit, commit.as_bytes()));
+        p.extend_from_slice(&w.finish());
+        let out = push(
+            &g,
+            commands(&[format!("{} {new_sha} refs/heads/main", hex::encode(base_sha))], &p),
+        )
+        .await;
+        assert!(out.contains("ok refs/heads/main"), "{out}");
+        let updates = stub.updates.lock().expect("lock").clone();
+        let [receive::RefUpdate::Land { new, .. }] = &updates[..] else {
+            panic!("{updates:?}")
+        };
+        let made = meta.get_changeset("r", new).await.expect("get").expect("record");
+        let root = Tree::decode(&g.blobs.get(&made.root_tree).await.expect("get").expect("root")).expect("tree");
+        assert_eq!(root.entries()[0].name, "manual");
+        assert_eq!(root.entries()[0].id, docs);
     }
 }

@@ -184,17 +184,6 @@ async fn git_clones_fetches_and_pulls() {
     ok(&w, &["fetch", "-q", "origin"]).await;
 
     // What the gateway does not do yet says so
-    let push = {
-        std::fs::write(w.join("new.txt"), "x").expect("write");
-        ok(&w, &["add", "new.txt"]).await;
-        ok(
-            &w,
-            &["-c", "user.name=T", "-c", "user.email=t@x", "commit", "-qm", "new"],
-        )
-        .await;
-        fails(&w, &["push", "-q", "origin", "main"]).await
-    };
-    assert!(push.contains("push with scn"), "{push}");
     let shallow = fails(
         root,
         &["clone", "-q", "--depth", "1", &format!("{url}/mono"), "shallow"],
@@ -221,7 +210,11 @@ async fn git_needs_a_token_where_scn_does() {
     };
     let guard = Guard::build(auth.clone(), store.clone(), Arc::new(|_: &str| None)).expect("guard");
     guard
-        .set_policy("[[rule]]\nsubjects = [\"user:ada\"]\nrepos = [\"mono\"]\nactions = [\"land\"]\n")
+        .set_policy(
+            "[[rule]]\nsubjects = [\"user:ada\"]\nrepos = [\"mono\"]\nactions = [\"land\"]\n\
+             [[rule]]\nsubjects = [\"user:rita\"]\nrepos = [\"mono\"]\nactions = [\"read\"]\n\
+             [[rule]]\nsubjects = [\"user:wes\"]\nrepos = [\"mono\"]\nactions = [\"write\"]\n",
+        )
         .await
         .expect("policy");
     let token = |who: &'static str| {
@@ -229,6 +222,7 @@ async fn git_needs_a_token_where_scn_does() {
         async move { g.create_token("pat", who, vec![], "test", None).await.expect("token").0 }
     };
     let (ada, bob) = (token("ada").await, token("bob").await);
+    let (rita, wes) = (token("rita").await, token("wes").await);
     let (url, _stop) = start(
         ServerConfig {
             auth,
@@ -274,6 +268,18 @@ async fn git_needs_a_token_where_scn_does() {
     // The token as the password of any user name
     ok(root, &["clone", "-q", &format!("http://git:{ada}@{host}/mono"), "ada"]).await;
     assert_eq!(std::fs::read_to_string(root.join("ada/a.txt")).expect("read"), "a\n");
+
+    // Pushing needs write, and moving a branch needs land
+    let w = root.join("ada");
+    std::fs::write(w.join("b.txt"), "b\n").expect("write");
+    commit_all(&w, "b").await;
+    let e = fails(&w, &["push", "-q", &format!("http://git:{rita}@{host}/mono"), "main"]).await;
+    assert!(e.contains("403") || e.contains("permission denied"), "{e}");
+    let e = fails(&w, &["push", "-q", &format!("http://git:{wes}@{host}/mono"), "main"]).await;
+    assert!(e.contains("permission denied"), "{e}");
+    ok(&w, &["push", "-q", "origin", "main"]).await;
+    let sha = c.git_sha("main").await.expect("sha");
+    assert_eq!(sha, Some(ok(&w, &["rev-parse", "HEAD"]).await.trim().to_string()));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -489,4 +495,220 @@ async fn fetching_into_unrelated_history_negotiates_then_sends_everything() {
         .await;
         assert_eq!(ok(&w, &["show", &format!("v{version}:a.txt")]).await, "a\n");
     }
+}
+
+/// git commit with fixed identities.
+async fn commit_all(dir: &Path, msg: &str) {
+    ok(dir, &["add", "-A"]).await;
+    ok(
+        dir,
+        &[
+            "-c",
+            "user.name=Grace",
+            "-c",
+            "user.email=grace@x",
+            "commit",
+            "-qm",
+            msg,
+        ],
+    )
+    .await;
+}
+
+/// Pushes from git land as Scion commits that keep their SHAs: files, executables, symlinks,
+/// renames, file/directory swaps, merges, signed commits, branches and tags; non-fast-forwards
+/// are refused, forced pushes and deletes work, and annotated tags are refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn git_pushes_land_as_scion_commits() {
+    if !have_git() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let store = Arc::new(MemStore::new());
+    store.create_repo("mono").await.expect("repo");
+    let (url, _stop) = start(ServerConfig::default(), store.clone()).await;
+    let c = Client::builder()
+        .endpoint(&url)
+        .repo("mono")
+        .build()
+        .await
+        .expect("connect");
+    let a = c
+        .changeset(None)
+        .put("README.md", "hello\n")
+        .put("lib/a.rs", "a\n")
+        .put("lib/b.rs", "b\n")
+        .put("x", "x is a file\n")
+        .message("base\n")
+        .create()
+        .await
+        .expect("commit");
+    c.land("main", &a.id).await.expect("land");
+
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path();
+    ok(root, &["clone", "-q", &format!("{url}/mono"), "w"]).await;
+    let w = root.join("w");
+    // Edits, a new directory, an executable, a symlink, a rename, a deletion, file <-> directory
+    std::fs::write(w.join("README.md"), "hello from git\n").expect("write");
+    std::fs::create_dir_all(w.join("docs/deep")).expect("mkdir");
+    std::fs::write(w.join("docs/deep/guide.md"), "# Guide\n").expect("write");
+    std::fs::write(w.join("run.sh"), "#!/bin/sh\n").expect("write");
+    ok(&w, &["update-index", "--add", "--chmod=+x", "run.sh"]).await;
+    std::os::unix::fs::symlink("README.md", w.join("link")).expect("symlink");
+    ok(&w, &["mv", "lib/b.rs", "lib/c.rs"]).await;
+    std::fs::remove_file(w.join("lib/a.rs")).expect("rm");
+    std::fs::remove_file(w.join("x")).expect("rm");
+    std::fs::create_dir(w.join("x")).expect("mkdir");
+    std::fs::write(w.join("x/inside.txt"), "x is a directory now\n").expect("write");
+    commit_all(&w, "many changes").await;
+    // Renaming a whole directory: git sends no tree or blob for it
+    ok(&w, &["mv", "docs", "manual"]).await;
+    commit_all(&w, "rename docs").await;
+    ok(&w, &["push", "-q", "origin", "main"]).await;
+    let head = ok(&w, &["rev-parse", "HEAD"]).await;
+    assert_eq!(c.git_sha("main").await.expect("sha").as_deref(), Some(head.trim()));
+    let read = |path: &'static str| {
+        let c = c.clone();
+        async move {
+            c.read_file("main", path)
+                .await
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+        }
+    };
+    assert_eq!(read("README.md").await.as_deref(), Some("hello from git\n"));
+    assert_eq!(read("manual/deep/guide.md").await.as_deref(), Some("# Guide\n"));
+    assert_eq!(read("lib/c.rs").await.as_deref(), Some("b\n"));
+    assert_eq!(read("x/inside.txt").await.as_deref(), Some("x is a directory now\n"));
+    assert_eq!(read("lib/a.rs").await, None);
+
+    // A merge, and a branch and a tag
+    ok(&w, &["checkout", "-qb", "side"]).await;
+    std::fs::write(w.join("side.txt"), "side\n").expect("write");
+    commit_all(&w, "side").await;
+    ok(&w, &["checkout", "-q", "main"]).await;
+    std::fs::write(w.join("main.txt"), "main\n").expect("write");
+    commit_all(&w, "main").await;
+    ok(
+        &w,
+        &[
+            "-c",
+            "user.name=Grace",
+            "-c",
+            "user.email=grace@x",
+            "merge",
+            "-q",
+            "--no-edit",
+            "side",
+        ],
+    )
+    .await;
+    ok(&w, &["tag", "v1"]).await;
+    ok(&w, &["push", "-q", "origin", "main", "side", "v1"]).await;
+    let refs = ok(root, &["ls-remote", &format!("{url}/mono")]).await;
+    let local = |r: &'static str| {
+        let w = w.clone();
+        async move { ok(&w, &["rev-parse", r]).await.trim().to_string() }
+    };
+    for (git_ref, rev) in [
+        ("refs/heads/main", "main"),
+        ("refs/heads/side", "side"),
+        ("refs/tags/v1", "v1"),
+    ] {
+        assert!(
+            refs.contains(&format!("{}\t{git_ref}", local(rev).await)),
+            "{git_ref}: {refs}"
+        );
+    }
+    // A fresh clone has exactly the pushed history
+    ok(root, &["clone", "-q", "--mirror", &format!("{url}/mono"), "m"]).await;
+    let m = root.join("m");
+    ok(&m, &["fsck", "--strict", "--no-dangling"]).await;
+    assert_eq!(
+        ok(&m, &["log", "--format=%H %P %an %s", "main"]).await,
+        ok(&w, &["log", "--format=%H %P %an %s", "main"]).await
+    );
+
+    // Someone else lands first: a plain push is refused, a forced one wins
+    let b = c
+        .changeset(Some(
+            c.resolve_ref("main").await.expect("main").expect("main").changeset,
+        ))
+        .put("other.txt", "other\n")
+        .message("from scn\n")
+        .create()
+        .await
+        .expect("commit");
+    c.land("main", &b.id).await.expect("land");
+    std::fs::write(w.join("late.txt"), "late\n").expect("write");
+    commit_all(&w, "late").await;
+    let e = fails(&w, &["push", "-q", "origin", "main"]).await;
+    assert!(e.contains("rejected") || e.contains("fetch first"), "{e}");
+    ok(&w, &["pull", "-q", "--rebase", "origin", "main"]).await;
+    ok(&w, &["push", "-q", "origin", "main"]).await;
+    assert_eq!(read("other.txt").await.as_deref(), Some("other\n"));
+    assert_eq!(read("late.txt").await.as_deref(), Some("late\n"));
+    ok(&w, &["reset", "-q", "--hard", "HEAD~2"]).await;
+    ok(&w, &["push", "-q", "--force", "origin", "main"]).await;
+    assert_eq!(read("late.txt").await, None);
+    assert_eq!(c.git_sha("main").await.expect("sha"), Some(local("HEAD").await));
+
+    // Deleting a branch; an annotated tag; a ref outside heads and tags
+    ok(&w, &["push", "-q", "origin", ":side"]).await;
+    assert!(
+        !ok(root, &["ls-remote", &format!("{url}/mono")])
+            .await
+            .contains("refs/heads/side")
+    );
+    ok(
+        &w,
+        &[
+            "-c",
+            "user.name=Grace",
+            "-c",
+            "user.email=grace@x",
+            "tag",
+            "-a",
+            "-m",
+            "annotated",
+            "v2",
+        ],
+    )
+    .await;
+    let e = fails(&w, &["push", "origin", "v2"]).await;
+    assert!(e.contains("annotated tags are not supported"), "{e}");
+    let e = fails(&w, &["push", "origin", "HEAD:refs/notes/x"]).await;
+    assert!(e.contains("only refs/heads/* and refs/tags/* can be pushed"), "{e}");
+
+    // A signed commit keeps its SHA
+    let raw = ok(&w, &["cat-file", "commit", "HEAD"]).await;
+    let (headers, _) = raw.split_once("\n\n").expect("commit");
+    let tree = headers.lines().next().expect("tree");
+    let signed = format!(
+        "{tree}\nparent {}\nauthor Grace <grace@x> 1600000000 +0000\ncommitter Grace <grace@x> 1600000000 +0000\n\
+         gpgsig -----BEGIN PGP SIGNATURE-----\n \n abc\n -----END PGP SIGNATURE-----\n\nsigned\n",
+        local("HEAD").await
+    );
+    std::fs::write(root.join("signed.txt"), signed).expect("write");
+    let sha = ok(
+        &w,
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "-w",
+            root.join("signed.txt").to_str().expect("path"),
+        ],
+    )
+    .await;
+    ok(
+        &w,
+        &["push", "-q", "origin", &format!("{}:refs/heads/main", sha.trim())],
+    )
+    .await;
+    assert_eq!(c.git_sha("main").await.expect("sha").as_deref(), Some(sha.trim()));
+    ok(&m, &["fetch", "-q", "origin", "+refs/heads/*:refs/heads/*"]).await;
+    assert_eq!(ok(&m, &["rev-parse", "main"]).await.trim(), sha.trim());
+    ok(&m, &["fsck", "--strict", "--no-dangling"]).await;
 }

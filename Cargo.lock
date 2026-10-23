@@ -3448,6 +3448,7 @@ dependencies = [
 name = "scion-git"
 version = "0.1.10"
 dependencies = [
+ "async-trait",
  "base64 0.22.1",
  "bytes",
  "flate2",
@@ -3457,6 +3458,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "scion-auth",
+ "scion-land",
  "scion-object",
  "scion-query",
  "scion-store",

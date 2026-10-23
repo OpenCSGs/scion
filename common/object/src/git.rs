@@ -52,6 +52,82 @@ pub fn commit_body(
     out.into_bytes()
 }
 
+/// A git commit object's fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitCommit {
+    pub tree: [u8; 20],
+    pub parents: Vec<[u8; 20]>,
+    pub author: Signature,
+    pub committer: Signature,
+    /// The message; bytes that are not UTF-8 are replaced.
+    pub message: String,
+}
+
+fn sha(s: &str) -> Option<[u8; 20]> {
+    let mut out = [0u8; 20];
+    (s.len() == 40).then_some(())?;
+    hex::decode_to_slice(s, &mut out).ok().map(|()| out)
+}
+
+/// `Name <email> 1700000000 +0800`.
+pub fn parse_ident(s: &str) -> Option<Signature> {
+    let (name, rest) = s.split_once('<')?;
+    let (email, rest) = rest.split_once('>')?;
+    let mut it = rest.split_whitespace();
+    let secs: i64 = it.next()?.parse().ok()?;
+    let tz = it.next()?;
+    let (sign, hhmm) = match tz.split_at_checked(1)? {
+        ("+", d) => (1, d),
+        ("-", d) => (-1, d),
+        _ => return None,
+    };
+    if hhmm.len() != 4 || !hhmm.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i32 = hhmm[..2].parse().ok()?;
+    let mins: i32 = hhmm[2..].parse().ok()?;
+    Some(Signature {
+        name: name.trim().to_owned(),
+        email: email.trim().to_owned(),
+        time_ms: secs.checked_mul(1000)?,
+        tz_offset_minutes: sign * (hours * 60 + mins),
+    })
+}
+
+/// Parses a commit object; `None` when a required header is missing or malformed.
+pub fn parse_commit(raw: &[u8]) -> Option<GitCommit> {
+    let split = raw.windows(2).position(|w| w == b"\n\n");
+    let (head, message) = match split {
+        Some(i) => (&raw[..i], &raw[i + 2..]),
+        None => (raw, &raw[raw.len()..]),
+    };
+    let head = std::str::from_utf8(head).ok()?;
+    let (mut tree, mut author, mut committer) = (None, None, None);
+    let mut parents = Vec::new();
+    for line in head.lines() {
+        match line.split_once(' ') {
+            Some(("tree", v)) if tree.is_none() => tree = Some(sha(v)?),
+            Some(("parent", v)) => parents.push(sha(v)?),
+            Some(("author", v)) if author.is_none() => author = Some(parse_ident(v)?),
+            Some(("committer", v)) if committer.is_none() => committer = Some(parse_ident(v)?),
+            _ => {}
+        }
+    }
+    Some(GitCommit {
+        tree: tree?,
+        parents,
+        author: author?,
+        committer: committer?,
+        message: String::from_utf8_lossy(message).into_owned(),
+    })
+}
+
+/// Whether [`commit_body`] gives back exactly this object from its parsed fields, so a Scion
+/// commit needs no copy of it.
+pub fn rebuilds(raw: &[u8], c: &GitCommit) -> bool {
+    commit_body(None, &c.tree, &c.parents, &c.author, &c.committer, &c.message) == raw
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +170,46 @@ mod tests {
                 .expect("utf8")
                 .contains(&format!("\nscion-id {id}\n\n"))
         );
+    }
+
+    #[test]
+    fn parses_commits() {
+        let raw = format!(
+            "tree {}\nparent {}\nparent {}\nauthor A <a@x> 1700000000 +0800\n\
+             committer C <c@x> 1700000001 -0130\ngpgsig x\n y\n\nmsg\n",
+            "ab".repeat(20),
+            "cd".repeat(20),
+            "ef".repeat(20)
+        );
+        let c = parse_commit(raw.as_bytes()).expect("parse");
+        assert_eq!(c.tree, [0xab; 20]);
+        assert_eq!(c.parents, [[0xcd; 20], [0xef; 20]]);
+        assert_eq!(c.author.time_ms, 1_700_000_000_000);
+        assert_eq!(c.committer.tz_offset_minutes, -90);
+        assert_eq!(c.message, "msg\n");
+        assert!(!rebuilds(raw.as_bytes(), &c));
+        let plain = raw.replace("gpgsig x\n y\n", "");
+        assert!(rebuilds(
+            plain.as_bytes(),
+            &parse_commit(plain.as_bytes()).expect("parse")
+        ));
+        // Missing or malformed headers
+        for bad in [
+            raw.replace("tree ", "tree x"),
+            raw.replace(&format!("parent {}", "cd".repeat(20)), "parent zz"),
+            raw.replace("author A <a@x> 1700000000 +0800\n", ""),
+            raw.replace("+0800", "0800"),
+            raw.replace("-0130", "-01x0"),
+            raw.replace("1700000001", "soon"),
+        ] {
+            assert_eq!(parse_commit(bad.as_bytes()), None, "{bad}");
+        }
+        // No message at all
+        let bare = format!(
+            "tree {}\nauthor A <a@x> 1 +0000\ncommitter A <a@x> 1 +0000",
+            "ab".repeat(20)
+        );
+        assert_eq!(parse_commit(bare.as_bytes()).expect("parse").message, "");
+        assert_eq!(parse_ident("A <a@x> 1 *0000"), None);
     }
 }

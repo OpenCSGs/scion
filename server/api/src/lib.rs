@@ -286,16 +286,19 @@ pub async fn serve(
     if let Some(l) = limiter {
         land_svc = land_svc.with_rate_limit(l);
     }
-    let land = LandServiceServer::new(land_svc);
+    let land_svc = Arc::new(land_svc);
+    let land = LandServiceServer::from_arc(land_svc.clone());
     // CreateChangeset 一次带全部改动条目：按条目数上限留足空间（每条路径最长 4 KiB，平均远小于此）
     let max_write = write_message_limit(&app.config.limits, max_msg);
-    let write = WriteServiceServer::new(write_svc).max_decoding_message_size(max_write);
+    let write_svc = Arc::new(write_svc);
+    let write = WriteServiceServer::from_arc(write_svc.clone()).max_decoding_message_size(max_write);
     let hub_for_shutdown = hub.clone();
-    let refs = RefServiceServer::new(
+    let ref_svc = Arc::new(
         RefSvc::new(app.meta.clone(), hub)
             .with_guard(guard.clone())
             .with_pre_land(pre_land),
     );
+    let refs = RefServiceServer::from_arc(ref_svc.clone());
     let query = QueryServiceServer::new(
         QuerySvc::new(app.config.clone(), app.meta.clone(), app.blobs.clone()).with_guard(guard.clone()),
     )
@@ -318,12 +321,20 @@ pub async fn serve(
     .with_cluster_secret(cluster_secret);
     // git's smart HTTP requests go to the git gateway before any gRPC layer
     let gateway = app.config.git.then(|| {
-        Arc::new(scion_git::Gateway::new(
-            app.meta.clone(),
-            app.blobs.clone(),
-            guard.clone(),
-            &app.config.server_version,
-        ))
+        let push = git::PushBackend {
+            write: write_svc,
+            land: land_svc,
+            refs: ref_svc,
+        };
+        Arc::new(
+            scion_git::Gateway::new(
+                app.meta.clone(),
+                app.blobs.clone(),
+                guard.clone(),
+                &app.config.server_version,
+            )
+            .with_push(Arc::new(push), app.config.limits.max_upload_object_bytes),
+        )
     });
     // 从外到内：git → 追踪 → 指标 → 全局过载丢弃 → 认证 → 按租户限流 → deadline → 各服务（§5.3）
     let result = tonic::transport::Server::builder()

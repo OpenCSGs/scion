@@ -2,9 +2,10 @@
 
 [English](git-clients.md) | 简体中文
 
-服务端在 `scn` 的同一个地址和 URL 上提供 git 的 smart HTTP 协议，所以 git 命令行、CI 系统和 IDE 都可以克隆和拉取 Scion 仓库。git 推送稍后支持，在此之前请用 `scn` 推送。网关的工作原理见[设计文档](../design/git-gateway.zh-CN.md)。
+服务端在 `scn` 的同一个地址和 URL 上提供 git 的 smart HTTP 协议，所以 git 命令行、CI 系统和 IDE 都可以克隆、拉取和推送 Scion 仓库。网关的工作原理见[设计文档](../design/git-gateway.zh-CN.md)。
 
 - [克隆和拉取](#克隆和拉取)
+- [推送](#推送)
 - [凭据](#凭据)
 - [SHA](#sha)
 - [暂不支持](#暂不支持)
@@ -25,6 +26,20 @@ git ls-remote origin            # HEAD、refs/heads/*、refs/tags/*
 - 分支显示为 `refs/heads/<name>`，标签（Scion 中的 `tags/<name>`）显示为 `refs/tags/<name>`，`HEAD` 指向仓库的默认分支。
 - 支持 git 2.x 客户端，协议 v2（git 2.26 起默认）和较老的 v0 都可以。
 - 克隆会拿到所拉取分支的全部提交，而不只是 `scn clone` 下载的快照。
+
+## 推送
+
+```sh
+git push origin main            # 把新提交合入 main
+git push origin feature         # 创建或移动分支
+git push origin v1.0            # 标签（轻量标签）
+git push origin :old-branch     # 删除分支
+```
+
+- **提交保留 SHA。** 推送的每个提交都变成一个 Scion 提交，`scn log` 可以看到，作者、提交者、时间和说明都不变；git、`scn` 和 `GetGitShas` 看到的都是推送时的 SHA。签名提交保留签名。
+- **分支只能快进。** 推送和 `scn land` 一样合入，但不做 rebase：别人先合入时，git 会提示 `rejected … (fetch first)`，执行 `git pull --rebase` 后再推送即可。`git push --force` 可以强制移动分支，所需权限和 `scn` 一样，是该分支的 `land` 权限。
+- **权限：** 推送需要仓库的 `write` 权限（策略按路径限制时，需要改动路径的权限），以及每个 ref 的 `land` 权限，和 `scn` 相同。合入前检查和 ref 事件同样适用于推送。
+- **限制：** 每次推送最多 1 GiB，单个文件不超过服务端的上传限制（`max_upload_object_bytes`）。
 
 ## 凭据
 
@@ -51,7 +66,10 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 
 | 功能 | 现象 |
 |---|---|
-| `git push` | 拒绝，提示 `pushing with git is not supported yet; push with scn` |
+| `git push --atomic` | git 会拒绝：Scion 一次只更新一个 ref |
+| annotated tag | `git push` 提示 `annotated tags are not supported; push a lightweight tag` |
+| 子模块，以及文件、可执行文件、符号链接以外的模式 | 推送被拒绝，并给出路径 |
+| `refs/heads/*` 和 `refs/tags/*` 以外的 ref（如 `refs/notes/*`） | 该 ref 的推送被拒绝 |
 | 浅克隆（`--depth`）和部分克隆（`--filter`） | 服务端没有提供这两种能力，git 自己会拒绝 |
 | 含子模块的提交，或 0.1.11 之前导入的签名提交 | 拉取失败，提示 `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | 历史中包含被 [redact](redaction.zh-CN.md) 的文件 | 拉取失败：文件的 SHA 覆盖的内容已不允许任何人读取 |
@@ -59,4 +77,4 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 
 ## 关闭
 
-`scion server --no-git`（或 `SCION_NO_GIT=1`）停止提供 git 服务，gRPC 接口不受影响。
+`scion server --no-git`（或 `SCION_NO_GIT=1`）停止提供 git 服务（包括推送），gRPC 接口不受影响。

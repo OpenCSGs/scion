@@ -29,6 +29,10 @@ pub const GIT_COMMIT_KIND: &str = "git-commit";
 pub const GIT_TREE_KIND: &str = "git-tree";
 /// 文件 id → git blob sha。
 pub const GIT_BLOB_KIND: &str = "git-blob";
+/// git tree SHA → directory id, written with `git-tree` (the git gateway finds pushed trees' bases with it).
+pub const GIT_TREE_ID_KIND: &str = "git-tree-id";
+/// git blob SHA → file id, written with `git-blob`.
+pub const GIT_BLOB_ID_KIND: &str = "git-blob-id";
 pub const GIT_OBJECT_VERSION: u32 = 1;
 /// 计算得到的 commit 对象里记录 Scion 提交 id 的头。
 pub const SCION_ID_HEADER: &str = scion_object::git::SCION_ID_HEADER;
@@ -228,6 +232,8 @@ fn tree_sha<'a>(meta: &'a dyn MetaStore, blobs: &'a dyn BlobStore, repo: &'a str
                     let sha = git_hash("blob", &content);
                     meta.put_derived(repo, GIT_BLOB_KIND, GIT_OBJECT_VERSION, &e.id.to_bytes(), &sha)
                         .await?;
+                    meta.put_derived(repo, GIT_BLOB_ID_KIND, GIT_OBJECT_VERSION, &sha, &e.id.to_bytes())
+                        .await?;
                     sha
                 }
             };
@@ -244,6 +250,8 @@ fn tree_sha<'a>(meta: &'a dyn MetaStore, blobs: &'a dyn BlobStore, repo: &'a str
         }
         let sha = git_hash("tree", &git_tree_body(&entries));
         meta.put_derived(repo, GIT_TREE_KIND, GIT_OBJECT_VERSION, &id.to_bytes(), &sha)
+            .await?;
+        meta.put_derived(repo, GIT_TREE_ID_KIND, GIT_OBJECT_VERSION, &sha, &id.to_bytes())
             .await?;
         Ok(sha)
     })
@@ -423,6 +431,14 @@ mod tests {
         assert_eq!(lookup_git_sha(&s, "r", &sha1).await, Ok(Some(id1)));
         assert_eq!(lookup_git_sha(&s, "r", &sha2).await, Ok(Some(id2)));
         assert_eq!(cached(&s, "r", GIT_TREE_KIND, &root).await, Ok(Some(tree)));
+        // and the other way round
+        let back = s.get_derived("r", GIT_TREE_ID_KIND, GIT_OBJECT_VERSION, &tree).await;
+        assert_eq!(back, Ok(Some(root.to_bytes().to_vec())));
+        let hello_sha = hexsha("ce013625030ba8dba906f756967f9e9ca394464a");
+        let back = s
+            .get_derived("r", GIT_BLOB_ID_KIND, GIT_OBJECT_VERSION, &hello_sha)
+            .await;
+        assert_eq!(back, Ok(Some(ObjectId::of_blob(b"hello\n").to_bytes().to_vec())));
 
         // 缓存命中时不再读取对象：删掉文件内容后仍能得到结果
         let hello = ObjectId::of_blob(b"hello\n");

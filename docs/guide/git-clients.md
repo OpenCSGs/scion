@@ -2,9 +2,10 @@
 
 English | [简体中文](git-clients.zh-CN.md)
 
-The server speaks git's smart HTTP protocol at the same address and URL as `scn`, so the git CLI, CI systems and IDEs can clone and fetch a Scion repository. Pushing with git comes later; until then, push with `scn`. How the gateway works is in the [design](../design/git-gateway.md).
+The server speaks git's smart HTTP protocol at the same address and URL as `scn`, so the git CLI, CI systems and IDEs can clone, fetch and push a Scion repository. How the gateway works is in the [design](../design/git-gateway.md).
 
 - [Clone and fetch](#clone-and-fetch)
+- [Push](#push)
 - [Credentials](#credentials)
 - [SHAs](#shas)
 - [Not available yet](#not-available-yet)
@@ -25,6 +26,20 @@ git ls-remote origin            # HEAD, refs/heads/*, refs/tags/*
 - Branches appear as `refs/heads/<name>`, tags (`tags/<name>` in Scion) as `refs/tags/<name>`, and `HEAD` points at the repository's default branch.
 - git 2.x clients work, with protocol v2 (git's default since 2.26) and the older v0.
 - A clone receives every commit of the branches it fetches, not just the snapshot `scn clone` downloads.
+
+## Push
+
+```sh
+git push origin main            # lands the new commits on main
+git push origin feature         # creates or moves a branch
+git push origin v1.0            # a tag (lightweight)
+git push origin :old-branch     # deletes a branch
+```
+
+- **Commits keep their SHAs.** Each pushed commit becomes a Scion commit that `scn log` shows, with the same author, committer, times and message; git, `scn` and `GetGitShas` all see the SHA that was pushed. Signed commits keep their signatures.
+- **Branches only fast-forward.** A push lands like `scn land` with no rebase: when someone landed first, git says `rejected … (fetch first)`; run `git pull --rebase` and push again. `git push --force` moves the branch anyway, with the same `land` permission on the branch as `scn` needs.
+- **Permissions:** pushing needs `write` on the repository (on the changed paths, when the policy limits paths) and `land` on each ref, as for `scn`. Pre-land checks and ref events apply to pushes too.
+- **Limits:** a push may be up to 1 GiB, and each file up to the server's upload limit (`max_upload_object_bytes`).
 
 ## Credentials
 
@@ -51,7 +66,10 @@ Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` repo
 
 | What | What happens |
 |---|---|
-| `git push` | Refused with `pushing with git is not supported yet; push with scn` |
+| `git push --atomic` | git refuses it: Scion updates one ref at a time |
+| Annotated tags | `git push` reports `annotated tags are not supported; push a lightweight tag` |
+| Submodules, and modes other than files, executables and symbolic links | The push is refused with the path |
+| Refs outside `refs/heads/*` and `refs/tags/*` (`refs/notes/*` and so on) | The push is refused for that ref |
 | Shallow clones (`--depth`) and partial clones (`--filter`) | git refuses them, since the server does not offer them |
 | Commits with submodules, or signed commits imported before 0.1.11 | The fetch fails with `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | History containing a [redacted](redaction.md) file | The fetch fails: the file's SHA covers content nobody may read any more |
@@ -59,4 +77,4 @@ Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` repo
 
 ## Turning it off
 
-`scion server --no-git` (or `SCION_NO_GIT=1`) stops serving git; the gRPC API is unaffected.
+`scion server --no-git` (or `SCION_NO_GIT=1`) stops serving git, pushes included; the gRPC API is unaffected.

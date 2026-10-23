@@ -68,7 +68,7 @@ Without `--server`, the script installs only the client, `scn`. From source inst
 
 **Know git?** Most git commands work in scn as you type them, starting with `scn clone http://host/REPO`: see [git commands in scn](docs/guide/git-commands.md) for the full list.
 
-[A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) explains how the model differs. Tools that only speak git can clone and fetch the same URL: see [git clients](docs/guide/git-clients.md).
+[A tour of scion and scn](docs/guide/cli.md) goes through the everyday commands, and [coming from git](docs/guide/coming-from-git.md) explains how the model differs. Tools that only speak git can clone, fetch and push the same URL: see [git clients](docs/guide/git-clients.md).
 
 ## Deployment
 

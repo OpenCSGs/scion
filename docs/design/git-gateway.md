@@ -2,7 +2,7 @@
 
 English | [简体中文](git-gateway.zh-CN.md)
 
-Status: G1 (fetch) is implemented; G2 (push) is next. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
+Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is next. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
 
 Scion's own client is `scn`, but many tools speak only git: CI systems, IDEs, package managers, `git submodule`, starhub's users. The gateway lets the git CLI clone, fetch and push a Scion repository at the URL `scn` already uses:
 
@@ -23,6 +23,7 @@ git clone http://scion.example.com:7080/agentlab/app
 - SSH (starhub already runs gitlab-shell; the gateway serves it in G4);
 - shallow and partial clones (G3);
 - submodules (gitlinks) in Scion trees: pushes that add them are refused;
+- `git push --atomic`, since Scion updates one ref at a time;
 - server-side rebases of git pushes. A push that is not a fast-forward is refused, as git users expect, and `git pull --rebase` resolves it on the client.
 
 ## 2. Where it runs
@@ -89,21 +90,21 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 ## 5. Push (`git-receive-pack`)
 
 **Advertising.**
-- The ref list and the capabilities `report-status`, `report-status-v2`, `delete-refs`, `atomic`, `ofs-delta`, `side-band-64k`, `quiet`, `push-options`, `agent`.
+- The ref list and the capabilities `report-status`, `report-status-v2`, `delete-refs`, `ofs-delta`, `side-band-64k`, `quiet`, `agent`.
+- Not `atomic`: Scion updates one ref at a time, so `git push --atomic` is refused by git itself. Not `push-options` either.
 - Also `no-thin`: the client then sends a self-contained pack. Its deltas can name only objects in the same pack, so the gateway never has to rebuild an existing object to apply a delta.
 
 **Receiving the pack.**
-- Parsed as a stream:
+- Parsed in memory, up to 1 GiB per push (G3 may spill larger packs to a temporary file):
   - whole objects and `ofs-delta`/`ref-delta` entries whose bases are in the pack;
-  - each object's SHA checked;
-  - limits on the pack size, the object count and each file's size, from the same settings as `CreateChangeset`.
-- Bases still needed for later deltas are kept in a bounded cache, spilling to a temporary file.
-- Blobs are uploaded to the blob store as they are resolved, with the same dedup as `scn` uploads: a blob Scion already has is not written again.
+  - each object's SHA computed, and the pack's trailer checked;
+  - each file at most `max_upload_object_bytes`, the same limit as `scn` uploads.
+- Files are stored before the commit that needs them, with the same dedup as `scn` uploads: a file Scion already has is not written again.
 
 **Turning commits into Scion commits.**
 - For each pushed commit, parents first:
   - **Parents** are Scion commits: found through `git-sha1`, or made earlier in the same push.
-  - **The tree** is converted from git's: each entry is found through `git-tree-id`/`git-blob-id`, or comes from the pack.
+  - **The tree** is converted from git's: each entry comes from the pack, or is found through `git-tree-id`/`git-blob-id` (a renamed directory, for example, is not sent again). For trees derived before these mappings existed, the first parent's tree is indexed once on a miss.
   - **The delta** against the first parent comes from comparing the trees, skipping every subtree with the same SHA on both sides.
   - **Refused** (the push stops with a message):
     - a gitlink;
@@ -112,7 +113,8 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
     - a path Scion's rules reject.
   - **The Scion commit** gets:
     - author, committer and message from the git commit, and its `change_id` from the git SHA, as imports do;
-    - the extensions `git.sha1` (the SHA) and `git.commit` (the raw object).
+    - the extensions `git.sha1` (the SHA) and, when the fields cannot rebuild it, `git.commit` (the raw object).
+  - **Annotated tags** are refused: Scion's tags are refs to commits.
 - **Checks.**
   - Before creating the commit, the gateway checks that the Scion tree's git SHA equals the commit's `tree` line. A git tree that does not round-trip is refused, so the SHA a git user sees is always the SHA of the content.
   - Only the server may set `git.sha1` and `git.commit` for a non-admin writer, and only after these checks. A non-admin client still cannot set them through `CreateChangeset`.
@@ -128,7 +130,7 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
   - `write` to send the pack;
   - `land` on each ref to update it, with the same per-ref policy (protected branches, for example).
   - Pre-land checks run as for `scn land` and can refuse a ref with their message.
-- **Atomic:** with `atomic`, all the ref updates succeed or none does. Without it, each ref is reported on its own (`ok` or `ng <reason>`).
+- **Each ref on its own:** each ref is reported as `ok` or `ng <reason>`. A command whose old value is not the ref's current one gets `ng … fetch first`.
 - **Events:** a push makes the same `ref.updated` events as a land, with the git SHAs in them.
 
 ## 6. Importing keeps the raw commit too
@@ -158,7 +160,7 @@ They go to the client as `ERR` packets, or `ng` lines for pushes, and git prints
 | Stage | What | Done when |
 |---|---|---|
 | **G1 Fetch** (done) | The router on the gRPC listener; refs; `upload-pack` v0 and v2; packs without deltas; Basic auth; commit objects as §3 | `git clone`, `git fetch` and `git pull` work against the Mac mini, and `git fsck --strict` passes on the result |
-| **G2 Push** | The `git-tree-id`/`git-blob-id` lookups; `receive-pack`: parsing packs, turning git commits into Scion commits, fast-forward lands, creating and deleting refs, `git.commit` (`scn import git` records it already) | `git push` of new commits, branches and tags; signed commits keep their SHAs; non-fast-forwards are refused |
+| **G2 Push** (done) | The `git-tree-id`/`git-blob-id` lookups; `receive-pack`: parsing packs, turning git commits into Scion commits, fast-forward lands, creating and deleting refs, `git.commit` (`scn import git` records it already) | `git push` of new commits, branches and tags; signed commits keep their SHAs; non-fast-forwards are refused |
 | **G3 Efficiency** | Deltas in packs; shallow clones (`--depth`); partial clones (`--filter=blob:none`); caching the last pack of a busy ref | A clone of starhub-server moves no more than 1.5 times git's bytes |
 | **G4 starhub** | Gitaly's `SmartHTTPService` and `SSHService` over gRPC (with sidechannel), for gitlab-workhorse and gitlab-shell; native SSH stays out unless asked for | starhub's git routes work on a Scion repository |
 
@@ -169,7 +171,7 @@ They go to the client as `ERR` packets, or `ng` lines for pushes, and git prints
   - packs that git itself wrote (`git pack-objects`) are parsed;
   - packs the gateway writes are checked with `git index-pack --strict`.
 - **End-to-end tests with the real git CLI:**
-  - `server/git/tests` starts a server, then runs `git clone`, `fetch`, `push`, `push --force` and `push --atomic`;
+  - `server/api/tests/git.rs` starts a server, then runs `git clone`, `fetch`, `pull`, `push` and `push --force`;
   - each test checks that `git log` matches `scn log` and that `GetGitShas` returns the SHAs git sees;
   - the tests skip themselves when git is not installed.
 - **Round trip:** importing a git repository (with signed commits and merges), cloning it through the gateway and comparing every object with the original repository gives no differences.

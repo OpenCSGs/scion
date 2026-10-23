@@ -68,7 +68,7 @@ scn log
 
 **熟悉 git？** 大多数 git 命令在 scn 里可以照原样输入，从 `scn clone http://host/REPO` 开始，完整列表见 [scn 中的 git 命令](docs/guide/git-commands.zh-CN.md)。
 
-[scion 与 scn 使用导览](docs/guide/cli.zh-CN.md)介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.zh-CN.md)说明两者模型上的区别。只会说 git 的工具可以用同一个 URL 克隆和拉取，见 [git 客户端](docs/guide/git-clients.zh-CN.md)。
+[scion 与 scn 使用导览](docs/guide/cli.zh-CN.md)介绍日常命令，[从 git 迁移](docs/guide/coming-from-git.zh-CN.md)说明两者模型上的区别。只会说 git 的工具可以用同一个 URL 克隆、拉取和推送，见 [git 客户端](docs/guide/git-clients.zh-CN.md)。
 
 ## 部署
 

@@ -76,7 +76,8 @@ impl<'a> Objects<'a> {
         Ok(sha)
     }
 
-    async fn tree_sha(&mut self, id: ObjectId) -> Result<[u8; 20]> {
+    /// A directory's git tree SHA, derived first if it was not yet.
+    pub async fn tree_sha(&mut self, id: ObjectId) -> Result<[u8; 20]> {
         if let Some(sha) = self.trees.get(&id) {
             return Ok(*sha);
         }
@@ -99,7 +100,19 @@ impl<'a> Objects<'a> {
 
     /// A directory's git tree object.
     pub async fn tree(&mut self, id: ObjectId, tree: &Tree) -> Result<Vec<u8>> {
-        let shas = match self.entry_shas(tree).await? {
+        let shas = self.entry_git_shas(id, tree).await?;
+        let entries: Vec<(String, EntryMode, [u8; 20])> = tree
+            .entries()
+            .iter()
+            .zip(shas)
+            .map(|(e, sha)| (e.name.clone(), e.mode, sha))
+            .collect();
+        Ok(git_tree_body(&entries))
+    }
+
+    /// The git SHAs of a directory's entries, in order, derived first if they were not yet.
+    pub async fn entry_git_shas(&mut self, id: ObjectId, tree: &Tree) -> Result<Vec<[u8; 20]>> {
+        Ok(match self.entry_shas(tree).await? {
             Some(shas) => shas,
             None => {
                 // Not derived yet (a tree of an imported commit): derive it, which caches its
@@ -109,14 +122,7 @@ impl<'a> Objects<'a> {
                     .await?
                     .ok_or_else(|| Error::Internal(format!("git SHAs of tree {id} missing after deriving it")))?
             }
-        };
-        let entries: Vec<(String, EntryMode, [u8; 20])> = tree
-            .entries()
-            .iter()
-            .zip(shas)
-            .map(|(e, sha)| (e.name.clone(), e.mode, sha))
-            .collect();
-        Ok(git_tree_body(&entries))
+        })
     }
 
     /// The cached git SHAs of a tree's entries, in order; `None` when any is missing.

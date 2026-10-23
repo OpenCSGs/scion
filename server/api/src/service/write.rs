@@ -94,6 +94,32 @@ impl WriteSvc {
         Ok(())
     }
 
+    /// Stores objects for `p`, who needs to be able to write somewhere in the repository.
+    pub(crate) async fn store_as(
+        &self,
+        p: &scion_auth::Principal,
+        repo: &str,
+        objects: &[(ObjectId, Bytes)],
+    ) -> Result<(), Status> {
+        authorize_any(&self.guard, p, repo, Action::Write).await?;
+        check_repo(self.meta.as_ref(), repo).await?;
+        RateLimiter::admit(self.limiter.as_deref(), repo)?;
+        self.store(repo, objects).await
+    }
+
+    /// Creates a commit the git gateway built for `p`: the paths are checked as for
+    /// CreateChangeset, but the gateway may set `git.sha1` and `git.commit`, which it checked.
+    pub(crate) async fn create_as(
+        &self,
+        p: &scion_auth::Principal,
+        repo: &str,
+        cs: &Changeset,
+    ) -> Result<ChangesetRecord, Status> {
+        self.authorize_paths(p, repo, cs).await?;
+        RateLimiter::admit(self.limiter.as_deref(), repo)?;
+        self.create(repo, cs).await
+    }
+
     /// 校验并创建提交：父提交必须已存在，引用的文件必须已上传，delta 必须能应用到 first parent 上。
     pub(crate) async fn create(&self, repo: &str, cs: &Changeset) -> Result<ChangesetRecord, Status> {
         check_repo(self.meta.as_ref(), repo).await?;

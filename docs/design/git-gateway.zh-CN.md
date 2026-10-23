@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：G1（拉取）已实现，下一步是 G2（推送）。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
+状态：G1（拉取）和 G2（推送）已实现，下一步是 G3（效率）。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -23,6 +23,7 @@ git clone http://scion.example.com:7080/agentlab/app
 - SSH（starhub 已经有 gitlab-shell，G4 阶段由网关对接）；
 - 浅克隆和部分克隆（G3）；
 - Scion 目录树中的子模块（gitlink）：添加子模块的推送会被拒绝；
+- `git push --atomic`：Scion 一次只更新一个 ref；
 - 对 git 推送做服务端 rebase。不是快进的推送会被拒绝，这符合 git 用户的预期，在客户端用 `git pull --rebase` 解决。
 
 ## 2. 运行在哪里
@@ -89,21 +90,21 @@ git clone http://scion.example.com:7080/agentlab/app
 ## 5. 推送（`git-receive-pack`）
 
 **公布能力。**
-- ref 列表，能力为 `report-status`、`report-status-v2`、`delete-refs`、`atomic`、`ofs-delta`、`side-band-64k`、`quiet`、`push-options`、`agent`。
+- ref 列表，能力为 `report-status`、`report-status-v2`、`delete-refs`、`ofs-delta`、`side-band-64k`、`quiet`、`agent`。
+- 不声明 `atomic`：Scion 一次只更新一个 ref，所以 `git push --atomic` 会被 git 自己拒绝。也不声明 `push-options`。
 - 另外声明 `no-thin`：客户端就会发送自包含的 pack。其中的 delta 只能以同一个 pack 里的对象为基准，网关不需要为了应用 delta 去重建已有对象。
 
 **接收 pack。**
-- 流式解析：
+- 在内存中解析，每次推送最多 1 GiB（G3 可能把更大的 pack 写入临时文件）：
   - 完整对象，以及基准在同一 pack 中的 `ofs-delta`、`ref-delta` 条目；
-  - 校验每个对象的 SHA；
-  - 限制 pack 大小、对象数和单个文件大小，沿用 `CreateChangeset` 的相关配置。
-- 后续 delta 还要用到的基准对象放在有上限的缓存中，超出部分写入临时文件。
-- blob 一解析出来就上传到对象存储，和 `scn` 上传一样去重：Scion 已有的 blob 不会再写一次。
+  - 计算每个对象的 SHA，并校验 pack 末尾的校验和；
+  - 单个文件最大为 `max_upload_object_bytes`，与 `scn` 上传的限制相同。
+- 文件在需要它的提交之前写入存储，和 `scn` 上传一样去重：Scion 已有的文件不会再写一次。
 
 **把 git 提交转换成 Scion 提交。**
 - 按父提交在前的顺序处理每个推送来的提交：
   - **父提交**是 Scion 提交：通过 `git-sha1` 找到，或者是本次推送前面刚创建的。
-  - **目录树**从 git 的 tree 转换而来：每个条目通过 `git-tree-id`、`git-blob-id` 找到，或者来自 pack。
+  - **目录树**从 git 的 tree 转换而来：每个条目来自 pack，或者通过 `git-tree-id`、`git-blob-id` 找到（例如改名的目录不会重新发送）。对于在这两种映射出现之前派生的目录树，查找不到时会对第一父提交的目录树建一次索引。
   - **改动**是与第一父提交的目录树比较得到的，两边 SHA 相同的子目录直接跳过。
   - **拒绝以下情况**（推送停止，并给出说明）：
     - gitlink；
@@ -112,7 +113,8 @@ git clone http://scion.example.com:7080/agentlab/app
     - Scion 路径规则不允许的路径。
   - **生成的 Scion 提交**：
     - 作者、提交者和说明取自 git 提交，`change_id` 由 git SHA 推导，和导入时一样；
-    - 带扩展字段 `git.sha1`（SHA）和 `git.commit`（原始对象）。
+    - 带扩展字段 `git.sha1`（SHA），无法用字段重建时还带 `git.commit`（原始对象）。
+  - **annotated tag** 会被拒绝：Scion 的标签是指向提交的 ref。
 - **检查。**
   - 创建提交之前，网关检查 Scion 目录树的 git SHA 等于 commit 的 `tree` 行。无法原样还原的 git tree 会被拒绝，因此 git 用户看到的 SHA 始终就是内容的 SHA。
   - 对于非管理员写入者，只有服务端可以写 `git.sha1` 和 `git.commit`，而且要在通过上述检查之后。非管理员客户端仍然不能通过 `CreateChangeset` 设置这两个字段。
@@ -128,7 +130,7 @@ git clone http://scion.example.com:7080/agentlab/app
   - 发送 pack 需要 `write`；
   - 更新每个 ref 需要该 ref 的 `land`，按 ref 的策略（例如保护分支）判断；
   - 合入前检查和 `scn land` 一样执行，可以拒绝某个 ref 并给出原因。
-- **原子性：** 声明 `atomic` 时，所有 ref 要么全部更新成功，要么都不更新。否则逐个 ref 报告结果（`ok` 或 `ng <原因>`）。
+- **逐个 ref 处理：** 每个 ref 单独报告 `ok` 或 `ng <原因>`。命令中的 old 不是 ref 当前值时返回 `ng … fetch first`。
 - **事件：** 推送和合入一样产生 `ref.updated` 事件，其中带有 git SHA。
 
 ## 6. 导入时也保存原始提交
@@ -158,7 +160,7 @@ git clone http://scion.example.com:7080/agentlab/app
 | 阶段 | 内容 | 完成标准 |
 |---|---|---|
 | **G1 拉取**（已完成） | gRPC 端口上的路由器；ref；`upload-pack` v0 和 v2；不带 delta 的 pack；Basic 认证；按 §3 生成 commit 对象 | 在 Mac mini 上 `git clone`、`git fetch`、`git pull` 可用，结果通过 `git fsck --strict` |
-| **G2 推送** | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 已经记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
+| **G2 推送**（已完成） | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 已经记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
 | **G3 效率** | pack 中的 delta；浅克隆（`--depth`）；部分克隆（`--filter=blob:none`）；缓存热门 ref 的最近一个 pack | 克隆 starhub-server 传输的字节不超过 git 的 1.5 倍 |
 | **G4 starhub** | 通过 gRPC 提供 Gitaly 的 `SmartHTTPService` 和 `SSHService`（含 sidechannel），对接 gitlab-workhorse 和 gitlab-shell；除非有需求，不做原生 SSH | starhub 的 git 路由在 Scion 仓库上可用 |
 
@@ -169,7 +171,7 @@ git clone http://scion.example.com:7080/agentlab/app
   - 能解析 git 自己写出的 pack（`git pack-objects`）；
   - 网关写出的 pack 用 `git index-pack --strict` 校验。
 - **使用真实 git 命令行的端到端测试：**
-  - `server/git/tests` 启动服务端，运行 `git clone`、`fetch`、`push`、`push --force` 和 `push --atomic`；
+  - `server/api/tests/git.rs` 启动服务端，运行 `git clone`、`fetch`、`pull`、`push` 和 `push --force`；
   - 每个测试都检查 `git log` 与 `scn log` 一致，`GetGitShas` 返回的 SHA 与 git 看到的相同；
   - 没有安装 git 时测试自动跳过。
 - **往返测试：** 导入一个 git 仓库（含签名提交和合并提交），通过网关克隆出来，与原仓库逐个对象比较，没有差异。

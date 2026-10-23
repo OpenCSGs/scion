@@ -71,3 +71,118 @@ where
         Box::pin(async move { Ok(fut.await?.map(tonic::body::Body::new)) })
     }
 }
+
+/// Pushes through the same services as `scn`: CreateChangeset's path checks, Land (fast-forward
+/// only) and the ref RPCs, so authorization, pre-land checks, events and cluster forwarding apply.
+pub struct PushBackend {
+    pub write: Arc<crate::service::WriteSvc>,
+    pub land: Arc<crate::service::LandSvc>,
+    pub refs: Arc<crate::service::RefSvc>,
+}
+
+fn as_principal<T>(p: &scion_auth::Principal, msg: T) -> tonic::Request<T> {
+    let mut r = tonic::Request::new(msg);
+    r.extensions_mut().insert(p.clone());
+    r
+}
+
+/// What git prints after `ng REF`.
+fn reason(s: tonic::Status) -> String {
+    use tonic_types::StatusExt;
+    if let Some(info) = s.get_error_details().error_info() {
+        if info.reason == "NOT_FAST_FORWARD" {
+            return "non-fast-forward".into();
+        }
+    }
+    s.message().to_string()
+}
+
+#[tonic::async_trait]
+impl scion_git::receive::PushBackend for PushBackend {
+    async fn store(
+        &self,
+        p: &scion_auth::Principal,
+        repo: &str,
+        objects: Vec<(scion_object::ObjectId, Bytes)>,
+    ) -> Result<(), String> {
+        self.write.store_as(p, repo, &objects).await.map_err(reason)
+    }
+
+    async fn create(
+        &self,
+        p: &scion_auth::Principal,
+        repo: &str,
+        cs: &scion_object::Changeset,
+    ) -> Result<scion_store::ChangesetRecord, String> {
+        self.write.create_as(p, repo, cs).await.map_err(reason)
+    }
+
+    async fn update(
+        &self,
+        p: &scion_auth::Principal,
+        repo: &str,
+        u: scion_git::receive::RefUpdate,
+    ) -> Result<(), String> {
+        use scion_git::receive::RefUpdate;
+        use scion_proto::v1::land_service_server::LandService;
+        use scion_proto::v1::ref_service_server::RefService;
+        use scion_proto::v1::{CreateRefRequest, DeleteRefRequest, LandRequest, UpdateRefRequest};
+        let id = |c: scion_object::ObjectId| Bytes::copy_from_slice(&c.to_bytes());
+        let repo = repo.to_string();
+        let result = match u {
+            RefUpdate::Land { name, new } => LandService::land(
+                self.land.as_ref(),
+                as_principal(
+                    p,
+                    LandRequest {
+                        repo,
+                        request_id: String::new(),
+                        r#ref: name,
+                        changeset_id: id(new),
+                        fast_forward_only: true,
+                    },
+                ),
+            )
+            .await
+            .map(drop),
+            RefUpdate::Create { name, new } => self
+                .refs
+                .create_ref(as_principal(
+                    p,
+                    CreateRefRequest {
+                        repo,
+                        r#ref: name,
+                        changeset_id: id(new),
+                    },
+                ))
+                .await
+                .map(drop),
+            RefUpdate::Move { name, new, version } => self
+                .refs
+                .update_ref(as_principal(
+                    p,
+                    UpdateRefRequest {
+                        repo,
+                        r#ref: name,
+                        changeset_id: id(new),
+                        expected_version: version,
+                    },
+                ))
+                .await
+                .map(drop),
+            RefUpdate::Delete { name, version } => self
+                .refs
+                .delete_ref(as_principal(
+                    p,
+                    DeleteRefRequest {
+                        repo,
+                        r#ref: name,
+                        expected_version: version,
+                    },
+                ))
+                .await
+                .map(drop),
+        };
+        result.map_err(reason)
+    }
+}

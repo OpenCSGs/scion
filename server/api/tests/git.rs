@@ -183,14 +183,76 @@ async fn git_clones_fetches_and_pulls() {
     // Up to date: nothing to fetch
     ok(&w, &["fetch", "-q", "origin"]).await;
 
-    // What the gateway does not do yet says so
-    let shallow = fails(
+    // Shallow clones: the newest commit only, then a pull, then deeper and the whole history
+    for (dir, version) in [("s2", "2"), ("s0", "0")] {
+        let v = format!("protocol.version={version}");
+        ok(
+            root,
+            &["-c", &v, "clone", "-q", "--depth", "1", &format!("{url}/mono"), dir],
+        )
+        .await;
+        let s = root.join(dir);
+        assert_eq!(ok(&s, &["rev-list", "--count", "HEAD"]).await.trim(), "1");
+        assert_eq!(
+            std::fs::read_to_string(s.join(".git/shallow")).expect("shallow").trim(),
+            sha
+        );
+        assert_eq!(
+            std::fs::read_to_string(s.join("README.md")).expect("read"),
+            "hello again\n"
+        );
+        ok(&s, &["fsck", "--no-dangling"]).await;
+        ok(&s, &["-c", &v, "fetch", "-q", "--depth", "2", "origin"]).await;
+        assert_eq!(ok(&s, &["rev-list", "--count", "origin/main"]).await.trim(), "2");
+        ok(&s, &["-c", &v, "fetch", "-q", "--unshallow", "origin"]).await;
+        assert_eq!(ok(&s, &["rev-list", "--count", "origin/main"]).await.trim(), "3");
+        assert!(!s.join(".git/shallow").exists());
+        ok(&s, &["fsck", "--strict", "--no-dangling"]).await;
+    }
+    // By date: the commits from 2000-01-01 on, which here is all of them
+    ok(
         root,
-        &["clone", "-q", "--depth", "1", &format!("{url}/mono"), "shallow"],
+        &[
+            "clone",
+            "-q",
+            "--shallow-since=2000-01-01",
+            &format!("{url}/mono"),
+            "since",
+        ],
     )
     .await;
-    // git sees no `shallow` capability and refuses on its own
-    assert!(shallow.contains("shallow"), "{shallow}");
+    assert_eq!(
+        ok(&root.join("since"), &["rev-list", "--count", "HEAD"]).await.trim(),
+        "3"
+    );
+    // A date after every commit: the tip alone, its parents cut
+    ok(
+        root,
+        &[
+            "clone",
+            "-q",
+            "--shallow-since=2090-01-01",
+            &format!("{url}/mono"),
+            "late",
+        ],
+    )
+    .await;
+    assert_eq!(
+        ok(&root.join("late"), &["rev-list", "--count", "HEAD"]).await.trim(),
+        "1"
+    );
+    let e = fails(
+        root,
+        &[
+            "clone",
+            "-q",
+            "--shallow-exclude=feature",
+            &format!("{url}/mono"),
+            "excl",
+        ],
+    )
+    .await;
+    assert!(e.contains("--shallow-exclude is not supported"), "{e}");
     let missing = fails(root, &["clone", "-q", &format!("{url}/nope"), "nope"]).await;
     assert!(missing.contains("not found"), "{missing}");
 }

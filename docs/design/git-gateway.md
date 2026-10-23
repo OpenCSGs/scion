@@ -2,7 +2,7 @@
 
 English | [简体中文](git-gateway.zh-CN.md)
 
-Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is next. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
+Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
 
 Scion's own client is `scn`, but many tools speak only git: CI systems, IDEs, package managers, `git submodule`, starhub's users. The gateway lets the git CLI clone, fetch and push a Scion repository at the URL `scn` already uses:
 
@@ -21,7 +21,7 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **Not in scope (or later, see §9):**
 - SSH (starhub already runs gitlab-shell; the gateway serves it in G4);
-- shallow and partial clones (G3);
+- partial clones (G3);
 - submodules (gitlinks) in Scion trees: pushes that add them are refused;
 - `git push --atomic`, since Scion updates one ref at a time;
 - server-side rebases of git pushes. A push that is not a fast-forward is refused, as git users expect, and `git pull --rebase` resolves it on the client.
@@ -67,7 +67,7 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 
 **Advertising refs.**
 - **v2** (git 2.26 and newer by default): `ls-refs` with `ref-prefix`, `symrefs` and `peel`; the `fetch` command.
-- **v0/v1:** the ref list with the capabilities `multi_ack_detailed`, `side-band-64k`, `ofs-delta`, `no-done`, `symref`, `agent`.
+- **v0/v1:** the ref list with the capabilities `multi_ack_detailed`, `side-band-64k`, `ofs-delta`, `no-done`, `shallow`, `deepen-since`, `symref`, `agent`; v2 offers `fetch=shallow`.
 - Each ref's SHA comes from `GetGitShas`; a commit not derived yet is derived first.
 
 **Negotiation.**
@@ -79,6 +79,12 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 - **Trees and blobs:** walked from each new commit's root tree, skipping every tree and blob already sent and every one reachable from the common haves.
   - Scion trees are content-addressed, as git's are, so an unchanged subtree has the same id in both commits and is skipped as a whole.
   - For each common commit, its root tree's subtrees are added to the skip set lazily: only the paths that new commits change are compared.
+
+**Shallow fetches** (`--depth`, `--shallow-since`, `--unshallow`).
+- The boundary is found by walking from the wants level by level: with `deepen N`, commits at depth N keep no parents; with `deepen-since T`, a commit keeps its parents only if they were all committed at T or later.
+- Boundary commits with parents go to the client as `shallow` lines (v2: a `shallow-info` section before the pack; v0: before the acknowledgments, in every response).
+- The client's own shallow commits have no parents on its side whatever its haves say, so the walk stops at them. When the new depth reaches past one, it is an `unshallow` line and its parents are wanted.
+- `deepen-relative` (`git fetch --deepen`) and `deepen-not` (`--shallow-exclude`) are refused with a message.
 
 **The pack.**
 - Format: pack version 2, written as a stream with no temporary file; its trailer is the SHA-1 of the pack.

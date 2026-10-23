@@ -58,7 +58,8 @@ pub async fn advertised(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str,
 
 /// The v0 advertisement after the service line: refs with capabilities on the first line.
 pub fn advertise_v0(adv: &Advertised, agent: &str) -> BytesMut {
-    let mut caps = String::from("multi_ack_detailed no-done side-band-64k ofs-delta object-format=sha1");
+    let mut caps =
+        String::from("multi_ack_detailed no-done side-band-64k ofs-delta shallow deepen-since object-format=sha1");
     if let Some((target, _)) = &adv.head {
         caps.push_str(&format!(" symref=HEAD:{target}"));
     }
@@ -94,7 +95,7 @@ pub fn advertise_v2(agent: &str) -> BytesMut {
         "version 2",
         &format!("agent={agent}"),
         "ls-refs",
-        "fetch",
+        "fetch=shallow",
         "object-format=sha1",
     ] {
         pkt::put_line(&mut out, line);
@@ -177,6 +178,21 @@ pub struct FetchRequest {
     /// v0: `multi_ack_detailed` and `no-done`.
     pub multi_ack: bool,
     pub no_done: bool,
+    /// The client's shallow commits: it has them, but not their parents.
+    pub shallow: Vec<[u8; 20]>,
+    pub deepen: Option<Deepen>,
+    /// v0: the request ended with its wants, before any haves. A shallow client asks this
+    /// first, and expects only the shallow update back.
+    pub wants_only: bool,
+}
+
+/// How deep a shallow fetch goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deepen {
+    /// `--depth N`: the wants and N - 1 generations of parents.
+    Depth(u32),
+    /// `--shallow-since`: the commits committed at or after this time (seconds).
+    Since(i64),
 }
 
 fn oid(s: &[u8]) -> Result<[u8; 20]> {
@@ -186,15 +202,39 @@ fn oid(s: &[u8]) -> Result<[u8; 20]> {
     Ok(out)
 }
 
-/// Refuses what this gateway does not do yet: shallow and partial clones.
+/// Refuses what this gateway does not do yet: partial clones, and deepening by excluded refs
+/// or relative to the current boundary.
 fn unsupported(line: &[u8]) -> Option<&'static str> {
-    if line.starts_with(b"deepen") || line.starts_with(b"shallow ") {
-        Some("shallow clones are not supported yet; clone without --depth")
-    } else if line.starts_with(b"filter ") {
+    if line.starts_with(b"filter ") {
         Some("partial clones are not supported yet; clone without --filter")
+    } else if line.starts_with(b"deepen-not ") {
+        Some("--shallow-exclude is not supported; use --depth or --shallow-since")
+    } else if line == b"deepen-relative" {
+        Some("git fetch --deepen is not supported; use --depth or --unshallow")
     } else {
         None
     }
+}
+
+/// `shallow`, `deepen` and `deepen-since` lines, in either protocol version.
+fn shallow_arg(req: &mut FetchRequest, line: &[u8]) -> Result<bool> {
+    let number = |v: &[u8]| -> Result<i64> {
+        std::str::from_utf8(v)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .ok_or_else(|| Error::Protocol(format!("bad deepen {:?}", String::from_utf8_lossy(v))))
+    };
+    if let Some(s) = line.strip_prefix(b"shallow ") {
+        req.shallow.push(oid(s)?);
+    } else if let Some(n) = line.strip_prefix(b"deepen-since ") {
+        req.deepen = Some(Deepen::Since(number(n)?));
+    } else if let Some(n) = line.strip_prefix(b"deepen ") {
+        let n = u32::try_from(number(n)?.max(1)).unwrap_or(u32::MAX);
+        req.deepen = Some(Deepen::Depth(n));
+    } else {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// The arguments of a v2 `fetch`.
@@ -206,6 +246,9 @@ pub fn parse_fetch_v2(args: &[&[u8]]) -> Result<FetchRequest> {
     for a in args {
         if let Some(m) = unsupported(a) {
             return Err(Error::Unsupported(m.into()));
+        }
+        if shallow_arg(&mut req, a)? {
+            continue;
         }
         if let Some(w) = a.strip_prefix(b"want ") {
             req.wants.push(oid(w)?);
@@ -222,13 +265,26 @@ pub fn parse_fetch_v2(args: &[&[u8]]) -> Result<FetchRequest> {
 
 /// A v0 request: wants (the first with capabilities), a flush, haves, and `done` or a flush.
 pub fn parse_fetch_v0(body: &[u8]) -> Result<FetchRequest> {
-    let mut req = FetchRequest::default();
+    let mut req = FetchRequest {
+        wants_only: true,
+        ..Default::default()
+    };
     let mut r = Reader::new(body);
     let mut first = true;
+    let mut flushes = 0;
     while let Some(p) = r.read()? {
-        let Pkt::Data(l) = p else { continue };
+        if flushes > 0 {
+            req.wants_only = false;
+        }
+        let Pkt::Data(l) = p else {
+            flushes += 1;
+            continue;
+        };
         if let Some(m) = unsupported(l) {
             return Err(Error::Unsupported(m.into()));
+        }
+        if shallow_arg(&mut req, l)? {
+            continue;
         }
         if let Some(w) = l.strip_prefix(b"want ") {
             req.wants.push(oid(w)?);
@@ -307,14 +363,16 @@ impl Plan {
 const WANTED: u8 = 1;
 const HAVE: u8 = 2;
 
-/// The commits reachable from `wants` and not from `haves`, newest first. A walk in generation
-/// order: a commit is popped only after every commit of a higher generation, so by then any
-/// path from a have has marked it.
+/// The commits reachable from `wants` and not from `haves`, newest first, taking the commits in
+/// `cut` as having no parents (the shallow boundary). A walk in generation order: a commit is
+/// popped only after every commit of a higher generation, so by then any path from a have has
+/// marked it.
 async fn commits(
     meta: &dyn MetaStore,
     repo: &str,
     wants: &[ObjectId],
     haves: &[ObjectId],
+    cut: &HashSet<ObjectId>,
 ) -> Result<Vec<ChangesetRecord>> {
     let mut flags: HashMap<ObjectId, u8> = HashMap::new();
     let mut records: HashMap<ObjectId, ChangesetRecord> = HashMap::new();
@@ -341,7 +399,8 @@ async fn commits(
             wanted -= 1;
         }
         let rec = records.remove(&id).expect("queued commits have records");
-        for p in &rec.parents {
+        let parents: &[ObjectId] = if cut.contains(&id) { &[] } else { &rec.parents };
+        for p in parents {
             let old = flags.get(p).copied();
             let new = old.unwrap_or(0) | if f & HAVE != 0 { HAVE } else { WANTED };
             if old == Some(new) {
@@ -392,14 +451,17 @@ pub async fn plan(
     repo: &str,
     wants: &[ObjectId],
     haves: &[ObjectId],
+    cut: &HashSet<ObjectId>,
 ) -> Result<Plan> {
-    let commits = commits(meta, repo, wants, haves).await?;
+    let commits = commits(meta, repo, wants, haves, cut).await?;
     let mut roots: HashMap<ObjectId, ObjectId> = HashMap::new();
     let mut plan = Plan::default();
     let mut seen: HashSet<ObjectId> = HashSet::new();
     for c in &commits {
-        let mut parent_trees = Vec::with_capacity(c.parents.len());
-        for p in &c.parents {
+        // A shallow commit's parents are not on the client: its whole tree goes
+        let parents: &[ObjectId] = if cut.contains(&c.id) { &[] } else { &c.parents };
+        let mut parent_trees = Vec::with_capacity(parents.len());
+        for p in parents {
             let root = match roots.get(p) {
                 Some(r) => *r,
                 None => record(meta, repo, *p).await?.root_tree,
@@ -444,6 +506,92 @@ pub async fn plan(
     }
     plan.commits = commits;
     Ok(plan)
+}
+
+/// The shallow boundary of a fetch: the commits whose parents are not sent, and the
+/// `shallow` and `unshallow` lines that tell the client.
+#[derive(Debug, Default)]
+pub struct Shallow {
+    /// Commits whose parents the walk does not follow: the new boundary, and every shallow
+    /// commit of the client (it has no parents of them, whatever the haves say).
+    pub cut: HashSet<ObjectId>,
+    /// The parents of client commits that stop being shallow: wanted too.
+    pub more_wants: Vec<ObjectId>,
+    pub shallow: Vec<[u8; 20]>,
+    pub unshallow: Vec<[u8; 20]>,
+}
+
+/// Computes the boundary. A client's shallow commit that `deepen` reaches past is an
+/// `unshallow` line, and its parents are wanted; a new boundary commit with parents is a
+/// `shallow` line.
+pub async fn shallow(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    repo: &str,
+    wants: &[ObjectId],
+    client: &[([u8; 20], ObjectId)],
+    deepen: Option<Deepen>,
+) -> Result<Shallow> {
+    let client_ids: HashSet<ObjectId> = client.iter().map(|(_, id)| *id).collect();
+    let Some(deepen) = deepen else {
+        return Ok(Shallow {
+            cut: client_ids,
+            ..Default::default()
+        });
+    };
+    // A walk from the wants, level by level: `inside` are the commits whose parents are sent
+    let mut inside: HashSet<ObjectId> = HashSet::new();
+    let mut boundary: Vec<ObjectId> = Vec::new();
+    let mut seen: HashSet<ObjectId> = wants.iter().copied().collect();
+    let mut level: Vec<ObjectId> = wants.to_vec();
+    let mut depth = 1u32;
+    while !level.is_empty() {
+        let mut next = Vec::new();
+        for id in level {
+            let rec = record(meta, repo, id).await?;
+            let keep = match deepen {
+                Deepen::Depth(n) => depth < n,
+                Deepen::Since(t) => {
+                    let mut all = true;
+                    for p in &rec.parents {
+                        let cs = scion_query::load_changeset(blobs, *p).await?;
+                        all &= cs.committer.time_ms.div_euclid(1000) >= t;
+                    }
+                    all
+                }
+            };
+            if !keep {
+                if !rec.parents.is_empty() {
+                    boundary.push(id);
+                }
+                continue;
+            }
+            inside.insert(id);
+            for p in &rec.parents {
+                if seen.insert(*p) {
+                    next.push(*p);
+                }
+            }
+        }
+        level = next;
+        depth = depth.saturating_add(1);
+    }
+    let mut objects = Objects::new(meta, blobs, repo);
+    let mut out = Shallow::default();
+    for id in boundary {
+        out.cut.insert(id);
+        if !client_ids.contains(&id) {
+            out.shallow.push(objects.commit_sha(id).await?);
+        }
+    }
+    for (sha, id) in client {
+        out.cut.insert(*id);
+        if inside.contains(id) {
+            out.unshallow.push(*sha);
+            out.more_wants.extend(record(meta, repo, *id).await?.parents);
+        }
+    }
+    Ok(out)
 }
 
 /// Refuses a pack with redacted files: their git SHAs cover content nobody may read any more.
@@ -686,8 +834,35 @@ mod tests {
     }
 
     #[test]
-    fn refuses_shallow_partial_and_bad_ids() {
-        for line in ["deepen 1", "shallow abc", "filter blob:none"] {
+    fn parses_shallow_requests() {
+        let shallow = format!("shallow {}", "ab".repeat(20));
+        let f = parse_fetch_v2(&[shallow.as_bytes(), b"deepen 3"]).expect("parse");
+        assert_eq!(
+            (f.shallow.clone(), f.deepen),
+            (vec![[0xab; 20]], Some(Deepen::Depth(3)))
+        );
+        let f = parse_fetch_v2(&[b"deepen-since 1700000000"]).expect("parse");
+        assert_eq!(f.deepen, Some(Deepen::Since(1_700_000_000)));
+        // --unshallow asks for the largest depth; 0 means 1
+        let f = parse_fetch_v2(&[b"deepen 2147483647"]).expect("parse");
+        assert_eq!(f.deepen, Some(Deepen::Depth(2_147_483_647)));
+        assert_eq!(
+            parse_fetch_v2(&[b"deepen 0"]).expect("parse").deepen,
+            Some(Deepen::Depth(1))
+        );
+        let mut b = BytesMut::new();
+        pkt::put_line(&mut b, &format!("want {} shallow", "cd".repeat(20)));
+        pkt::put_line(&mut b, &shallow);
+        pkt::put_line(&mut b, "deepen 1");
+        let f = parse_fetch_v0(&b).expect("parse");
+        assert_eq!((f.shallow.len(), f.deepen), (1, Some(Deepen::Depth(1))));
+        assert!(parse_fetch_v2(&[b"deepen soon"]).is_err());
+        assert!(parse_fetch_v2(&[b"shallow abc"]).is_err());
+    }
+
+    #[test]
+    fn refuses_partial_clones_and_bad_ids() {
+        for line in ["deepen-not main", "deepen-relative", "filter blob:none"] {
             let e = parse_fetch_v2(&[line.as_bytes()]).expect_err(line);
             assert!(matches!(e, Error::Unsupported(_)), "{line}");
             let mut b = BytesMut::new();

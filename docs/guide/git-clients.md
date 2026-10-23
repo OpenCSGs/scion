@@ -25,7 +25,7 @@ git ls-remote origin            # HEAD, refs/heads/*, refs/tags/*
 
 - Branches appear as `refs/heads/<name>`, tags (`tags/<name>` in Scion) as `refs/tags/<name>`, and `HEAD` points at the repository's default branch.
 - git 2.x clients work, with protocol v2 (git's default since 2.26) and the older v0.
-- A clone receives every commit of the branches it fetches, not just the snapshot `scn clone` downloads.
+- A clone receives every commit of the branches it fetches, not just the snapshot `scn clone` downloads. For CI, `git clone --depth 1` fetches the newest commit only; `--shallow-since=DATE` works too, and `git fetch --depth N` or `--unshallow` deepens a shallow clone later.
 
 ## Push
 
@@ -70,7 +70,8 @@ Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` repo
 | Annotated tags | `git push` reports `annotated tags are not supported; push a lightweight tag` |
 | Submodules, and modes other than files, executables and symbolic links | The push is refused with the path |
 | Refs outside `refs/heads/*` and `refs/tags/*` (`refs/notes/*` and so on) | The push is refused for that ref |
-| Shallow clones (`--depth`) and partial clones (`--filter`) | git refuses them, since the server does not offer them |
+| Partial clones (`--filter`) | git refuses them, since the server does not offer them |
+| `git fetch --deepen` and `--shallow-exclude` | Refused with a message; `--depth`, `--shallow-since` and `--unshallow` work |
 | Commits with submodules, or signed commits imported before 0.1.11 | The fetch fails with `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | History containing a [redacted](redaction.md) file | The fetch fails: the file's SHA covers content nobody may read any more |
 | SSH URLs | Use HTTP(S) |

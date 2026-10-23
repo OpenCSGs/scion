@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：G1（拉取）和 G2（推送）已实现，下一步是 G3（效率）。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
+状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -21,7 +21,7 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **不做（或放到后面，见 §9）：**
 - SSH（starhub 已经有 gitlab-shell，G4 阶段由网关对接）；
-- 浅克隆和部分克隆（G3）；
+- 部分克隆（G3）；
 - Scion 目录树中的子模块（gitlink）：添加子模块的推送会被拒绝；
 - `git push --atomic`：Scion 一次只更新一个 ref；
 - 对 git 推送做服务端 rebase。不是快进的推送会被拒绝，这符合 git 用户的预期，在客户端用 `git pull --rebase` 解决。
@@ -67,7 +67,7 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **公布 ref。**
 - **v2**（git 2.26 起默认使用）：支持 `ls-refs`（含 `ref-prefix`、`symrefs`、`peel`）和 `fetch` 命令。
-- **v0/v1**：ref 列表，能力为 `multi_ack_detailed`、`side-band-64k`、`ofs-delta`、`no-done`、`symref`、`agent`。
+- **v0/v1**：ref 列表，能力为 `multi_ack_detailed`、`side-band-64k`、`ofs-delta`、`no-done`、`shallow`、`deepen-since`、`symref`、`agent`；v2 提供 `fetch=shallow`。
 - 每个 ref 的 SHA 来自 `GetGitShas`；还没算过的提交先计算。
 
 **协商。**
@@ -79,6 +79,12 @@ git clone http://scion.example.com:7080/agentlab/app
 - **tree 和 blob**：从每个新提交的根目录树开始遍历，跳过已经发送过的，以及从共同 have 可达的。
   - Scion 的目录树和 git 一样按内容寻址，没有变化的子目录在两个提交中 id 相同，会整棵跳过。
   - 共同提交的子目录按需加入跳过集合：只比较新提交改动到的路径。
+
+**浅拉取**（`--depth`、`--shallow-since`、`--unshallow`）。
+- 从 want 开始逐层遍历确定边界：`deepen N` 时，深度为 N 的提交不保留父提交；`deepen-since T` 时，只有当父提交全部在 T 或之后提交时，一个提交才保留父提交。
+- 有父提交的边界提交以 `shallow` 行发给客户端（v2：pack 之前的 `shallow-info` 段；v0：确认信息之前，每次响应都发）。
+- 无论 have 怎么说，客户端自己的浅提交在客户端那边都没有父提交，所以遍历在它们那里停止。新深度越过某个浅提交时，发送 `unshallow` 行，并把它的父提交加入 want。
+- `deepen-relative`（`git fetch --deepen`）和 `deepen-not`（`--shallow-exclude`）会被拒绝并给出提示。
 
 **pack。**
 - 格式为 pack 第 2 版，边生成边发送，不写临时文件；末尾是整个 pack 的 SHA-1。

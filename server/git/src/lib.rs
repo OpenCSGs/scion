@@ -403,7 +403,7 @@ async fn fetch(
     if req.wants.is_empty() {
         return;
     }
-    let (wants, haves) = match negotiate(meta, repo, req, v2).await {
+    let (wants, haves, cut) = match negotiate(meta, blobs, repo, req, v2).await {
         Ok((head, found)) => {
             if tx.send(head.freeze()).await.is_err() {
                 return;
@@ -420,7 +420,7 @@ async fn fetch(
         }
     };
     let out = Out::new(tx.clone(), req.side_band, !req.no_progress);
-    match send_pack(meta, blobs, repo, &wants, &haves, &out).await {
+    match send_pack(meta, blobs, repo, &wants, &haves, &cut, &out).await {
         Ok(()) => out.flush().await,
         Err(e) => {
             tracing::warn!(%repo, error = %e, "git fetch failed");
@@ -429,14 +429,30 @@ async fn fetch(
     }
 }
 
-/// Wanted and common commits, once ready to send the pack (`None` when the client should send
-/// more haves).
-type Found = Option<(Vec<ObjectId>, Vec<ObjectId>)>;
+/// Wanted and common commits and the shallow boundary, once ready to send the pack (`None`
+/// when the client should send more haves).
+type Found = Option<(Vec<ObjectId>, Vec<ObjectId>, std::collections::HashSet<ObjectId>)>;
 
 /// The acknowledgments, and what the pack is to hold. Wants this repository does not have are
 /// refused before anything else is sent.
-async fn negotiate(meta: &dyn MetaStore, repo: &str, req: &FetchRequest, v2: bool) -> Result<(BytesMut, Found)> {
-    let wants = upload::resolve_wants(meta, repo, &req.wants).await?;
+async fn negotiate(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    repo: &str,
+    req: &FetchRequest,
+    v2: bool,
+) -> Result<(BytesMut, Found)> {
+    let mut wants = upload::resolve_wants(meta, repo, &req.wants).await?;
+    let client_shallow = upload::common(meta, repo, &req.shallow).await?;
+    let shallow = upload::shallow(meta, blobs, repo, &wants, &client_shallow, req.deepen).await?;
+    wants.extend(shallow.more_wants.iter().copied());
+    let mut shallow_lines = Vec::new();
+    for s in &shallow.shallow {
+        shallow_lines.push(format!("shallow {}", hex::encode(s)));
+    }
+    for s in &shallow.unshallow {
+        shallow_lines.push(format!("unshallow {}", hex::encode(s)));
+    }
     let common = upload::common(meta, repo, &req.haves).await?;
     let ready = req.done || upload::ready(req, common.len());
     let ids = common.iter().map(|(_, id)| *id).collect();
@@ -457,8 +473,25 @@ async fn negotiate(meta: &dyn MetaStore, repo: &str, req: &FetchRequest, v2: boo
             pkt::put_line(&mut head, "ready");
             head.extend_from_slice(pkt::DELIM);
         }
+        if req.deepen.is_some() {
+            pkt::put_line(&mut head, "shallow-info");
+            for l in &shallow_lines {
+                pkt::put_line(&mut head, l);
+            }
+            head.extend_from_slice(pkt::DELIM);
+        }
         pkt::put_line(&mut head, "packfile");
-        return Ok((head, Some((wants, ids))));
+        return Ok((head, Some((wants, ids, shallow.cut))));
+    }
+    // v0: the shallow update comes first, in every response of a stateless exchange
+    if req.deepen.is_some() {
+        for l in &shallow_lines {
+            pkt::put_line(&mut head, l);
+        }
+        head.extend_from_slice(pkt::FLUSH);
+        if req.wants_only {
+            return Ok((head, None));
+        }
     }
     let last = common.last().map(|(s, _)| hex::encode(s));
     if req.multi_ack {
@@ -477,7 +510,7 @@ async fn negotiate(meta: &dyn MetaStore, repo: &str, req: &FetchRequest, v2: boo
         Some(l) => pkt::put_line(&mut head, &format!("ACK {l}")),
         None => pkt::put_line(&mut head, "NAK"),
     }
-    Ok((head, Some((wants, ids))))
+    Ok((head, Some((wants, ids, shallow.cut))))
 }
 
 async fn send_pack(
@@ -486,9 +519,10 @@ async fn send_pack(
     repo: &str,
     wants: &[ObjectId],
     haves: &[ObjectId],
+    cut: &std::collections::HashSet<ObjectId>,
     out: &Out,
 ) -> Result<()> {
-    let plan = upload::plan(meta, blobs, repo, wants, haves).await?;
+    let plan = upload::plan(meta, blobs, repo, wants, haves, cut).await?;
     upload::check_redactions(meta, repo, &plan.files).await?;
     upload::write_pack(meta, blobs, repo, &plan, out).await
 }
@@ -739,8 +773,8 @@ mod tests {
         let cases: [(bool, &'static [u8], &str); 5] = [
             (true, b"0011command=nope\n0000", "unknown command"),
             (true, b"zzzz", "bad length"),
-            (true, b"0011command=fetch0001000ddeepen 1\n0000", "shallow"),
-            (false, b"000ddeepen 1\n0000", "shallow"),
+            (true, b"0011command=fetch00010014deepen-relative\n0000", "--deepen"),
+            (false, b"0014deepen-relative\n0000", "--deepen"),
             (true, b"0014command=ls-refs\n0000", ""),
         ];
         for (v2, body, want) in cases {

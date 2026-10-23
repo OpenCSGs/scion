@@ -50,6 +50,10 @@ pub enum Error {
     MarkersRemain(Vec<String>),
     #[error("no merge is in progress")]
     NoMergeInProgress,
+    /// `revert` / `cherry-pick` of a commit that changed files the sparse checkout leaves out:
+    /// the commit that finishes it is made from local files.
+    #[error("the commit changes files outside the sparse checkout: {}", .0.join(", "))]
+    PickOutsideSparse(Vec<String>),
     #[error("{0}")]
     Sparse(String),
     /// 稀疏检出范围外出现了文件：提交它们可能覆盖服务端上没有检出的内容。

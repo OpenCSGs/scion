@@ -308,6 +308,122 @@ async fn land_reports_the_server_rebase() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn revert_undoes_a_landed_commit() {
+    use scion_store::MetaStore;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("app").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, std::future::pending()));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let wc = root.join("wc");
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "wc", "--json"]));
+        let run = |args: &[&str]| scn_in(&wc, &[args, &["--author", "Ada <ada@example.com>"][..]].concat());
+        let text = |out: &std::process::Output| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let land = |file: &str, content: &str, message: &str| {
+            std::fs::write(wc.join(file), content).expect("write");
+            json_of(&run(&["commit", "-m", message, "--json"]));
+            json_of(&scn_in(&wc, &["land", "--json"]));
+            head_now(&wc)
+        };
+        let read = || std::fs::read_to_string(wc.join("f.txt")).expect("read");
+        land("f.txt", "1\n2\n3\n4\n5\n", "base");
+        let first = land("f.txt", "one\n2\n3\n4\n5\n", "first line");
+        let last = land("f.txt", "one\n2\n3\n4\nfive\n", "last line");
+
+        // The first line goes back; the later change to the last line stays
+        let v = json_of(&run(&["revert", &first, "--json"]));
+        assert_eq!(
+            (v["commit"].as_str(), v["written"].as_u64()),
+            (Some(first.as_str()), Some(1))
+        );
+        assert_eq!(read(), "1\n2\n3\n4\nfive\n");
+        let log = text(&scn_in(&wc, &["log", "-n", "1"]));
+        assert!(log.contains("Revert \"first line\""), "{log}");
+        assert!(log.contains(&format!("This reverts commit {first}.")), "{log}");
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        // Already undone: nothing to commit
+        let out = run(&["revert", &first]);
+        assert!(out.status.success(), "{out:?}");
+        assert!(
+            text(&out).starts_with("nothing to commit: main already has the result of reverting"),
+            "{}",
+            text(&out)
+        );
+        // A dirty tree, or a pending commit, is refused
+        std::fs::write(wc.join("g.txt"), "g").expect("write");
+        assert_eq!(run(&["revert", &last]).status.code(), Some(1));
+        json_of(&run(&["commit", "-m", "g", "--json"]));
+        assert!(text(&run(&["revert", &last])).contains("pending commit"));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+
+        // The last line changed again since: reverting `last` conflicts
+        land("f.txt", "1\n2\n3\n4\nFIVE\n", "shout");
+        let out = run(&["revert", &last]);
+        assert_eq!(out.status.code(), Some(3), "{out:?}");
+        assert!(
+            text(&out).contains(&format!("could not revert {};", &last[..12])),
+            "{}",
+            text(&out)
+        );
+        let status = text(&scn_in(&wc, &["status"]));
+        assert!(
+            status.contains(&format!("You are currently reverting commit {}.", &last[..12])),
+            "{status}"
+        );
+        assert!(status.contains("scn revert --abort"), "{status}");
+        json_of(&scn_in(&wc, &["revert", "--abort", "--json"]));
+        assert_eq!(read(), "1\n2\n3\n4\nFIVE\n");
+        let out = scn_in(&wc, &["revert", "--abort"]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(text(&out).contains("no revert is in progress"));
+        // Again, then take the revert's side and commit with the saved message
+        assert_eq!(run(&["revert", &last]).status.code(), Some(3));
+        json_of(&scn_in(&wc, &["resolve", "--theirs", "f.txt", "--json"]));
+        json_of(&run(&["commit", "--json"]));
+        // --theirs takes the whole file as it was before `last`, as in git
+        assert_eq!(read(), "one\n2\n3\n4\n5\n");
+        let log = text(&scn_in(&wc, &["log", "-n", "1"]));
+        assert!(log.contains("Revert \"last line\""), "{log}");
+        json_of(&scn_in(&wc, &["land", "--json"]));
+
+        // A merge needs -m; -m needs a merge
+        json_of(&scn_in(&wc, &["switch", "-c", "feature", "--json"]));
+        land("h.txt", "h", "add h");
+        json_of(&scn_in(&wc, &["switch", "main", "--json"]));
+        land("f.txt", "1\n2\n3\n4\n5\n6\n", "six");
+        let six = "1\n2\n3\n4\n5\n6\n";
+        json_of(&run(&["merge", "feature", "--json"]));
+        json_of(&scn_in(&wc, &["land", "--json"]));
+        let merge = head_now(&wc);
+        let out = run(&["revert", &merge]);
+        assert_eq!(out.status.code(), Some(2));
+        assert!(text(&out).contains("is a merge commit; pass -m 1"), "{}", text(&out));
+        assert!(text(&run(&["revert", "-m", "3", &merge])).contains("has 2 parents; -m takes 1 to 2"));
+        assert!(text(&run(&["revert", "-m", "1", &first])).contains("is not a merge commit"));
+        json_of(&run(&["revert", "-m", "1", &merge, "--json"]));
+        assert!(!wc.join("h.txt").exists());
+        assert_eq!(read(), six);
+    })
+    .await
+    .expect("test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn clone_commit_land_sync_workflow() {
     use scion_store::MetaStore;
     let store = Arc::new(MemStore::new());

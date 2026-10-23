@@ -16,6 +16,7 @@ A quick reference: which git commands you can type in `scn` as they are, which w
 | `git restore [-s REV] PATH`, `git checkout REV -- PATH` | `scn restore [-s REV] PATH` | `--source` takes the files from REV as local changes |
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | |
 | `git merge B`, `git merge --abort` | `scn merge B`, `scn merge --abort` | Then `scn land` to publish |
+| `git revert REV`, `-m N`, `--abort` | the same | One commit at a time, as a pending commit; then `scn land` |
 | `git branch [-v] [-a]`, `git branch NAME [REV]`, `git branch -d NAME`, `--show-current` | the same | Branches live on the server, so `-a` lists the same ones |
 | `git tag [-l]`, `git tag NAME [REV]`, `git tag -d NAME` | the same | Lightweight tags |
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | the same | |
@@ -39,7 +40,7 @@ These work too, and print a hint naming the scn command they ran. They are not i
 | `scn checkout -- PATH`, `scn checkout PATH` | `scn restore PATH` |
 | `scn reset --soft HEAD~1` | `scn uncommit` |
 | `scn reset --hard` | `scn restore .` |
-| `scn rebase --continue`, `scn merge --continue` | `scn commit` |
+| `scn rebase --continue`, `scn merge --continue`, `scn revert --continue` | `scn commit` |
 | `scn add …` | nothing: there is no staging area, and `scn commit` takes every change |
 | `scn rm [-r] PATH…`, `scn mv FROM TO` | deletes or moves the files; the next `scn commit` takes it |
 
@@ -62,4 +63,4 @@ Commands that read history also work outside a working copy with `--repo URL`, f
 
 ## Not available yet
 
-`revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote add` and `fetch`. `scn init`, `fetch`, `stash` and `remote add` say what to use instead. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).
+`cherry-pick`, `stash`, `clean`, interactive rebase, `add -p`, `grep`, `bisect`, `reflog`, annotated tags, `remote add` and `fetch`. `scn init`, `fetch`, `stash` and `remote add` say what to use instead. Plain `git` clients cannot talk to a Scion server yet; that is the git gateway in the [roadmap](../design/roadmap.md).

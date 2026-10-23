@@ -87,6 +87,25 @@ pub struct ConflictState {
     /// Files the merge created, which `scn merge --abort` removes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<String>,
+    /// For a revert or cherry-pick: what it applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pick: Option<Pick>,
+}
+
+/// A revert or cherry-pick of one commit (see [`crate::WorkingCopy::pick`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pick {
+    pub kind: PickKind,
+    pub commit: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PickKind {
+    /// Undo the commit's changes.
+    Revert,
+    /// Apply the commit's changes again.
+    CherryPick,
 }
 
 /// The two versions of a conflicted path (None: that side has no file).

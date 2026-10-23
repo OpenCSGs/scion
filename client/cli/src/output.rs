@@ -10,6 +10,15 @@ pub const EXIT_CONFLICT: u8 = 3;
 pub const EXIT_RETRYABLE: u8 = 4;
 pub const EXIT_AUTH: u8 = 5;
 
+/// What stopped on conflicts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictOp {
+    Sync,
+    Merge,
+    /// A revert or cherry-pick of this commit.
+    Pick(scion_wc::PickKind, String),
+}
+
 /// 命令失败的原因。
 #[derive(Debug)]
 pub enum CliError {
@@ -17,9 +26,9 @@ pub enum CliError {
     Wc(scion_wc::Error),
     Import(scion_gitimport::Error),
     Usage(String),
-    /// A sync (`merge: false`) or merge stopped on conflicts; the files hold conflict markers.
+    /// A sync, merge, revert or cherry-pick stopped on conflicts; the files hold conflict markers.
     Conflicted {
-        merge: bool,
+        op: ConflictOp,
         reference: String,
         conflicts: Vec<ConflictOut>,
     },
@@ -56,9 +65,21 @@ impl std::fmt::Display for CliError {
             CliError::Wc(e) => e.fmt(f),
             CliError::Import(e) => e.fmt(f),
             CliError::Usage(m) => f.write_str(m),
-            CliError::Conflicted { merge: true, .. } => {
-                f.write_str("automatic merge failed; fix conflicts and then commit the result")
-            }
+            CliError::Conflicted {
+                op: ConflictOp::Merge, ..
+            } => f.write_str("automatic merge failed; fix conflicts and then commit the result"),
+            CliError::Conflicted {
+                op: ConflictOp::Pick(kind, commit),
+                ..
+            } => write!(
+                f,
+                "could not {} {}; fix conflicts and then commit the result",
+                match kind {
+                    scion_wc::PickKind::Revert => "revert",
+                    scion_wc::PickKind::CherryPick => "apply",
+                },
+                &commit[..commit.len().min(12)]
+            ),
             CliError::Conflicted { reference, .. } => write!(
                 f,
                 "could not rebase your commit onto {reference}; fix conflicts and then commit the result"
@@ -140,7 +161,8 @@ impl CliError {
             }
             CliError::Conflicted { .. } | CliError::Wc(scion_wc::Error::Conflict(_)) => Some(
                 "the files now hold conflict markers: fix them, then `scn resolve PATH` \
-                 (or --ours / --theirs), then `scn commit`; `scn merge --abort` undoes a merge",
+                 (or --ours / --theirs), then `scn commit`; `scn merge --abort` or `scn revert --abort` \
+                 undo a merge or revert",
             ),
             CliError::Wc(scion_wc::Error::Unresolved(_)) => {
                 Some("finish the conflicts first: `scn status` lists them, `scn resolve` marks them done")
@@ -499,8 +521,8 @@ mod tests {
 
     #[test]
     fn local_conflicts() {
-        let c = |merge| CliError::Conflicted {
-            merge,
+        let c = |op| CliError::Conflicted {
+            op,
             reference: "main".into(),
             conflicts: vec![ConflictOut {
                 path: "a".into(),
@@ -508,15 +530,18 @@ mod tests {
             }],
         };
         assert_eq!(
-            c(true).to_string(),
+            c(ConflictOp::Merge).to_string(),
             "automatic merge failed; fix conflicts and then commit the result"
         );
         assert!(
-            c(false)
+            c(ConflictOp::Sync)
                 .to_string()
                 .starts_with("could not rebase your commit onto main;")
         );
-        let e = error_out(&c(false));
+        let pick = |kind| c(ConflictOp::Pick(kind, "c1aaaaaaaaaaaaaaaa".into())).to_string();
+        assert!(pick(scion_wc::PickKind::Revert).starts_with("could not revert c1aaaaaaaaaa;"));
+        assert!(pick(scion_wc::PickKind::CherryPick).starts_with("could not apply c1aaaaaaaaaa;"));
+        let e = error_out(&c(ConflictOp::Sync));
         assert_eq!((e.exit_code, e.conflicts.len()), (EXIT_CONFLICT, 1));
         assert!(e.hint.expect("hint").contains("scn resolve"));
         for (kind, git) in [

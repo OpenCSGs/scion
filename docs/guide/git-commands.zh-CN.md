@@ -16,6 +16,7 @@
 | `git restore [-s REV] PATH`、`git checkout REV -- PATH` | `scn restore [-s REV] PATH` | `--source` 从 REV 取文件，成为本地改动 |
 | `git switch B`、`git switch -c B` | `scn switch B`、`scn switch -c B` | |
 | `git merge B`、`git merge --abort` | `scn merge B`、`scn merge --abort` | 之后用 `scn land` 发布 |
+| `git revert REV`、`-m N`、`--abort` | 相同 | 一次撤销一个提交，生成待合入的提交；之后用 `scn land` 发布 |
 | `git branch [-v] [-a]`、`git branch NAME [REV]`、`git branch -d NAME`、`--show-current` | 相同 | 分支都在服务端，所以 `-a` 列出的是同一批 |
 | `git tag [-l]`、`git tag NAME [REV]`、`git tag -d NAME` | 相同 | 轻量标签 |
 | `git log [REV] [-n N \| -N] [--oneline] [-- PATH]` | 相同 | |
@@ -39,7 +40,7 @@
 | `scn checkout -- PATH`、`scn checkout PATH` | `scn restore PATH` |
 | `scn reset --soft HEAD~1` | `scn uncommit` |
 | `scn reset --hard` | `scn restore .` |
-| `scn rebase --continue`、`scn merge --continue` | `scn commit` |
+| `scn rebase --continue`、`scn merge --continue`、`scn revert --continue` | `scn commit` |
 | `scn add …` | 什么也不做：没有暂存区，`scn commit` 会带上所有改动 |
 | `scn rm [-r] PATH…`、`scn mv FROM TO` | 删除或移动文件；下一次 `scn commit` 会带上 |
 
@@ -62,4 +63,4 @@
 
 ## 尚未支持
 
-`revert`、`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote add` 和 `fetch`。`scn init`、`fetch`、`stash`、`remote add` 会提示该改用什么。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。
+`cherry-pick`、`stash`、`clean`、交互式 rebase、`add -p`、`grep`、`bisect`、`reflog`、附注标签、`remote add` 和 `fetch`。`scn init`、`fetch`、`stash`、`remote add` 会提示该改用什么。原生 `git` 客户端目前还不能直接访问 Scion 服务端，这是[路线图](../design/roadmap.md)里的 git 网关。

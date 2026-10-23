@@ -38,8 +38,9 @@ English | [简体中文](coming-from-git.zh-CN.md)
 | `git switch B`, `git switch -c B` | `scn switch B`, `scn switch -c B` | Refuses with a pending commit or modified files; added files are carried over |
 | `git merge B` | `scn merge B` | Makes a pending merge commit; `scn land` publishes it |
 | `git merge --abort` | `scn merge --abort` | |
+| `git revert REV` | `scn revert REV` | Makes a pending commit that undoes REV (`Revert "…"`, `This reverts commit …`); later changes to the same lines are kept, overlaps conflict as in a merge. A merge commit needs `-m 1`. `scn revert --abort` gives up |
 | `git add` after fixing a conflict | `scn resolve PATH`, `--ours` / `--theirs` | Refuses leftover markers unless `--force`; no paths lists conflicts |
-| `git rebase --continue`, `git merge --continue` | `scn commit` | `-m` is optional; it keeps the original message |
+| `git rebase --continue`, `git merge --continue`, `git revert --continue` | `scn commit` | `-m` is optional; it keeps the original message |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | git's format (default 20 commits); `--path PATH` also works. As in git, it starts at the working copy's commit (HEAD); `scn log main` shows the branch on the server, including what others landed since your last `scn sync`. A commit the server rebased also shows `CommitDate:` and `Rebased-from:`, the commit as it was made; commit dates follow the order commits landed in, author dates when they were written |
 | `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status | --stat] [-- PATH]` | |
 | `git diff`, `git diff A B`, `A..B`, `A...B` | `scn diff`, `scn diff A B`, `A..B`, `A...B` | `--name-only`, `--name-status`, `--stat`, `-- PATH` |
@@ -69,7 +70,7 @@ They are not listed in `scn --help` and may be removed later, so scripts should 
 | `scn checkout -- PATH`, `scn checkout PATH` (an existing path) | `scn restore PATH` |
 | `scn reset --soft [HEAD~1]` | `scn uncommit` |
 | `scn reset --hard [HEAD]` | `scn restore .` |
-| `scn rebase --continue`, `scn merge --continue` | `scn commit` |
+| `scn rebase --continue`, `scn merge --continue`, `scn revert --continue` | `scn commit` |
 | `scn add ...` | nothing: there is no staging area |
 | `scn rm [-r] PATH...`, `scn mv FROM TO` | deletes / moves the files; the next `scn commit` picks it up |
 
@@ -91,7 +92,7 @@ Suffixes combine as in git, for example `main~2^2`. A branch whose name literall
 
 ## Not available yet
 
-- **Working copy**: checking out an old revision, `revert`, `cherry-pick`, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
+- **Working copy**: checking out an old revision, `cherry-pick`, `stash`, `clean`, interactive rebase, partial commits (`add -p`).
 - **Queries**: annotated tags, `grep`, `bisect`, `reflog`.
 - **Collaboration**: `remote add`, `fetch`. git clients cannot talk to a Scion repository yet; that is the git gateway in the [roadmap](../design/roadmap.md).
 - **Rebase conflicts**: a sync that stops on conflicts has no `--abort`. It drops the pending commit, and its changes stay as local changes on top of the new tip.

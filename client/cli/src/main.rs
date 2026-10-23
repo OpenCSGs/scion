@@ -228,6 +228,29 @@ enum Command {
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
     },
+    /// Undo a commit's changes as a new pending commit (`scn land` publishes it). Later changes
+    /// to the same lines are kept; where they overlap the files get conflict markers, as in
+    /// `scn merge`.
+    #[command(after_help = "Examples:\n  scn revert c1a2b3c4d5e6\n  scn revert main~2\n  \
+        scn revert -m 1 c1a2b3c4d5e6      # a merge: undo what it brought in\n  \
+        scn revert --abort                # give up a revert that stopped on conflicts")]
+    Revert {
+        /// The commit to undo.
+        #[arg(required_unless_present_any = ["abort", "cont"], value_name = "REV")]
+        revision: Option<String>,
+        /// For a merge commit: the parent to keep (1 is the first, the branch it was merged into).
+        #[arg(short = 'm', long, value_name = "PARENT")]
+        mainline: Option<usize>,
+        /// Abandon a revert that stopped on conflicts.
+        #[arg(long, conflicts_with_all = ["revision", "mainline", "author"])]
+        abort: bool,
+        /// git's `revert --continue`: transitional spelling of `scn commit`.
+        #[arg(long = "continue", hide = true, conflicts_with = "abort")]
+        cont: bool,
+        /// Author as "Name <email>"; defaults like `scn commit`.
+        #[arg(long, env = "SCION_AUTHOR")]
+        author: Option<String>,
+    },
     // ---- Transitional git spellings: run the scn command and print a hint (hidden from --help)
     #[command(hide = true)]
     Push {
@@ -1185,6 +1208,27 @@ async fn run(cli: Cli) -> ExitCode {
         Command::Uncommit => emit(commands::uncommit(&ctx).await, json),
         Command::Switch { reference, create } => emit(commands::switch(&ctx, &reference, create).await, json),
         Command::Merge { abort: true, .. } => emit(commands::abort_merge(&ctx).await, json),
+        Command::Revert { abort: true, .. } => emit(commands::abort_pick(&ctx, scion_wc::PickKind::Revert).await, json),
+        Command::Revert { cont: true, .. } => {
+            transitional("revert --continue", "commit");
+            emit(commands::commit(&ctx, None, None).await, json)
+        }
+        Command::Revert {
+            revision,
+            mainline,
+            author,
+            ..
+        } => emit(
+            commands::pick(
+                &ctx,
+                scion_wc::PickKind::Revert,
+                revision.as_deref().unwrap_or_default(),
+                mainline,
+                author.as_deref(),
+            )
+            .await,
+            json,
+        ),
         Command::Merge { cont: true, .. } => {
             transitional("merge --continue", "commit");
             emit(commands::commit(&ctx, None, None).await, json)
@@ -1626,6 +1670,7 @@ Branches and history:
   tag        List, create or delete tags
   switch     Move the working copy to another branch
   merge      Merge another branch into this one
+  revert     Undo a commit's changes as a new commit
   log        Show the history
   show       Show a commit and its changes
   blame      Show the commit that last changed each line

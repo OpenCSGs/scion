@@ -7,7 +7,7 @@ use scion_api::{App, ServerConfig, serve};
 use scion_client::Client;
 use scion_proto::v1::ErrorReason;
 use scion_store::{MemStore, MetaStore};
-use scion_wc::{ConflictKind, Error, MergeOutcome, Sparse, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{ConflictKind, Error, MergeOutcome, PickKind, PickOutcome, Sparse, Status, SyncOutcome, WorkingCopy};
 use tokio::net::TcpListener;
 
 struct Server {
@@ -1230,6 +1230,72 @@ async fn merge_in_a_sparse_checkout_covers_the_whole_tree() {
         other => panic!("expected a refusal, got {other:?}"),
     }
     assert!(sparse.status().expect("status").is_clean() && sparse.state().conflict.is_none());
+}
+
+#[tokio::test]
+async fn pick_reverts_and_repeats_a_commit() {
+    let srv = server().await;
+    let c = client(&srv.url).await;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (full_dir, sparse_dir) = (tmp.path().join("full"), tmp.path().join("sparse"));
+    let mut full = WorkingCopy::clone(&c, &srv.url, "mono", "main", &full_dir, Sparse::full())
+        .await
+        .expect("clone");
+    write(&full_dir, "a/x.txt", "x\n");
+    write(&full_dir, "b/y.txt", "y\n");
+    full.commit(&c, "init", None).await.expect("commit");
+    full.land(&c).await.expect("land");
+    write(&full_dir, "a/x.txt", "x2\n");
+    let edit = full
+        .commit(&c, "edit", None)
+        .await
+        .expect("commit")
+        .expect("changes")
+        .id;
+    full.land(&c).await.expect("land");
+    let parent = c.resolve_revision(&edit.to_string()).await.expect("rev").parents[0];
+    let read = || std::fs::read_to_string(full_dir.join("a/x.txt")).expect("read");
+
+    let (revert, again) = (PickKind::Revert, PickKind::CherryPick);
+    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None).await;
+    assert!(matches!(o, Ok(PickOutcome::Picked { written: 1, .. })), "{o:?}");
+    assert_eq!(read(), "x\n");
+    full.land(&c).await.expect("land revert");
+    let o = full.pick(&c, revert, edit, Some(parent), "m".into(), None).await;
+    assert!(matches!(o, Ok(PickOutcome::Empty)), "{o:?}");
+    let o = full.pick(&c, again, edit, Some(parent), "m".into(), None).await;
+    assert!(matches!(o, Ok(PickOutcome::Picked { .. })), "{o:?}");
+    assert_eq!(read(), "x2\n");
+    full.land(&c).await.expect("land pick");
+
+    // A commit that changed files a sparse checkout leaves out cannot be reverted there
+    let mut sparse = WorkingCopy::clone(
+        &c,
+        &srv.url,
+        "mono",
+        "main",
+        &sparse_dir,
+        Sparse::dirs(&["a"]).expect("dirs"),
+    )
+    .await
+    .expect("sparse clone");
+    write(&full_dir, "b/y.txt", "y2\n");
+    let outside = full.commit(&c, "b", None).await.expect("commit").expect("changes").id;
+    full.land(&c).await.expect("land b");
+    sparse.sync(&c).await.expect("sync");
+    let parent = c.resolve_revision(&outside.to_string()).await.expect("rev").parents[0];
+    match sparse
+        .pick(&c, PickKind::Revert, outside, Some(parent), "m".into(), None)
+        .await
+    {
+        Err(e @ Error::PickOutsideSparse(_)) => {
+            assert_eq!(
+                e.to_string(),
+                "the commit changes files outside the sparse checkout: b/y.txt"
+            )
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
 
 #[cfg(unix)]

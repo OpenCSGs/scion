@@ -15,13 +15,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use bytes::Bytes;
-use scion_client::{Client, CreatedChangeset, Landed};
+use scion_client::{ChangesetBuilder, Client, CreatedChangeset, DirEntry, Landed};
 use scion_object::{EntryMode, ObjectId, Tree};
 
 pub use error::{Error, Result};
 pub use merge::{ConflictKind, MergeConflict};
 pub use sparse::Sparse;
-pub use state::{ConflictState, DirState, FileRecord, Mode, Sides, State, Version};
+pub use state::{ConflictState, DirState, FileRecord, Mode, Pick, PickKind, Sides, State, Version};
 
 use crate::fsutil::Found;
 use crate::state::Paths;
@@ -245,6 +245,19 @@ pub enum MergeOutcome {
     UpToDate,
     /// A merge commit is pending (`scn land` publishes it); local files were updated.
     Merged {
+        head: ObjectId,
+        written: usize,
+        removed: usize,
+    },
+}
+
+/// Result of [`WorkingCopy::pick`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickOutcome {
+    /// The current snapshot already is what the revert or cherry-pick would make.
+    Empty,
+    /// A commit is pending (`scn land` publishes it); local files were updated.
+    Picked {
         head: ObjectId,
         written: usize,
         removed: usize,
@@ -1094,12 +1107,12 @@ impl WorkingCopy {
         Ok(remaining)
     }
 
-    /// Abandons a merge that stopped on conflicts: tracked files go back to the snapshot and
-    /// files the merge created are removed.
+    /// Abandons a merge, revert or cherry-pick that stopped on conflicts: tracked files go back
+    /// to the snapshot and files it created are removed.
     pub async fn abort_merge(&mut self, client: &Client) -> Result<()> {
         let _lock = self.paths.lock()?;
         let created = match &self.state.conflict {
-            Some(c) if c.merge.is_some() => c.created.clone(),
+            Some(c) if c.merge.is_some() || c.pick.is_some() => c.created.clone(),
             _ => return Err(Error::NoMergeInProgress),
         };
         for p in &created {
@@ -1252,6 +1265,7 @@ impl WorkingCopy {
                 author: author.map(|(n, e)| (n.to_owned(), e.to_owned())),
                 merge: Some(theirs.to_string()),
                 created,
+                pick: None,
             });
             self.paths.save_state(&self.state)?;
             return Err(Error::Conflict(paths));
@@ -1261,6 +1275,29 @@ impl WorkingCopy {
         if let Some((name, email)) = author {
             builder = builder.author(name, email);
         }
+        let (created, written, removed) = self.commit_results(client, builder, changes, &sparse).await?;
+        self.state.head = Some(created.id.to_string());
+        self.state.head_message = Some(message);
+        self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
+        self.state.head_merge = Some(theirs.to_string());
+        self.paths.save_state(&self.state)?;
+        Ok(MergeOutcome::Merged {
+            head: created.id,
+            written,
+            removed,
+        })
+    }
+
+    /// Makes the commit `builder` starts, with the merge results `changes` (no conflicts), and
+    /// writes the ones inside the sparse checkout to the working tree. Returns the commit and
+    /// the number of files written and removed.
+    async fn commit_results(
+        &self,
+        client: &Client,
+        mut builder: ChangesetBuilder<'_>,
+        changes: BTreeMap<String, Final>,
+        sparse: &Sparse,
+    ) -> Result<(CreatedChangeset, usize, usize)> {
         let taken: Vec<(String, TreeFile)> = changes
             .iter()
             .filter_map(|(p, f)| match f {
@@ -1287,7 +1324,7 @@ impl WorkingCopy {
                     builder = builder.put_with_mode(&path, v.mode.to_entry(), data);
                     Some(v)
                 }
-                Final::Conflict { .. } => unreachable!("conflicts returned above"),
+                Final::Conflict { .. } => unreachable!("callers return conflicts first"),
             };
             if sparse.includes_file(&path) {
                 local.insert(path, file);
@@ -1298,12 +1335,108 @@ impl WorkingCopy {
         let mut dirstate = self.paths.load_dirstate()?;
         let (written, removed) = self.apply(client, &mut dirstate, &local).await?;
         self.paths.save_dirstate(&mut dirstate)?;
+        Ok((created, written, removed))
+    }
+
+    /// `scn revert` / `scn cherry-pick`: makes a pending commit on the current snapshot that
+    /// undoes (`Revert`) or repeats (`CherryPick`) what `commit` changed relative to `parent`
+    /// (None for a root commit). Needs no pending commit and a clean tree, and the paths the
+    /// commit changed inside the sparse checkout. Only those paths are merged, three-way, so
+    /// later changes to them are kept (or conflict, like `merge`: the working tree then gets
+    /// the results, text conflicts with markers, for `scn resolve` and `scn commit`).
+    pub async fn pick(
+        &mut self,
+        client: &Client,
+        kind: PickKind,
+        commit: ObjectId,
+        parent: Option<ObjectId>,
+        message: String,
+        author: Option<(&str, &str)>,
+    ) -> Result<PickOutcome> {
+        let _lock = self.paths.lock()?;
+        self.check_no_conflict()?;
+        if self.state.head.is_some() {
+            return Err(Error::PendingCommit);
+        }
+        if !self.changes()?.0.is_clean() {
+            return Err(Error::Dirty);
+        }
+        let current = self
+            .state
+            .current()?
+            .ok_or_else(|| Error::EmptyBranch(self.state.reference.clone()))?;
+        let parent = parent.map(|p| p.to_string());
+        let changed = client.diff(parent.as_deref(), &commit.to_string(), None).await?;
+        let sparse = self.sparse()?;
+        let outside: Vec<String> = changed
+            .iter()
+            .filter(|c| !sparse.includes_file(&c.path))
+            .map(|c| c.path.clone())
+            .collect();
+        if !outside.is_empty() {
+            return Err(Error::PickOutsideSparse(outside));
+        }
+        let file = |e: &Option<DirEntry>| {
+            e.as_ref().and_then(|e| {
+                Some(TreeFile {
+                    mode: Mode::from_entry(e.mode)?,
+                    id: e.id,
+                })
+            })
+        };
+        let (mut before, mut after) = (BTreeMap::new(), BTreeMap::new());
+        for c in &changed {
+            if let Some(f) = file(&c.old) {
+                before.insert(c.path.clone(), f);
+            }
+            if let Some(f) = file(&c.new) {
+                after.insert(c.path.clone(), f);
+            }
+        }
+        let (base, theirs) = match kind {
+            PickKind::Revert => (&after, &before),
+            PickKind::CherryPick => (&before, &after),
+        };
+        let ours = snapshot(&self.paths.load_dirstate()?)?;
+        let paths = changed.into_iter().map(|c| c.path);
+        let changes: BTreeMap<String, Final> = three_way(client, paths, base, &ours, theirs)
+            .await?
+            .into_iter()
+            .filter(|(p, f)| *f != Final::Version(ours.get(p).copied()))
+            .collect();
+        if changes.is_empty() {
+            return Ok(PickOutcome::Empty);
+        }
+        let author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
+        let sides = sides_of(&changes);
+        if !sides.is_empty() {
+            let created = self.write_results(client, &changes, &ours).await?;
+            let paths: Vec<String> = sides.keys().cloned().collect();
+            self.state.conflict = Some(ConflictState {
+                paths: sides,
+                message: Some(message),
+                author,
+                merge: None,
+                created,
+                pick: Some(Pick {
+                    kind,
+                    commit: commit.to_string(),
+                }),
+            });
+            self.paths.save_state(&self.state)?;
+            return Err(Error::Conflict(paths));
+        }
+        let mut builder = client.changeset(Some(current)).message(message.clone());
+        if let Some((name, email)) = &author {
+            builder = builder.author(name.clone(), email.clone());
+        }
+        let (created, written, removed) = self.commit_results(client, builder, changes, &sparse).await?;
         self.state.head = Some(created.id.to_string());
         self.state.head_message = Some(message);
-        self.state.head_author = author.map(|(n, e)| (n.to_owned(), e.to_owned()));
-        self.state.head_merge = Some(theirs.to_string());
+        self.state.head_author = author;
+        self.state.head_merge = None;
         self.paths.save_state(&self.state)?;
-        Ok(MergeOutcome::Merged {
+        Ok(PickOutcome::Picked {
             head: created.id,
             written,
             removed,
@@ -1505,6 +1638,7 @@ impl WorkingCopy {
                 author: self.state.head_author.clone(),
                 merge: None,
                 created: Vec::new(),
+                pick: None,
             });
             self.clear_head();
             self.state.base = Some(onto.to_string());

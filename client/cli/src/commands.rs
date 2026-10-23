@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use scion_client::{Client, EntryMode};
-use scion_wc::{Progress, Sparse, Status, SyncOutcome, WorkingCopy};
+use scion_wc::{PickKind, Progress, Sparse, Status, SyncOutcome, WorkingCopy};
 use serde::Serialize;
 
-use crate::output::{CliError, ConflictOut, DoctorOut, Render, doctor_out};
+use crate::output::{CliError, ConflictOp, ConflictOut, DoctorOut, Render, doctor_out};
 use crate::progress::Meter;
 
 pub const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:7080";
@@ -350,6 +350,9 @@ pub struct StatusOut {
     /// Finishing a merge (true) or a sync (false) that stopped on conflicts.
     #[serde(skip)]
     pub merging: Option<bool>,
+    /// Finishing a revert or cherry-pick that stopped on conflicts.
+    #[serde(skip)]
+    pub pick: Option<scion_wc::Pick>,
     /// `scn status -s`.
     #[serde(skip)]
     pub short: bool,
@@ -474,24 +477,38 @@ impl Render for StatusOut {
             )),
             _ => {}
         }
-        match (self.merging, unmerged.is_empty()) {
-            (Some(true), false) => head.push(
-                "You have unmerged paths.\n  (fix conflicts and run \"scn commit\")\n  \
-                 (use \"scn merge --abort\" to abort the merge)"
-                    .to_owned(),
-            ),
-            (Some(true), true) => head.push(
-                "All conflicts fixed but you are still merging.\n  (use \"scn commit\" to conclude merge)".to_owned(),
-            ),
-            (Some(false), false) => head.push(format!(
-                "You are currently rebasing your commit onto {}.\n  (fix conflicts and then run \"scn commit\")",
-                self.reference
-            )),
-            (Some(false), true) => head.push(format!(
-                "You are currently rebasing your commit onto {}.\n  (all conflicts fixed: run \"scn commit\")",
-                self.reference
-            )),
-            (None, _) => {}
+        if let Some(p) = &self.pick {
+            let (doing, cmd) = pick_words(p.kind);
+            let next = if unmerged.is_empty() {
+                "all conflicts fixed: run \"scn commit\""
+            } else {
+                "fix conflicts and run \"scn commit\""
+            };
+            head.push(format!(
+                "You are currently {doing} commit {}.\n  ({next})\n  (use \"scn {cmd} --abort\" to cancel the {cmd})",
+                short(&p.commit)
+            ));
+        } else {
+            match (self.merging, unmerged.is_empty()) {
+                (Some(true), false) => head.push(
+                    "You have unmerged paths.\n  (fix conflicts and run \"scn commit\")\n  \
+                     (use \"scn merge --abort\" to abort the merge)"
+                        .to_owned(),
+                ),
+                (Some(true), true) => head.push(
+                    "All conflicts fixed but you are still merging.\n  (use \"scn commit\" to conclude merge)"
+                        .to_owned(),
+                ),
+                (Some(false), false) => head.push(format!(
+                    "You are currently rebasing your commit onto {}.\n  (fix conflicts and then run \"scn commit\")",
+                    self.reference
+                )),
+                (Some(false), true) => head.push(format!(
+                    "You are currently rebasing your commit onto {}.\n  (all conflicts fixed: run \"scn commit\")",
+                    self.reference
+                )),
+                (None, _) => {}
+            }
         }
         let mut blocks = vec![head.join("\n")];
         if !changes.is_empty() {
@@ -538,6 +555,7 @@ pub fn status_out(wc: &WorkingCopy, s: Status) -> StatusOut {
             })
             .unwrap_or_default(),
         merging: conflict.map(|c| c.merge.is_some()),
+        pick: conflict.and_then(|c| c.pick.clone()),
         short: false,
         branch: false,
         cwd: String::new(),
@@ -988,7 +1006,7 @@ pub async fn merge(ctx: &Ctx, other: &str, message: Option<&str>, author: Option
             author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())),
         )
         .await
-        .map_err(|e| conflicted(&wc, true, e))?;
+        .map_err(|e| conflicted(&wc, ConflictOp::Merge, e))?;
     Ok(match o {
         scion_wc::MergeOutcome::UpToDate => MergeOut {
             schema: "scion.cli.merge/v1",
@@ -1005,14 +1023,154 @@ pub async fn merge(ctx: &Ctx, other: &str, message: Option<&str>, author: Option
     })
 }
 
-/// A sync or merge that stopped on conflicts, with each path's kind from the saved state.
-fn conflicted(wc: &WorkingCopy, merge: bool, e: scion_wc::Error) -> CliError {
+/// What status says a revert or cherry-pick is doing, and its command.
+fn pick_words(kind: PickKind) -> (&'static str, &'static str) {
+    match kind {
+        PickKind::Revert => ("reverting", "revert"),
+        PickKind::CherryPick => ("cherry-picking", "cherry-pick"),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct PickOut {
+    pub schema: &'static str,
+    /// The commit reverted or picked.
+    pub commit: String,
+    /// The pending commit; None when the branch already has the result.
+    pub changeset: Option<String>,
+    pub written: usize,
+    pub removed: usize,
+    /// For the text: the branch, the new commit's subject, and the kind.
+    #[serde(skip)]
+    pub reference: String,
+    #[serde(skip)]
+    pub subject: String,
+    #[serde(skip)]
+    pub kind: PickKind,
+}
+
+/// Like `git revert`: `[main ID] SUBJECT`, then how many files changed.
+impl Render for PickOut {
+    fn text(&self) -> String {
+        let Some(id) = &self.changeset else {
+            let (doing, _) = pick_words(self.kind);
+            return format!(
+                "nothing to commit: {} already has the result of {doing} {}",
+                self.reference,
+                short(&self.commit)
+            );
+        };
+        let n = self.written + self.removed;
+        format!(
+            "[{} {}] {}\n {n} file{} changed",
+            self.reference,
+            short(id),
+            self.subject,
+            if n == 1 { "" } else { "s" }
+        )
+    }
+}
+
+/// The parent a revert or cherry-pick compares `commit` with: its only parent, or for a merge
+/// the one `mainline` names (1 is the first), as git's `-m`.
+fn pick_parent(
+    commit: &scion_client::LogItem,
+    mainline: Option<usize>,
+) -> Result<Option<scion_client::ObjectId>, CliError> {
+    let id = short(&commit.id.to_string()).to_owned();
+    match (commit.parents.len(), mainline) {
+        (0 | 1, None) => Ok(commit.parents.first().copied()),
+        (0 | 1, Some(_)) => Err(CliError::Usage(format!(
+            "{id} is not a merge commit; -m is only for merges"
+        ))),
+        (_, None) => Err(CliError::Usage(format!(
+            "{id} is a merge commit; pass -m 1 to keep what its first parent had (the branch it was \
+             merged into), or -m N for parent N"
+        ))),
+        (n, Some(m)) if m == 0 || m > n => Err(CliError::Usage(format!("{id} has {n} parents; -m takes 1 to {n}"))),
+        (_, Some(m)) => Ok(Some(commit.parents[m - 1])),
+    }
+}
+
+/// `scn revert` (and, later, `scn cherry-pick`): a pending commit that undoes `revision`.
+pub async fn pick(
+    ctx: &Ctx,
+    kind: PickKind,
+    revision: &str,
+    mainline: Option<usize>,
+    author: Option<&str>,
+) -> Result<PickOut, CliError> {
+    let author = resolve_author(author)?;
+    let (mut wc, client) = open_wc(ctx).await?;
+    let rev = ctx.expand_rev(revision)?;
+    let commit = client
+        .log(&rev, None, 1, None)
+        .await?
+        .entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| CliError::Usage(format!("{revision} has no history")))?;
+    let parent = pick_parent(&commit, mainline)?;
+    let subject = commit.message.lines().next().unwrap_or("").to_owned();
+    let message = match kind {
+        PickKind::Revert => format!("Revert \"{subject}\"\n\nThis reverts commit {}.", commit.id),
+        PickKind::CherryPick => commit.message.clone(),
+    };
+    let new_subject = message.lines().next().unwrap_or("").to_owned();
+    let o = wc
+        .pick(
+            &client,
+            kind,
+            commit.id,
+            parent,
+            message,
+            author.as_ref().map(|(n, e)| (n.as_str(), e.as_str())),
+        )
+        .await
+        .map_err(|e| conflicted(&wc, ConflictOp::Pick(kind, commit.id.to_string()), e))?;
+    let (changeset, written, removed) = match o {
+        scion_wc::PickOutcome::Empty => (None, 0, 0),
+        scion_wc::PickOutcome::Picked { head, written, removed } => (Some(head.to_string()), written, removed),
+    };
+    Ok(PickOut {
+        schema: "scion.cli.pick/v1",
+        commit: commit.id.to_string(),
+        changeset,
+        written,
+        removed,
+        reference: wc.state().reference.clone(),
+        subject: new_subject,
+        kind,
+    })
+}
+
+/// `scn revert --abort`: only while a revert waits on its conflicts.
+pub async fn abort_pick(ctx: &Ctx, kind: PickKind) -> Result<AbortOut, CliError> {
+    let (mut wc, client) = open_wc(ctx).await?;
+    let current = wc
+        .state()
+        .conflict
+        .as_ref()
+        .and_then(|c| c.pick.as_ref())
+        .map(|p| p.kind);
+    if current != Some(kind) {
+        return Err(CliError::Usage(format!("no {} is in progress", pick_words(kind).1)));
+    }
+    wc.abort_merge(&client).await?;
+    Ok(AbortOut {
+        schema: "scion.cli.pick-abort/v1",
+    })
+}
+
+/// A sync, merge, revert or cherry-pick that stopped on conflicts, with each path's kind from
+/// the saved state.
+fn conflicted(wc: &WorkingCopy, op: ConflictOp, e: scion_wc::Error) -> CliError {
     let scion_wc::Error::Conflict(paths) = e else {
         return e.into();
     };
     let kinds = wc.state().conflict.as_ref().map(|c| &c.paths);
     CliError::Conflicted {
-        merge,
+        op,
         reference: wc.state().reference.clone(),
         conflicts: paths
             .into_iter()
@@ -1217,7 +1375,10 @@ pub fn sync_out(wc: &WorkingCopy, old: Option<String>, o: &SyncOutcome) -> SyncO
 pub async fn sync(ctx: &Ctx) -> Result<SyncOut, CliError> {
     let (mut wc, client) = open_wc(ctx).await?;
     let old = wc.state().base.clone();
-    let o = wc.sync(&client).await.map_err(|e| conflicted(&wc, false, e))?;
+    let o = wc
+        .sync(&client)
+        .await
+        .map_err(|e| conflicted(&wc, ConflictOp::Sync, e))?;
     Ok(sync_out(&wc, old, &o))
 }
 
@@ -1653,6 +1814,7 @@ mod tests {
             behind: None,
             kinds: Default::default(),
             merging: None,
+            pick: None,
             short: false,
             branch: false,
             cwd: String::new(),
@@ -1742,6 +1904,53 @@ mod tests {
             ..c.clone()
         };
         assert!(rebasing.text().contains("(fix conflicts and then run \"scn commit\")"));
+        for (kind, line) in [
+            (PickKind::Revert, "You are currently reverting commit c1aaaaaaaaaa."),
+            (
+                PickKind::CherryPick,
+                "You are currently cherry-picking commit c1aaaaaaaaaa.",
+            ),
+        ] {
+            let picking = StatusOut {
+                merging: Some(false),
+                pick: Some(scion_wc::Pick {
+                    kind,
+                    commit: "c1aaaaaaaaaaaaaa".into(),
+                }),
+                ..c.clone()
+            };
+            let cmd = pick_words(kind).1;
+            assert!(
+                picking.text().contains(&format!(
+                    "{line}\n  (fix conflicts and run \"scn commit\")\n  (use \"scn {cmd} --abort\" to cancel the {cmd})"
+                )),
+                "{}",
+                picking.text()
+            );
+            let done = StatusOut {
+                conflicted: vec![],
+                ..picking
+            };
+            assert!(done.text().contains("(all conflicts fixed: run \"scn commit\")"));
+        }
+        let out = |changeset: Option<&str>, kind| PickOut {
+            schema: "s",
+            commit: "c1cccccccccccccc".into(),
+            changeset: changeset.map(Into::into),
+            written: 1,
+            removed: 1,
+            reference: "main".into(),
+            subject: "Revert \"x\"".into(),
+            kind,
+        };
+        assert_eq!(
+            out(Some("c1dddddddddddddd"), PickKind::Revert).text(),
+            "[main c1dddddddddd] Revert \"x\"\n 2 files changed"
+        );
+        assert_eq!(
+            out(None, PickKind::CherryPick).text(),
+            "nothing to commit: main already has the result of cherry-picking c1cccccccccc"
+        );
         let s = StatusOut {
             added: vec!["a".into()],
             modified: vec!["m".into()],

@@ -1092,15 +1092,21 @@ fn pick_parent(
     }
 }
 
-/// `scn revert` (and, later, `scn cherry-pick`): a pending commit that undoes `revision`.
+/// `scn revert` / `scn cherry-pick`: a pending commit that undoes or repeats `revision`. A
+/// cherry-pick keeps the commit's author unless `author` is given, and with `record_origin`
+/// (git's `-x`) names the commit in the message.
 pub async fn pick(
     ctx: &Ctx,
     kind: PickKind,
     revision: &str,
     mainline: Option<usize>,
     author: Option<&str>,
+    record_origin: bool,
 ) -> Result<PickOut, CliError> {
-    let author = resolve_author(author)?;
+    let author = match (kind, author) {
+        (PickKind::CherryPick, None) => None,
+        (_, a) => resolve_author(a)?,
+    };
     let (mut wc, client) = open_wc(ctx).await?;
     let rev = ctx.expand_rev(revision)?;
     let commit = client
@@ -1114,8 +1120,15 @@ pub async fn pick(
     let subject = commit.message.lines().next().unwrap_or("").to_owned();
     let message = match kind {
         PickKind::Revert => format!("Revert \"{subject}\"\n\nThis reverts commit {}.", commit.id),
+        PickKind::CherryPick if record_origin => format!(
+            "{}\n\n(cherry picked from commit {})",
+            commit.message.trim_end(),
+            commit.id
+        ),
         PickKind::CherryPick => commit.message.clone(),
     };
+    let author = author
+        .or_else(|| (kind == PickKind::CherryPick).then(|| (commit.author.name.clone(), commit.author.email.clone())));
     let new_subject = message.lines().next().unwrap_or("").to_owned();
     let o = wc
         .pick(

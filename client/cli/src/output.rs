@@ -161,8 +161,8 @@ impl CliError {
             }
             CliError::Conflicted { .. } | CliError::Wc(scion_wc::Error::Conflict(_)) => Some(
                 "the files now hold conflict markers: fix them, then `scn resolve PATH` \
-                 (or --ours / --theirs), then `scn commit`; `scn merge --abort` or `scn revert --abort` \
-                 undo a merge or revert",
+                 (or --ours / --theirs), then `scn commit`; `scn merge --abort`, `scn revert --abort` or \
+                 `scn cherry-pick --abort` give up instead",
             ),
             CliError::Wc(scion_wc::Error::Unresolved(_)) => {
                 Some("finish the conflicts first: `scn status` lists them, `scn resolve` marks them done")

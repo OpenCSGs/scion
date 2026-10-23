@@ -424,6 +424,103 @@ async fn revert_undoes_a_landed_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cherry_pick_applies_a_commit_from_another_branch() {
+    use scion_store::MetaStore;
+    let store = Arc::new(MemStore::new());
+    store.create_repo("app").await.expect("repo");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let url = format!("http://{}", listener.local_addr().expect("addr"));
+    let app = App {
+        config: Arc::new(ServerConfig::default()),
+        meta: store.clone(),
+        blobs: store,
+    };
+    tokio::spawn(serve(listener, app, std::future::pending()));
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let wc = root.join("wc");
+        json_of(&scn_in(&root, &["clone", &format!("{url}/app"), "wc", "--json"]));
+        let run = |args: &[&str]| scn_in(&wc, args);
+        let text = |out: &std::process::Output| {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let land = |file: &str, content: &str, message: &str, who: &str| {
+            std::fs::write(wc.join(file), content).expect("write");
+            json_of(&run(&["commit", "-m", message, "--author", who, "--json"]));
+            json_of(&run(&["land", "--json"]));
+            head_now(&wc)
+        };
+        let me = "Ada <ada@example.com>";
+        let read = || std::fs::read_to_string(wc.join("f.txt")).expect("read");
+        land("f.txt", "1\n2\n3\n", "base", me);
+        json_of(&run(&["branch", "release", "--json"]));
+        let fix = land(
+            "f.txt",
+            "1\n2\nthree\n",
+            "fix three\n\nBecause.",
+            "Bob <bob@example.com>",
+        );
+        land("f.txt", "one\n2\nthree\n", "main only", me);
+
+        // On the release branch: the fix arrives with its message and author, not main's other change
+        json_of(&run(&["switch", "release", "--json"]));
+        let v = json_of(&run(&["cherry-pick", &fix, "--json"]));
+        assert_eq!(v["commit"].as_str(), Some(fix.as_str()));
+        assert_eq!(read(), "1\n2\nthree\n");
+        let top = json_of(&run(&["log", "-n", "1", "--json"]))["entries"][0].clone();
+        assert_eq!(top["message"].as_str(), Some("fix three\n\nBecause."));
+        assert_eq!(
+            (top["author"].as_str(), top["email"].as_str()),
+            (Some("Bob"), Some("bob@example.com"))
+        );
+        json_of(&run(&["uncommit", "--json"]));
+        json_of(&run(&["restore", ".", "--json"]));
+        // -x names the original; --author overrides
+        json_of(&run(&["cherry-pick", "-x", &fix, "--author", me, "--json"]));
+        let top = json_of(&run(&["log", "-n", "1", "--json"]))["entries"][0].clone();
+        assert_eq!(
+            top["message"].as_str().map(str::to_owned),
+            Some(format!("fix three\n\nBecause.\n\n(cherry picked from commit {fix})"))
+        );
+        assert_eq!(top["author"].as_str(), Some("Ada"));
+        json_of(&run(&["land", "--json"]));
+        let out = run(&["cherry-pick", &fix]);
+        assert!(
+            text(&out).starts_with("nothing to commit: release already has the result of cherry-picking"),
+            "{}",
+            text(&out)
+        );
+
+        // The release branch changed the line too: a conflict, then --abort
+        land("f.txt", "1\n2\nTHREE\n", "release three", me);
+        json_of(&run(&["switch", "main", "--json"]));
+        let other = land("f.txt", "one\n2\n3!\n", "main three", me);
+        json_of(&run(&["switch", "release", "--json"]));
+        let out = run(&["cherry-pick", &other]);
+        assert_eq!(out.status.code(), Some(3), "{}", text(&out));
+        assert!(
+            text(&out).contains(&format!("could not apply {};", &other[..12])),
+            "{}",
+            text(&out)
+        );
+        let status = text(&run(&["status"]));
+        assert!(status.contains("You are currently cherry-picking commit"), "{status}");
+        assert!(text(&run(&["revert", "--abort"])).contains("no revert is in progress"));
+        json_of(&run(&["cherry-pick", "--abort", "--json"]));
+        assert_eq!(read(), "1\n2\nTHREE\n");
+        assert!(text(&run(&["cherry-pick", "--abort"])).contains("no cherry-pick is in progress"));
+    })
+    .await
+    .expect("test");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn clone_commit_land_sync_workflow() {
     use scion_store::MetaStore;
     let store = Arc::new(MemStore::new());

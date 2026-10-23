@@ -39,8 +39,9 @@
 | `git merge B` | `scn merge B` | 生成一个待合入的合并提交；`scn land` 发布它 |
 | `git merge --abort` | `scn merge --abort` | |
 | `git revert REV` | `scn revert REV` | 生成一个撤销 REV 的待合入提交（`Revert "…"`、`This reverts commit …`）；之后对同一行的改动会保留，有重叠时和合并一样产生冲突。合并提交需要 `-m 1`。`scn revert --abort` 放弃 |
+| `git cherry-pick REV` | `scn cherry-pick REV` | 把 REV 的改动应用到当前分支，生成待合入的提交，保留原提交说明和作者（`--author` 改作者，`-x` 注明原提交）；有重叠时和合并一样产生冲突。`scn cherry-pick --abort` 放弃 |
 | 解决冲突后的 `git add` | `scn resolve PATH`，`--ours` / `--theirs` | 还有冲突标记时拒绝，除非加 `--force`；不带路径时列出冲突 |
-| `git rebase --continue`、`git merge --continue`、`git revert --continue` | `scn commit` | `-m` 可以省略，沿用原来的提交说明 |
+| `git rebase --continue`、`git merge --continue`、`git revert --continue`、`git cherry-pick --continue` | `scn commit` | `-m` 可以省略，沿用原来的提交说明 |
 | `git log [REV] [-n N] [--oneline] [-- PATH]` | `scn log [REV] [-n N] [--oneline] [-- PATH]` | 与 git 格式相同（默认 20 个提交）；也可以用 `--path PATH`。和 git 一样从工作副本当前的提交（HEAD）开始；`scn log main` 看服务端的分支，包括上次 `scn sync` 之后别人合入的提交。服务端 rebase 过的提交还会显示 `CommitDate:` 和 `Rebased-from:`（提交原来的 id）；提交时间按合入顺序排列，作者时间是写下改动的时间 |
 | `git show [REV] [-- PATH]` | `scn show [REV] [--name-only | --name-status | --stat] [-- PATH]` | |
 | `git diff`、`git diff A B`、`A..B`、`A...B` | `scn diff`、`scn diff A B`、`A..B`、`A...B` | `--name-only`、`--name-status`、`--stat`、`-- PATH` |
@@ -70,7 +71,7 @@ hint: `scn push` is a transitional git-style spelling; use `scn land` instead
 | `scn checkout -- PATH`、`scn checkout PATH`（已存在的路径） | `scn restore PATH` |
 | `scn reset --soft [HEAD~1]` | `scn uncommit` |
 | `scn reset --hard [HEAD]` | `scn restore .` |
-| `scn rebase --continue`、`scn merge --continue`、`scn revert --continue` | `scn commit` |
+| `scn rebase --continue`、`scn merge --continue`、`scn revert --continue`、`scn cherry-pick --continue` | `scn commit` |
 | `scn add ...` | 什么也不做：没有暂存区 |
 | `scn rm [-r] PATH...`、`scn mv FROM TO` | 删除 / 移动文件；下一次 `scn commit` 会带上 |
 
@@ -92,7 +93,7 @@ hint: `scn push` is a transitional git-style spelling; use `scn land` instead
 
 ## 尚未支持
 
-- **工作副本**：检出旧版本、`cherry-pick`、`stash`、`clean`、交互式 rebase、部分提交（`add -p`）。
+- **工作副本**：检出旧版本、`stash`、`clean`、交互式 rebase、部分提交（`add -p`）。
 - **查询**：附注标签、`grep`、`bisect`、`reflog`。
 - **协作**：`remote add`、`fetch`。git 客户端目前还不能直接访问 Scion 仓库，这是[路线图](../design/roadmap.md)里的 git 网关。
 - **rebase 冲突**：停在冲突上的 sync 没有 `--abort`。它会撤掉待合入的提交，改动作为本地改动留在新的最新提交之上。

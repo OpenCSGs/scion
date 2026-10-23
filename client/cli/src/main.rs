@@ -251,6 +251,34 @@ enum Command {
         #[arg(long, env = "SCION_AUTHOR")]
         author: Option<String>,
     },
+    /// Apply another commit's changes here as a new pending commit (`scn land` publishes it),
+    /// keeping its message and author. Where this branch changed the same lines differently the
+    /// files get conflict markers, as in `scn merge`.
+    #[command(
+        after_help = "Examples:\n  scn cherry-pick c1a2b3c4d5e6        # e.g. a fix from main onto a release branch\n  \
+        scn cherry-pick -x feature~1        # note the original commit in the message\n  \
+        scn cherry-pick --abort             # give up a cherry-pick that stopped on conflicts"
+    )]
+    CherryPick {
+        /// The commit to apply.
+        #[arg(required_unless_present_any = ["abort", "cont"], value_name = "REV")]
+        revision: Option<String>,
+        /// For a merge commit: the parent to compare it with (1 is the first).
+        #[arg(short = 'm', long, value_name = "PARENT")]
+        mainline: Option<usize>,
+        /// Add "(cherry picked from commit ID)" to the message.
+        #[arg(short = 'x')]
+        record_origin: bool,
+        /// Abandon a cherry-pick that stopped on conflicts.
+        #[arg(long, conflicts_with_all = ["revision", "mainline", "author", "record_origin"])]
+        abort: bool,
+        /// git's `cherry-pick --continue`: transitional spelling of `scn commit`.
+        #[arg(long = "continue", hide = true, conflicts_with = "abort")]
+        cont: bool,
+        /// Author as "Name <email>" (default: the original commit's author).
+        #[arg(long, env = "SCION_AUTHOR")]
+        author: Option<String>,
+    },
     // ---- Transitional git spellings: run the scn command and print a hint (hidden from --help)
     #[command(hide = true)]
     Push {
@@ -1225,6 +1253,32 @@ async fn run(cli: Cli) -> ExitCode {
                 revision.as_deref().unwrap_or_default(),
                 mainline,
                 author.as_deref(),
+                false,
+            )
+            .await,
+            json,
+        ),
+        Command::CherryPick { abort: true, .. } => {
+            emit(commands::abort_pick(&ctx, scion_wc::PickKind::CherryPick).await, json)
+        }
+        Command::CherryPick { cont: true, .. } => {
+            transitional("cherry-pick --continue", "commit");
+            emit(commands::commit(&ctx, None, None).await, json)
+        }
+        Command::CherryPick {
+            revision,
+            mainline,
+            record_origin,
+            author,
+            ..
+        } => emit(
+            commands::pick(
+                &ctx,
+                scion_wc::PickKind::CherryPick,
+                revision.as_deref().unwrap_or_default(),
+                mainline,
+                author.as_deref(),
+                record_origin,
             )
             .await,
             json,
@@ -1671,6 +1725,7 @@ Branches and history:
   switch     Move the working copy to another branch
   merge      Merge another branch into this one
   revert     Undo a commit's changes as a new commit
+  cherry-pick Apply another commit's changes here
   log        Show the history
   show       Show a commit and its changes
   blame      Show the commit that last changed each line

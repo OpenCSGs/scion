@@ -39,9 +39,10 @@ scn tag v1.0                        # tag the current commit; `scn tag` lists, `
 scn switch -c feature               # create a branch at the current snapshot and switch to it; `scn switch main` back
 scn merge feature                   # merge a branch as a pending merge commit (three-way, line level); then `scn land`
 scn revert c1a2b3c4d5e6             # a pending commit that undoes a landed one (-m 1 for a merge); then `scn land`
-# On conflicts (scn sync, merge or revert) files get <<<<<<< / >>>>>>> markers and `scn status` lists them under Unmerged paths (`-s`: UU):
+scn cherry-pick c1a2b3c4d5e6        # apply another branch's commit here, keeping its message and author (-x notes it)
+# On conflicts (scn sync, merge, revert or cherry-pick) files get <<<<<<< / >>>>>>> markers and `scn status` lists them under Unmerged paths (`-s`: UU):
 scn resolve src/main.rs             # after editing out the markers; or --ours / --theirs to take one side
-scn commit                          # finishes it, reusing the original message; `scn merge --abort` / `scn revert --abort` give up
+scn commit                          # finishes it, reusing the original message; `scn merge --abort` (or revert / cherry-pick --abort) gives up
 scn cat main:README.md              # read files without a working copy (add --repo outside one)
 scn ls main:                        # list a directory; every command supports --json
 scn log -n 10 -- src                # history from HEAD, newest first, optionally limited to a path (git-style: HEAD~1, A..B)

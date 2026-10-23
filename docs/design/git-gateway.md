@@ -2,7 +2,7 @@
 
 English | [简体中文](git-gateway.zh-CN.md)
 
-Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is in progress: shallow clones, deltas and spooled pushes are done. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
+Status: G1 (fetch) and G2 (push) are implemented; G3 (efficiency) is done but for caching packs of busy refs; G4 (starhub) is next. This was item 2.5 of the [roadmap](roadmap.md). Using it: [git clients](../guide/git-clients.md).
 
 Scion's own client is `scn`, but many tools speak only git: CI systems, IDEs, package managers, `git submodule`, starhub's users. The gateway lets the git CLI clone, fetch and push a Scion repository at the URL `scn` already uses:
 
@@ -21,7 +21,6 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **Not in scope (or later, see §9):**
 - SSH (starhub already runs gitlab-shell; the gateway serves it in G4);
-- partial clones (G3);
 - submodules (gitlinks) in Scion trees: pushes that add them are refused;
 - `git push --atomic`, since Scion updates one ref at a time;
 - server-side rebases of git pushes. A push that is not a fast-forward is refused, as git users expect, and `git pull --rebase` resolves it on the client.
@@ -85,6 +84,11 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 - Boundary commits with parents go to the client as `shallow` lines (v2: a `shallow-info` section before the pack; v0: before the acknowledgments, in every response).
 - The client's own shallow commits have no parents on its side whatever its haves say, so the walk stops at them. When the new depth reaches past one, it is an `unshallow` line and its parents are wanted.
 - `deepen-relative` (`git fetch --deepen`) and `deepen-not` (`--shallow-exclude`) are refused with a message.
+
+**Partial clones** (`--filter=blob:none`, `--filter=blob:limit=N`).
+- The tree walk leaves out every file, or the files over N bytes; the trees all go.
+- git then asks for the files it needs by SHA (`allow-reachable-sha1-in-want` in v0). A want that is not a commit is looked up through `git-tree-id` and `git-blob-id`; for data derived before those mappings, the refs' trees are indexed once (a marker records it) and the lookup retried.
+- Other filters (`tree:N`, `sparse:oid`) are refused.
 
 **The pack.**
 - Format: pack version 2, written as a stream with no temporary file; its trailer is the SHA-1 of the pack.
@@ -170,7 +174,7 @@ They go to the client as `ERR` packets, or `ng` lines for pushes, and git prints
 |---|---|---|
 | **G1 Fetch** (done) | The router on the gRPC listener; refs; `upload-pack` v0 and v2; packs without deltas; Basic auth; commit objects as §3 | `git clone`, `git fetch` and `git pull` work against the Mac mini, and `git fsck --strict` passes on the result |
 | **G2 Push** (done) | The `git-tree-id`/`git-blob-id` lookups; `receive-pack`: parsing packs, turning git commits into Scion commits, fast-forward lands, creating and deleting refs, `git.commit` (`scn import git` records it already) | `git push` of new commits, branches and tags; signed commits keep their SHAs; non-fast-forwards are refused |
-| **G3 Efficiency** | Deltas in packs; shallow clones (`--depth`); partial clones (`--filter=blob:none`); caching the last pack of a busy ref | A clone of starhub-server moves no more than 1.5 times git's bytes |
+| **G3 Efficiency** (done but the pack cache) | Deltas in packs; shallow clones (`--depth`); partial clones (`--filter=blob:none`); caching the last pack of a busy ref | A clone of starhub-server moves no more than 1.5 times git's bytes |
 | **G4 starhub** | Gitaly's `SmartHTTPService` and `SSHService` over gRPC (with sidechannel), for gitlab-workhorse and gitlab-shell; native SSH stays out unless asked for | starhub's git routes work on a Scion repository |
 
 ## 10. Testing

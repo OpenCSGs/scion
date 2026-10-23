@@ -59,7 +59,7 @@ pub async fn advertised(meta: &dyn MetaStore, blobs: &dyn BlobStore, repo: &str,
 /// The v0 advertisement after the service line: refs with capabilities on the first line.
 pub fn advertise_v0(adv: &Advertised, agent: &str) -> BytesMut {
     let mut caps = String::from(
-        "multi_ack_detailed no-done side-band-64k thin-pack ofs-delta shallow deepen-since object-format=sha1",
+        "multi_ack_detailed no-done side-band-64k thin-pack ofs-delta shallow deepen-since filter allow-tip-sha1-in-want allow-reachable-sha1-in-want object-format=sha1",
     );
     if let Some((target, _)) = &adv.head {
         caps.push_str(&format!(" symref=HEAD:{target}"));
@@ -96,7 +96,7 @@ pub fn advertise_v2(agent: &str) -> BytesMut {
         "version 2",
         &format!("agent={agent}"),
         "ls-refs",
-        "fetch=shallow",
+        "fetch=shallow filter",
         "object-format=sha1",
     ] {
         pkt::put_line(&mut out, line);
@@ -188,6 +188,56 @@ pub struct FetchRequest {
     /// Deltas may name objects the client has (`thin-pack`), and earlier entries by offset.
     pub thin_pack: bool,
     pub ofs_delta: bool,
+    /// A partial clone's filter: files left out, fetched later by SHA.
+    pub filter: Filter,
+}
+
+/// Which files a partial clone leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Filter {
+    #[default]
+    None,
+    /// `blob:none`: every file.
+    BlobNone,
+    /// `blob:limit=N`: files of more than N bytes.
+    BlobLimit(u64),
+}
+
+impl Filter {
+    fn parse(spec: &[u8]) -> Result<Filter> {
+        let spec = String::from_utf8_lossy(spec);
+        if spec == "blob:none" {
+            return Ok(Filter::BlobNone);
+        }
+        if let Some(n) = spec.strip_prefix("blob:limit=") {
+            let (digits, unit) = match n.char_indices().last() {
+                Some((i, c)) if c.is_ascii_alphabetic() => (&n[..i], c.to_ascii_lowercase()),
+                _ => (n, ' '),
+            };
+            let mult: u64 = match unit {
+                ' ' => 1,
+                'k' => 1 << 10,
+                'm' => 1 << 20,
+                'g' => 1 << 30,
+                _ => 0,
+            };
+            if let (Ok(v), true) = (digits.parse::<u64>(), mult > 0) {
+                return Ok(Filter::BlobLimit(v.saturating_mul(mult)));
+            }
+        }
+        Err(Error::Unsupported(format!(
+            "filter {spec:?} is not supported; use blob:none or blob:limit=<n>"
+        )))
+    }
+
+    /// Whether a file of this size is sent.
+    pub fn keeps(self, size: u64) -> bool {
+        match self {
+            Filter::None => true,
+            Filter::BlobNone => false,
+            Filter::BlobLimit(n) => size <= n,
+        }
+    }
 }
 
 /// How deep a shallow fetch goes.
@@ -206,12 +256,10 @@ fn oid(s: &[u8]) -> Result<[u8; 20]> {
     Ok(out)
 }
 
-/// Refuses what this gateway does not do yet: partial clones, and deepening by excluded refs
-/// or relative to the current boundary.
+/// Refuses what this gateway does not do yet: deepening by excluded refs or relative to the
+/// current boundary.
 fn unsupported(line: &[u8]) -> Option<&'static str> {
-    if line.starts_with(b"filter ") {
-        Some("partial clones are not supported yet; clone without --filter")
-    } else if line.starts_with(b"deepen-not ") {
+    if line.starts_with(b"deepen-not ") {
         Some("--shallow-exclude is not supported; use --depth or --shallow-since")
     } else if line == b"deepen-relative" {
         Some("git fetch --deepen is not supported; use --depth or --unshallow")
@@ -228,7 +276,9 @@ fn shallow_arg(req: &mut FetchRequest, line: &[u8]) -> Result<bool> {
             .and_then(|v| v.trim().parse().ok())
             .ok_or_else(|| Error::Protocol(format!("bad deepen {:?}", String::from_utf8_lossy(v))))
     };
-    if let Some(s) = line.strip_prefix(b"shallow ") {
+    if let Some(f) = line.strip_prefix(b"filter ") {
+        req.filter = Filter::parse(f)?;
+    } else if let Some(s) = line.strip_prefix(b"shallow ") {
         req.shallow.push(oid(s)?);
     } else if let Some(n) = line.strip_prefix(b"deepen-since ") {
         req.deepen = Some(Deepen::Since(number(n)?));
@@ -342,14 +392,59 @@ pub fn ready(req: &FetchRequest, common: usize) -> bool {
 }
 
 /// The wants' Scion commits; a want this repository does not have is an error.
-pub async fn resolve_wants(meta: &dyn MetaStore, repo: &str, wants: &[[u8; 20]]) -> Result<Vec<ObjectId>> {
-    let found = common(meta, repo, wants).await?;
-    if found.len() != wants.len() {
-        let known: HashSet<[u8; 20]> = found.iter().map(|(s, _)| *s).collect();
-        let missing = wants.iter().find(|w| !known.contains(*w)).copied().unwrap_or_default();
-        return Err(Error::Protocol(format!("not our ref {}", hex::encode(missing))));
+/// What a fetch wants: commits, and (for a partial clone filling in) directories and files.
+#[derive(Debug, Default, Clone)]
+pub struct Wants {
+    pub commits: Vec<ObjectId>,
+    pub trees: Vec<ObjectId>,
+    pub files: Vec<ObjectId>,
+}
+
+async fn reverse(meta: &dyn MetaStore, repo: &str, kind: &str, sha: &[u8; 20]) -> Result<Option<ObjectId>> {
+    Ok(meta
+        .get_derived(repo, kind, scion_query::GIT_OBJECT_VERSION, sha)
+        .await?
+        .and_then(|v| ObjectId::from_bytes(&v).ok()))
+}
+
+/// The wants' Scion objects; a want this repository does not have is an error. A tree or file
+/// want (a partial clone fetching what it left out) is found through the reverse git SHA
+/// mappings, written for the refs' trees first when data derived before them misses it.
+pub async fn resolve_wants(
+    meta: &dyn MetaStore,
+    blobs: &dyn BlobStore,
+    repo: &str,
+    wants: &[[u8; 20]],
+) -> Result<Wants> {
+    let found: HashMap<[u8; 20], ObjectId> = common(meta, repo, wants).await?.into_iter().collect();
+    let mut out = Wants::default();
+    let mut indexed = false;
+    for w in wants {
+        if let Some(id) = found.get(w) {
+            out.commits.push(*id);
+            continue;
+        }
+        loop {
+            if let Some(id) = reverse(meta, repo, scion_query::GIT_TREE_ID_KIND, w).await? {
+                out.trees.push(id);
+                break;
+            }
+            if let Some(id) = reverse(meta, repo, scion_query::GIT_BLOB_ID_KIND, w).await? {
+                out.files.push(id);
+                break;
+            }
+            if indexed {
+                return Err(Error::Protocol(format!("not our ref {}", hex::encode(w))));
+            }
+            let mut objects = Objects::new(meta, blobs, repo);
+            for (_, state) in meta.list_refs(repo).await? {
+                let root = record(meta, repo, state.target).await?.root_tree;
+                objects.index_reverse(root).await?;
+            }
+            indexed = true;
+        }
     }
-    Ok(found.into_iter().map(|(_, id)| id).collect())
+    Ok(out)
 }
 
 /// What a pack holds: commits newest first, then trees, then files. Each tree and file comes
@@ -453,6 +548,53 @@ async fn load_tree(blobs: &dyn BlobStore, id: ObjectId) -> Result<Tree> {
     Tree::decode(&bytes).map_err(|e| Error::Internal(format!("tree {id}: {e}")))
 }
 
+/// Adds a tree and what it holds that the bases (the same path's trees in the parents) do not.
+async fn walk_tree(
+    blobs: &dyn BlobStore,
+    root: ObjectId,
+    root_bases: Vec<ObjectId>,
+    filter: Filter,
+    seen: &mut HashSet<ObjectId>,
+    plan: &mut Plan,
+) -> Result<()> {
+    // An explicit stack of (tree, the same path's trees in the parents)
+    let mut stack = vec![(root, root_bases)];
+    while let Some((tree, bases)) = stack.pop() {
+        if bases.contains(&tree) || !seen.insert(tree) {
+            continue;
+        }
+        plan.trees.push((tree, bases.first().copied()));
+        let t = load_tree(blobs, tree).await?;
+        let mut base_entries: Vec<HashMap<String, TreeEntry>> = Vec::with_capacity(bases.len());
+        for b in &bases {
+            let bt = load_tree(blobs, *b).await?;
+            base_entries.push(bt.entries().iter().map(|e| (e.name.clone(), e.clone())).collect());
+        }
+        for e in t.entries() {
+            let same: Vec<&TreeEntry> = base_entries.iter().filter_map(|m| m.get(&e.name)).collect();
+            if same
+                .iter()
+                .any(|b| b.id == e.id && (b.mode == EntryMode::Tree) == (e.mode == EntryMode::Tree))
+            {
+                continue;
+            }
+            if e.mode == EntryMode::Tree {
+                let sub: Vec<ObjectId> = same
+                    .iter()
+                    .filter(|b| b.mode == EntryMode::Tree)
+                    .map(|b| b.id)
+                    .collect();
+                stack.push((e.id, sub));
+            } else if filter.keeps(e.size) && seen.insert(e.id) {
+                check_blob(e.id)?;
+                let base = same.iter().find(|b| b.mode != EntryMode::Tree).map(|b| b.id);
+                plan.files.push((e.id, base));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Chooses the objects to send (design §4). A tree or file whose id equals the entry at the
 /// same path in one of the commit's parents is skipped: the parent is either sent too, and its
 /// objects with it, or the client has it.
@@ -460,14 +602,26 @@ pub async fn plan(
     meta: &dyn MetaStore,
     blobs: &dyn BlobStore,
     repo: &str,
-    wants: &[ObjectId],
+    wants: &Wants,
     haves: &[ObjectId],
     cut: &HashSet<ObjectId>,
+    filter: Filter,
 ) -> Result<Plan> {
-    let commits = commits(meta, repo, wants, haves, cut).await?;
+    let commits = commits(meta, repo, &wants.commits, haves, cut).await?;
     let mut roots: HashMap<ObjectId, ObjectId> = HashMap::new();
     let mut plan = Plan::default();
     let mut seen: HashSet<ObjectId> = HashSet::new();
+    // Trees a partial clone asks for go whole, as roots without parents
+    let roots_wanted: Vec<(ObjectId, Vec<ObjectId>)> = wants.trees.iter().map(|t| (*t, Vec::new())).collect();
+    for (tree, bases) in roots_wanted {
+        walk_tree(blobs, tree, bases, filter, &mut seen, &mut plan).await?;
+    }
+    for f in &wants.files {
+        if seen.insert(*f) {
+            check_blob(*f)?;
+            plan.files.push((*f, None));
+        }
+    }
     for c in &commits {
         // A shallow commit's parents are not on the client: its whole tree goes
         let parents: &[ObjectId] = if cut.contains(&c.id) { &[] } else { &c.parents };
@@ -480,41 +634,7 @@ pub async fn plan(
             parent_trees.push(root);
         }
         roots.insert(c.id, c.root_tree);
-        // An explicit stack of (tree, the same path's trees in the parents)
-        let mut stack = vec![(c.root_tree, parent_trees)];
-        while let Some((tree, bases)) = stack.pop() {
-            if bases.contains(&tree) || !seen.insert(tree) {
-                continue;
-            }
-            plan.trees.push((tree, bases.first().copied()));
-            let t = load_tree(blobs, tree).await?;
-            let mut base_entries: Vec<HashMap<String, TreeEntry>> = Vec::with_capacity(bases.len());
-            for b in &bases {
-                let bt = load_tree(blobs, *b).await?;
-                base_entries.push(bt.entries().iter().map(|e| (e.name.clone(), e.clone())).collect());
-            }
-            for e in t.entries() {
-                let same: Vec<&TreeEntry> = base_entries.iter().filter_map(|m| m.get(&e.name)).collect();
-                if same
-                    .iter()
-                    .any(|b| b.id == e.id && (b.mode == EntryMode::Tree) == (e.mode == EntryMode::Tree))
-                {
-                    continue;
-                }
-                if e.mode == EntryMode::Tree {
-                    let sub: Vec<ObjectId> = same
-                        .iter()
-                        .filter(|b| b.mode == EntryMode::Tree)
-                        .map(|b| b.id)
-                        .collect();
-                    stack.push((e.id, sub));
-                } else if seen.insert(e.id) {
-                    check_blob(e.id)?;
-                    let base = same.iter().find(|b| b.mode != EntryMode::Tree).map(|b| b.id);
-                    plan.files.push((e.id, base));
-                }
-            }
-        }
+        walk_tree(blobs, c.root_tree, parent_trees, filter, &mut seen, &mut plan).await?;
     }
     plan.commits = commits;
     Ok(plan)
@@ -1032,8 +1152,28 @@ mod tests {
     }
 
     #[test]
-    fn refuses_partial_clones_and_bad_ids() {
-        for line in ["deepen-not main", "deepen-relative", "filter blob:none"] {
+    fn parses_filters() {
+        for (spec, want) in [
+            ("blob:none", Filter::BlobNone),
+            ("blob:limit=100", Filter::BlobLimit(100)),
+            ("blob:limit=2k", Filter::BlobLimit(2048)),
+            ("blob:limit=1M", Filter::BlobLimit(1 << 20)),
+            ("blob:limit=1g", Filter::BlobLimit(1 << 30)),
+        ] {
+            let line = format!("filter {spec}");
+            assert_eq!(parse_fetch_v2(&[line.as_bytes()]).expect(spec).filter, want, "{spec}");
+        }
+        for bad in ["blob:limit=x", "blob:limit=1q", "sparse:oid=abc"] {
+            assert!(parse_fetch_v2(&[format!("filter {bad}").as_bytes()]).is_err(), "{bad}");
+        }
+        assert!(Filter::None.keeps(u64::MAX));
+        assert!(!Filter::BlobNone.keeps(0));
+        assert!(Filter::BlobLimit(10).keeps(10) && !Filter::BlobLimit(10).keeps(11));
+    }
+
+    #[test]
+    fn refuses_unsupported_requests_and_bad_ids() {
+        for line in ["deepen-not main", "deepen-relative", "filter tree:0"] {
             let e = parse_fetch_v2(&[line.as_bytes()]).expect_err(line);
             assert!(matches!(e, Error::Unsupported(_)), "{line}");
             let mut b = BytesMut::new();
@@ -1079,7 +1219,7 @@ mod tests {
         .expect("redact");
         let e = check_redactions(&s, "r", &[(id, None)]).await.expect_err("redacted");
         assert!(e.to_string().contains("red-1"), "{e}");
-        let e = resolve_wants(&s, "r", &[sha(7)]).await.expect_err("unknown");
+        let e = resolve_wants(&s, &s, "r", &[sha(7)]).await.expect_err("unknown");
         assert!(e.to_string().contains(&"07".repeat(20)), "{e}");
     }
 }

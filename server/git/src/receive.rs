@@ -503,7 +503,7 @@ impl<'a> Converter<'a> {
             match base_commit {
                 Some(c) if attempt == 0 && self.indexed.insert(c) => {
                     let root = self.record(c).await?.root_tree;
-                    self.index(root).await?;
+                    self.objects.index_reverse(root).await?;
                 }
                 _ => break,
             }
@@ -512,33 +512,6 @@ impl<'a> Converter<'a> {
             "object {} is neither in the pack nor in the repository",
             hex::encode(sha)
         )))
-    }
-
-    /// Writes the reverse git SHA mappings of every directory and file under `root`.
-    async fn index(&mut self, root: ObjectId) -> Result<()> {
-        let mut stack = vec![root];
-        let mut seen = HashSet::new();
-        while let Some(id) = stack.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            let sha = self.objects.tree_sha(id).await?;
-            self.meta
-                .put_derived(self.repo, GIT_TREE_ID_KIND, GIT_OBJECT_VERSION, &sha, &id.to_bytes())
-                .await?;
-            let tree = self.load(id).await?;
-            let shas = self.objects.entry_git_shas(id, &tree).await?;
-            for (e, s) in tree.entries().iter().zip(shas) {
-                if e.mode == EntryMode::Tree {
-                    stack.push(e.id);
-                } else {
-                    self.meta
-                        .put_derived(self.repo, GIT_BLOB_ID_KIND, GIT_OBJECT_VERSION, &s, &e.id.to_bytes())
-                        .await?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// The changes from the Scion directory `base` to the git tree `git`, at `prefix`.

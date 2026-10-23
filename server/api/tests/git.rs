@@ -910,3 +910,94 @@ async fn packs_send_changed_files_as_deltas() {
     let n = deltas(&root.join("v0.git")).await;
     assert!(n >= 3, "{n} deltas");
 }
+
+/// Partial clones: files left out, then fetched by SHA when git needs them.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_clones_fetch_files_later() {
+    if !have_git() {
+        eprintln!("git not installed; skipping");
+        return;
+    }
+    let store = Arc::new(MemStore::new());
+    store.create_repo("mono").await.expect("repo");
+    let (url, _stop) = start(ServerConfig::default(), store).await;
+    let c = Client::builder()
+        .endpoint(&url)
+        .repo("mono")
+        .build()
+        .await
+        .expect("connect");
+    let a = c
+        .changeset(None)
+        .put("small.txt", "small\n")
+        .put("docs/big.txt", "big ".repeat(1000))
+        .message("one\n")
+        .create()
+        .await
+        .expect("commit");
+    c.land("main", &a.id).await.expect("land");
+    let b = c
+        .changeset(Some(a.id))
+        .put("docs/big.txt", "bigger ".repeat(1000))
+        .message("two\n")
+        .create()
+        .await
+        .expect("commit");
+    c.land("main", &b.id).await.expect("land");
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path();
+    let missing = |dir: std::path::PathBuf| async move {
+        ok(&dir, &["rev-list", "--objects", "--all", "--missing=print"])
+            .await
+            .lines()
+            .filter(|l| l.starts_with('?'))
+            .count()
+    };
+    for (dir, version) in [("p2", "2"), ("p0", "0")] {
+        let v = format!("protocol.version={version}");
+        // No files at all: the checkout fetches the two it needs
+        ok(
+            root,
+            &[
+                "-c",
+                &v,
+                "clone",
+                "-q",
+                "--no-checkout",
+                "--filter=blob:none",
+                &format!("{url}/mono"),
+                dir,
+            ],
+        )
+        .await;
+        let w = root.join(dir);
+        assert_eq!(
+            missing(w.clone()).await,
+            3,
+            "the three versions of two files are missing"
+        );
+        ok(&w, &["-c", &v, "checkout", "-q", "main"]).await;
+        assert_eq!(std::fs::read_to_string(w.join("small.txt")).expect("read"), "small\n");
+        assert_eq!(missing(w.clone()).await, 1, "the old big.txt is still missing");
+        // History needs the old version: fetched on demand
+        let diff = ok(&w, &["-c", &v, "log", "-p", "--format=%s"]).await;
+        assert!(diff.contains("+bigger"), "{diff}");
+        assert_eq!(missing(w.clone()).await, 0);
+    }
+    // A size limit: the small file comes, the big ones do not
+    ok(
+        root,
+        &[
+            "clone",
+            "-q",
+            "--no-checkout",
+            "--filter=blob:limit=100",
+            &format!("{url}/mono"),
+            "lim",
+        ],
+    )
+    .await;
+    assert_eq!(missing(root.join("lim")).await, 2);
+    let e = fails(root, &["clone", "-q", "--filter=tree:0", &format!("{url}/mono"), "t0"]).await;
+    assert!(e.contains("not supported"), "{e}");
+}

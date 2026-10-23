@@ -26,6 +26,7 @@ git ls-remote origin            # HEAD、refs/heads/*、refs/tags/*
 - 分支显示为 `refs/heads/<name>`，标签（Scion 中的 `tags/<name>`）显示为 `refs/tags/<name>`，`HEAD` 指向仓库的默认分支。
 - 支持 git 2.x 客户端，协议 v2（git 2.26 起默认）和较老的 v0 都可以。
 - 克隆会拿到所拉取分支的全部提交，而不只是 `scn clone` 下载的快照。CI 可以用 `git clone --depth 1` 只取最新提交，也可以用 `--shallow-since=日期`；之后用 `git fetch --depth N` 或 `--unshallow` 加深。
+- 大仓库可以用部分克隆：先不下载文件，git 需要时（检出、`git log -p` 等）再按需拉取：`git clone --filter=blob:none URL`，或者 `--filter=blob:limit=1m` 只跳过超过 1 MiB 的文件。
 
 ## 推送
 
@@ -70,7 +71,7 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 | annotated tag | `git push` 提示 `annotated tags are not supported; push a lightweight tag` |
 | 子模块，以及文件、可执行文件、符号链接以外的模式 | 推送被拒绝，并给出路径 |
 | `refs/heads/*` 和 `refs/tags/*` 以外的 ref（如 `refs/notes/*`） | 该 ref 的推送被拒绝 |
-| 部分克隆（`--filter`） | 服务端没有提供这项能力，git 自己会拒绝 |
+| `blob:none` 和 `blob:limit` 以外的部分克隆过滤条件（`tree:0`、`sparse:…`） | 拒绝并给出提示 |
 | `git fetch --deepen` 和 `--shallow-exclude` | 拒绝并给出提示；`--depth`、`--shallow-since` 和 `--unshallow` 可用 |
 | 含子模块的提交，或 0.1.11 之前导入的签名提交 | 拉取失败，提示 `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
 | 历史中包含被 [redact](redaction.zh-CN.md) 的文件 | 拉取失败：文件的 SHA 覆盖的内容已不允许任何人读取 |

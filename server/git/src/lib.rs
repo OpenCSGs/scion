@@ -449,9 +449,10 @@ async fn fetch(
 
 /// What the pack is to hold: the wanted and common commits, and the shallow boundary.
 struct Selection {
-    wants: Vec<ObjectId>,
+    wants: upload::Wants,
     haves: Vec<ObjectId>,
     cut: std::collections::HashSet<ObjectId>,
+    filter: upload::Filter,
 }
 
 /// The selection once ready to send the pack (`None` when the client should send more haves).
@@ -466,10 +467,10 @@ async fn negotiate(
     req: &FetchRequest,
     v2: bool,
 ) -> Result<(BytesMut, Found)> {
-    let mut wants = upload::resolve_wants(meta, repo, &req.wants).await?;
+    let mut wants = upload::resolve_wants(meta, blobs, repo, &req.wants).await?;
     let client_shallow = upload::common(meta, repo, &req.shallow).await?;
-    let shallow = upload::shallow(meta, blobs, repo, &wants, &client_shallow, req.deepen).await?;
-    wants.extend(shallow.more_wants.iter().copied());
+    let shallow = upload::shallow(meta, blobs, repo, &wants.commits, &client_shallow, req.deepen).await?;
+    wants.commits.extend(shallow.more_wants.iter().copied());
     let mut shallow_lines = Vec::new();
     for s in &shallow.shallow {
         shallow_lines.push(format!("shallow {}", hex::encode(s)));
@@ -511,6 +512,7 @@ async fn negotiate(
                 wants,
                 haves: ids,
                 cut: shallow.cut,
+                filter: req.filter,
             }),
         ));
     }
@@ -547,6 +549,7 @@ async fn negotiate(
             wants,
             haves: ids,
             cut: shallow.cut,
+            filter: req.filter,
         }),
     ))
 }
@@ -559,7 +562,7 @@ async fn send_pack(
     opts: upload::PackOptions,
     out: &Out,
 ) -> Result<()> {
-    let plan = upload::plan(meta, blobs, repo, &sel.wants, &sel.haves, &sel.cut).await?;
+    let plan = upload::plan(meta, blobs, repo, &sel.wants, &sel.haves, &sel.cut, sel.filter).await?;
     upload::check_redactions(meta, repo, &plan.files).await?;
     upload::write_pack(meta, blobs, repo, &plan, out, opts).await
 }
@@ -1128,5 +1131,62 @@ mod tests {
         let root = Tree::decode(&g.blobs.get(&made.root_tree).await.expect("get").expect("root")).expect("tree");
         assert_eq!(root.entries()[0].name, "manual");
         assert_eq!(root.entries()[0].id, docs);
+    }
+
+    /// A partial clone asks for a file by SHA in a repository derived before the reverse
+    /// mappings existed: the refs' trees are indexed once, and the file is found.
+    #[tokio::test]
+    async fn finds_wanted_files_in_trees_derived_without_reverse_mappings() {
+        use scion_object::{Changeset, EntryMode, FileChange, Signature};
+        use scion_query::{GIT_BLOB_KIND, GIT_OBJECT_VERSION, GIT_TREE_KIND};
+        let (g, stub) = pushing().await;
+        let content = b"wanted\n";
+        let file = ObjectId::of_blob(content);
+        stub.writer
+            .store("r", &[(file, Bytes::from_static(content))])
+            .await
+            .expect("store");
+        let sig = Signature {
+            name: "A".into(),
+            email: "a@x".into(),
+            time_ms: 0,
+            tz_offset_minutes: 0,
+        };
+        let cs = Changeset::new(
+            vec![],
+            sig.clone(),
+            sig,
+            "m\n",
+            [4; 16],
+            vec![FileChange::put("f.txt", EntryMode::File, file, content.len() as u64)],
+            Default::default(),
+        )
+        .expect("cs");
+        let rec = stub.writer.create("r", &cs).await.expect("create");
+        g.meta
+            .cas_ref("r", "main", scion_store::RefExpect::Absent, rec.id)
+            .await
+            .expect("ref");
+        let blob_sha = scion_query::git_hash("blob", content);
+        let root_sha = scion_query::git_hash(
+            "tree",
+            &scion_query::git_tree_body(&[("f.txt".into(), EntryMode::File, blob_sha)]),
+        );
+        for (kind, key, value) in [
+            (GIT_BLOB_KIND, file.to_bytes().to_vec(), blob_sha.to_vec()),
+            (GIT_TREE_KIND, rec.root_tree.to_bytes().to_vec(), root_sha.to_vec()),
+        ] {
+            g.meta
+                .put_derived("r", kind, GIT_OBJECT_VERSION, &key, &value)
+                .await
+                .expect("put");
+        }
+        let w = upload::resolve_wants(g.meta.as_ref(), g.blobs.as_ref(), "r", &[blob_sha, root_sha])
+            .await
+            .expect("wants");
+        assert_eq!((w.files, w.trees), (vec![file], vec![rec.root_tree]));
+        // Indexed once: an unknown SHA now fails without walking again
+        let e = upload::resolve_wants(g.meta.as_ref(), g.blobs.as_ref(), "r", &[[9; 20]]).await;
+        assert!(matches!(e, Err(Error::Protocol(m)) if m.contains("not our ref")));
     }
 }

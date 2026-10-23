@@ -6,12 +6,16 @@ use std::collections::HashMap;
 
 use scion_object::{Changeset, EntryMode, ObjectId, ObjectKind, Tree};
 use scion_query::{
-    GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_TREE_KIND, derive_git_sha, git_commit_body,
-    git_commit_body_plain, git_hash, git_sha_of, git_tree_body, load_changeset, tree_git_sha,
+    GIT_BLOB_ID_KIND, GIT_BLOB_KIND, GIT_COMMIT_KIND, GIT_OBJECT_VERSION, GIT_TREE_ID_KIND, GIT_TREE_KIND,
+    derive_git_sha, git_commit_body, git_commit_body_plain, git_hash, git_sha_of, git_tree_body, load_changeset,
+    tree_git_sha,
 };
 use scion_store::{BlobStore, ChangesetRecord, MetaStore};
 
 use crate::{Error, Result};
+
+/// Directories whose reverse git SHA mappings were written by [`Objects::index_reverse`].
+pub const REVERSE_INDEXED_KIND: &str = "git-reverse-indexed";
 
 /// The extension holding a commit's git object exactly as git wrote it.
 pub const GIT_COMMIT_EXTENSION: &str = "git.commit";
@@ -123,6 +127,56 @@ impl<'a> Objects<'a> {
                     .ok_or_else(|| Error::Internal(format!("git SHAs of tree {id} missing after deriving it")))?
             }
         })
+    }
+
+    /// Writes the reverse git SHA mappings (`git-tree-id`, `git-blob-id`) of every directory and
+    /// file under `root`, for data derived before they existed. A marker records the directories
+    /// done, so a tree is walked once.
+    pub async fn index_reverse(&mut self, root: ObjectId) -> Result<()> {
+        let marked = self
+            .meta
+            .get_derived(self.repo, REVERSE_INDEXED_KIND, GIT_OBJECT_VERSION, &root.to_bytes())
+            .await?;
+        if marked.is_some() {
+            return Ok(());
+        }
+        let mut stack = vec![root];
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let sha = self.tree_sha(id).await?;
+            self.meta
+                .put_derived(self.repo, GIT_TREE_ID_KIND, GIT_OBJECT_VERSION, &sha, &id.to_bytes())
+                .await?;
+            let bytes = self
+                .blobs
+                .get(&id)
+                .await?
+                .ok_or_else(|| Error::Internal(format!("tree {id} is missing")))?;
+            let tree = Tree::decode(&bytes).map_err(|e| Error::Internal(format!("tree {id}: {e}")))?;
+            let shas = self.entry_git_shas(id, &tree).await?;
+            for (e, s) in tree.entries().iter().zip(shas) {
+                if e.mode == EntryMode::Tree {
+                    stack.push(e.id);
+                } else {
+                    self.meta
+                        .put_derived(self.repo, GIT_BLOB_ID_KIND, GIT_OBJECT_VERSION, &s, &e.id.to_bytes())
+                        .await?;
+                }
+            }
+        }
+        self.meta
+            .put_derived(
+                self.repo,
+                REVERSE_INDEXED_KIND,
+                GIT_OBJECT_VERSION,
+                &root.to_bytes(),
+                b"1",
+            )
+            .await?;
+        Ok(())
     }
 
     /// The cached git SHAs of a tree's entries, in order; `None` when any is missing.

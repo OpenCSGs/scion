@@ -2,7 +2,7 @@
 
 [English](git-gateway.md) | 简体中文
 
-状态：G1（拉取）和 G2（推送）已实现；G3（效率）进行中，浅克隆、delta 和推送落盘已完成。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
+状态：G1（拉取）和 G2（推送）已实现；G3（效率）除热门 ref 的 pack 缓存外已完成，下一步是 G4（starhub）。本文原是[路线图](roadmap.md)的 2.5 项。使用方法见 [git 客户端](../guide/git-clients.zh-CN.md)。
 
 Scion 自己的客户端是 `scn`，但很多工具只会说 git：CI 系统、IDE、包管理器、`git submodule`，以及 starhub 的用户。网关让 git 命令行直接用 `scn` 的同一个 URL 克隆、拉取和推送 Scion 仓库：
 
@@ -21,7 +21,6 @@ git clone http://scion.example.com:7080/agentlab/app
 
 **不做（或放到后面，见 §9）：**
 - SSH（starhub 已经有 gitlab-shell，G4 阶段由网关对接）；
-- 部分克隆（G3）；
 - Scion 目录树中的子模块（gitlink）：添加子模块的推送会被拒绝；
 - `git push --atomic`：Scion 一次只更新一个 ref；
 - 对 git 推送做服务端 rebase。不是快进的推送会被拒绝，这符合 git 用户的预期，在客户端用 `git pull --rebase` 解决。
@@ -85,6 +84,11 @@ git clone http://scion.example.com:7080/agentlab/app
 - 有父提交的边界提交以 `shallow` 行发给客户端（v2：pack 之前的 `shallow-info` 段；v0：确认信息之前，每次响应都发）。
 - 无论 have 怎么说，客户端自己的浅提交在客户端那边都没有父提交，所以遍历在它们那里停止。新深度越过某个浅提交时，发送 `unshallow` 行，并把它的父提交加入 want。
 - `deepen-relative`（`git fetch --deepen`）和 `deepen-not`（`--shallow-exclude`）会被拒绝并给出提示。
+
+**部分克隆**（`--filter=blob:none`、`--filter=blob:limit=N`）。
+- 遍历目录树时跳过所有文件，或超过 N 字节的文件；目录树全部发送。
+- 之后 git 按 SHA 拉取需要的文件（v0 声明 `allow-reachable-sha1-in-want`）。不是提交的 want 通过 `git-tree-id`、`git-blob-id` 查找；对于这两种映射出现之前派生的数据，会对各 ref 的目录树建一次索引（用标记记录），然后重新查找。
+- 其他过滤条件（`tree:N`、`sparse:oid`）会被拒绝。
 
 **pack。**
 - 格式为 pack 第 2 版，边生成边发送，不写临时文件；末尾是整个 pack 的 SHA-1。
@@ -170,7 +174,7 @@ git clone http://scion.example.com:7080/agentlab/app
 |---|---|---|
 | **G1 拉取**（已完成） | gRPC 端口上的路由器；ref；`upload-pack` v0 和 v2；不带 delta 的 pack；Basic 认证；按 §3 生成 commit 对象 | 在 Mac mini 上 `git clone`、`git fetch`、`git pull` 可用，结果通过 `git fsck --strict` |
 | **G2 推送**（已完成） | `git-tree-id`、`git-blob-id` 反向查找；`receive-pack`：解析 pack，git 提交转为 Scion 提交，快进合入，创建和删除 ref，`git.commit`（`scn import git` 已经记录） | 可以 `git push` 新提交、分支和标签；签名提交保留 SHA；非快进推送被拒绝 |
-| **G3 效率** | pack 中的 delta；浅克隆（`--depth`）；部分克隆（`--filter=blob:none`）；缓存热门 ref 的最近一个 pack | 克隆 starhub-server 传输的字节不超过 git 的 1.5 倍 |
+| **G3 效率**（除 pack 缓存外已完成） | pack 中的 delta；浅克隆（`--depth`）；部分克隆（`--filter=blob:none`）；缓存热门 ref 的最近一个 pack | 克隆 starhub-server 传输的字节不超过 git 的 1.5 倍 |
 | **G4 starhub** | 通过 gRPC 提供 Gitaly 的 `SmartHTTPService` 和 `SSHService`（含 sidechannel），对接 gitlab-workhorse 和 gitlab-shell；除非有需求，不做原生 SSH | starhub 的 git 路由在 Scion 仓库上可用 |
 
 ## 10. 测试

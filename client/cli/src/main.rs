@@ -213,7 +213,8 @@ enum Command {
         #[arg(required_unless_present_any = ["abort", "cont"], value_name = "BRANCH")]
         reference: Option<String>,
         /// Abandon a merge that stopped on conflicts.
-        #[arg(long, conflicts_with_all = ["message", "author"])]
+        // Not --author: SCION_AUTHOR sets it from the environment, and an abort ignores it
+        #[arg(long, conflicts_with = "message")]
         abort: bool,
         /// Accepted for git compatibility: scn always makes a merge commit.
         #[arg(long = "no-ff")]
@@ -242,7 +243,7 @@ enum Command {
         #[arg(short = 'm', long, value_name = "PARENT")]
         mainline: Option<usize>,
         /// Abandon a revert that stopped on conflicts.
-        #[arg(long, conflicts_with_all = ["revision", "mainline", "author"])]
+        #[arg(long, conflicts_with_all = ["revision", "mainline"])]
         abort: bool,
         /// git's `revert --continue`: transitional spelling of `scn commit`.
         #[arg(long = "continue", hide = true, conflicts_with = "abort")]
@@ -270,7 +271,7 @@ enum Command {
         #[arg(short = 'x')]
         record_origin: bool,
         /// Abandon a cherry-pick that stopped on conflicts.
-        #[arg(long, conflicts_with_all = ["revision", "mainline", "author", "record_origin"])]
+        #[arg(long, conflicts_with_all = ["revision", "mainline", "record_origin"])]
         abort: bool,
         /// git's `cherry-pick --continue`: transitional spelling of `scn commit`.
         #[arg(long = "continue", hide = true, conflicts_with = "abort")]
@@ -1796,6 +1797,10 @@ mod tests {
             &["scn", "mv", "-f", "a", "b"],
             &["scn", "log", "--pretty=oneline"],
             &["scn", "log", "--format", "medium"],
+            // What SCION_AUTHOR in the environment amounts to
+            &["scn", "merge", "--abort", "--author", "A <a@x>"],
+            &["scn", "revert", "--abort", "--author", "A <a@x>"],
+            &["scn", "cherry-pick", "--abort", "--author", "A <a@x>"],
         ] {
             assert!(Cli::try_parse_from(args).is_ok(), "{args:?}");
         }

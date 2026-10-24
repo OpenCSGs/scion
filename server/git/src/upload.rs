@@ -598,9 +598,10 @@ async fn walk_tree(
     Ok(())
 }
 
-/// Chooses the objects to send (design §4). A tree or file whose id equals the entry at the
-/// same path in one of the commit's parents is skipped: the parent is either sent too, and its
-/// objects with it, or the client has it.
+/// Chooses the objects to send (design §4), oldest commit first. A tree or file whose id equals
+/// the entry at the same path in one of the commit's parents is skipped: the parent was walked
+/// before it, or the client has it. Walking the newest first would break that when a change is
+/// reverted: the reverted tree, already seen, would not be walked again for the older commit.
 pub async fn plan(
     meta: &dyn MetaStore,
     blobs: &dyn BlobStore,
@@ -625,7 +626,7 @@ pub async fn plan(
             plan.files.push((*f, None));
         }
     }
-    for c in &commits {
+    for c in commits.iter().rev() {
         // A shallow commit's parents are not on the client: its whole tree goes
         let parents: &[ObjectId] = if cut.contains(&c.id) { &[] } else { &c.parents };
         let mut parent_trees = Vec::with_capacity(parents.len());
@@ -861,7 +862,7 @@ impl Recent {
 /// One tree or file entry: a delta when it pays off and the base can be named, else whole.
 struct Deltas {
     opts: PackOptions,
-    /// Everything the pack holds, which deltas may name whatever the order.
+    /// Everything the pack holds: a delta names one of them once it is written.
     planned: HashSet<ObjectId>,
     written: HashMap<ObjectId, u64>,
     recent: Recent,
@@ -880,9 +881,15 @@ impl Deltas {
         let at = w.offset();
         let entry = base
             .and_then(|(bid, bytes, sha)| {
+                let written = self.written.get(&bid).copied();
+                // The plan puts a base before what it is the base of; were one later, it might
+                // be a delta against this very object, which git could never resolve
+                if written.is_none() && self.planned.contains(&bid) {
+                    return None;
+                }
                 let d = crate::delta::delta(bytes, content)?;
-                match self.written.get(&bid) {
-                    Some(off) if self.opts.ofs => Some(w.ofs_delta(*off, &d)),
+                match written {
+                    Some(off) if self.opts.ofs => Some(w.ofs_delta(off, &d)),
                     _ => Some(w.ref_delta(&sha, &d)),
                 }
             })
@@ -892,7 +899,8 @@ impl Deltas {
         entry
     }
 
-    /// Whether a delta may name `base`: it is in the pack, or the client has it and takes a thin pack.
+    /// Whether a delta may name `base`: it is in the pack (once written, which [`Deltas::entry`]
+    /// checks), or the client has it and takes a thin pack.
     fn can_name(&self, base: ObjectId) -> bool {
         self.planned.contains(&base) || self.opts.thin
     }
@@ -941,8 +949,8 @@ pub async fn start<'a>(
     })
 }
 
-/// Writes a started pack. Trees and files go oldest first, so that a delta's base usually
-/// comes before it. Returns early, with no error, when the client goes away.
+/// Writes a started pack. Trees and files go in the plan's order, oldest first, so that a
+/// delta's base comes before it. Returns early, with no error, when the client goes away.
 pub async fn write_pack(started: Started<'_>, out: &Out, opts: PackOptions) -> Result<()> {
     let Started {
         plan,
@@ -980,7 +988,7 @@ pub async fn write_pack(started: Started<'_>, out: &Out, opts: PackOptions) -> R
         written: HashMap::new(),
         recent: Recent::new(),
     };
-    for (t, base) in plan.trees.iter().rev() {
+    for (t, base) in &plan.trees {
         let tree = load_tree(blobs, *t).await?;
         let body = Bytes::from(objects.tree(*t, &tree).await?);
         let base = match base.filter(|b| d.can_name(*b)) {
@@ -1010,7 +1018,6 @@ pub async fn write_pack(started: Started<'_>, out: &Out, opts: PackOptions) -> R
     let wanted: Vec<(ObjectId, Option<ObjectId>)> = plan
         .files
         .iter()
-        .rev()
         .map(|(id, base)| (*id, base.filter(|b| can_name(b))))
         .collect();
     let files = futures::stream::iter(wanted)
@@ -1057,6 +1064,26 @@ pub async fn write_pack(started: Started<'_>, out: &Out, opts: PackOptions) -> R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deltas_name_only_bases_already_written() {
+        let old = Bytes::from("0123456789abcdef".repeat(8));
+        let new = Bytes::from(format!("{}tail", "0123456789abcdef".repeat(8)));
+        let (a, b) = (ObjectId::of_blob(&old), ObjectId::of_blob(&new));
+        let mut d = Deltas {
+            opts: PackOptions { thin: false, ofs: true },
+            planned: [a, b].into_iter().collect(),
+            written: HashMap::new(),
+            recent: Recent::new(),
+        };
+        let (mut w, _) = PackWriter::new(2);
+        // The base comes later in the pack: whole (type 3, a blob)
+        let first = d.entry(&mut w, Kind::Blob, b, &new, Some((a, &old, [0; 20])));
+        assert_eq!(first[0] >> 4 & 7, 3);
+        // Now written: an ofs-delta (type 6)
+        let second = d.entry(&mut w, Kind::Blob, a, &old, Some((b, &new, [0; 20])));
+        assert_eq!(second[0] >> 4 & 7, 6);
+    }
 
     fn sha(b: u8) -> [u8; 20] {
         [b; 20]

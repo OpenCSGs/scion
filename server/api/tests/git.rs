@@ -838,15 +838,18 @@ async fn packs_send_changed_files_as_deltas() {
     };
     let mut parent = None;
     let mut ids = Vec::new();
-    for (i, edit) in [usize::MAX, 10, 2000].into_iter().enumerate() {
-        let cs = c
+    // The last version reverts big.txt to the second: its base, the third, came from it. And
+    // demo/ changes back and forth, around a file that never changes.
+    for (i, edit) in [usize::MAX, 10, 2000, 10].into_iter().enumerate() {
+        let mut b = c
             .changeset(parent)
             .put("big.txt", text(edit))
             .put(format!("dir{i}/small.txt"), "x\n")
-            .message(format!("v{i}\n"))
-            .create()
-            .await
-            .expect("commit");
+            .put("demo/m.txt", if i % 2 == 0 { "a\n" } else { "b\n" });
+        if i == 0 {
+            b = b.put("demo/run.sh", "run\n");
+        }
+        let cs = b.message(format!("v{i}\n")).create().await.expect("commit");
         c.land("main", &cs.id).await.expect("land");
         parent = Some(cs.id);
         ids.push(cs.id);
@@ -862,7 +865,7 @@ async fn packs_send_changed_files_as_deltas() {
         .filter(|e| e.path().extension().is_some_and(|x| x == "pack"))
         .map(|e| e.metadata().expect("meta").len())
         .sum();
-    assert!(size < 40_000, "three versions of a 70 KB file in {size} bytes");
+    assert!(size < 40_000, "four versions of a 70 KB file in {size} bytes");
     ok(&full, &["fsck", "--strict", "--no-dangling"]).await;
 
     // A fetch of one new version: a thin pack, whose delta names the client's copy
@@ -883,7 +886,7 @@ async fn packs_send_changed_files_as_deltas() {
     let cs = c
         .changeset(parent)
         .put("big.txt", text(2999))
-        .message("v3\n")
+        .message("v4\n")
         .create()
         .await
         .expect("commit");

@@ -13,15 +13,9 @@ for e in json.load(sys.stdin)["entries"]:
         break
     entries.append(e)
 print(f"{B}main{O}  {D}{len(entries)} commits landed by the agents, newest first{O}\n")
-Y = "\033[33m"
-rebased = 0
 for e in entries:
     subject = e["message"].splitlines()[0] if e["message"] else ""
-    # The server records the commit as it was made when it rebases one to land it
-    mark = f"  {Y}rebased by the server{O}" if e.get("rebased_from") else ""
-    rebased += bool(mark)
-    print(f"{G}{e['id'][:12]}{O}  {M}{e['author']:<8}{O} {subject:<9}{mark}")
-print(f"\n{D}{rebased} of {len(entries)} rebased by the server as they landed{O}")
+    print(f"{G}{e['id'][:12]}{O}  {M}{e['author']:<8}{O} {subject}")
 # Every agent's lines, merged however their lands interleaved
 notes = [line for line in changelog if line.startswith("- `tb ") and "added by agent-" in line]
 print(f"\n{B}CHANGELOG.md on main{O}  {D}{len(notes)} lines from the agents{O}\n")

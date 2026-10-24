@@ -158,7 +158,7 @@ git clone http://scion.example.com:7080/agentlab/app
 |---|---|
 | 没有权限 | HTTP 401 并带 `WWW-Authenticate: Basic`，git 会提示输入凭据；token 无权读取仓库时为 403 |
 | 不是快进 | `ng refs/heads/main non-fast-forward`（后面跟着 git 自己的提示） |
-| 无法提供的提交（§3） | `git commit 3f2a… was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn (Scion commit C1…)` |
+| 无法提供的提交（§3） | `git commit 3f2a… was imported without its raw git object, …; import the git repository again into a new Scion repository with scn 0.1.11 or later (this one keeps serving the old import), or clone it with scn (Scion commit C1…)` |
 | 推送中有 gitlink 或不支持的模式 | `path vendor/lib is a submodule; Scion repositories cannot hold submodules` |
 | 合入前检查拒绝 | 检查返回的说明 |
 

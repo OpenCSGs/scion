@@ -158,7 +158,7 @@ A fetch is planned, and its commits built, before the server answers, so that an
 |---|---|
 | no access | HTTP 401 with `WWW-Authenticate: Basic`, so git asks for credentials; 403 when the token cannot read the repository |
 | not a fast-forward | `ng refs/heads/main non-fast-forward` (git's own hint follows) |
-| a commit that cannot be served (§3) | `git commit 3f2a… was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn (Scion commit C1…)` |
+| a commit that cannot be served (§3) | `git commit 3f2a… was imported without its raw git object, …; import the git repository again into a new Scion repository with scn 0.1.11 or later (this one keeps serving the old import), or clone it with scn (Scion commit C1…)` |
 | a gitlink or an unsupported mode in a push | `path vendor/lib is a submodule; Scion repositories cannot hold submodules` |
 | a pre-land check refused | the check's message |
 

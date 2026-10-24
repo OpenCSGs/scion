@@ -77,6 +77,8 @@ Commits the branches share are not uploaded twice, and get the same Scion commit
 
 **Re-imports and shared history:** commits the server already has are skipped without reading them from git, so importing another branch that shares history with an imported one, re-importing, or importing a tag takes about a second; the summary says how many commits were new. (Importing starhub-server's second branch went from 39 s to 0.5 s.)
 
+Because of this, a re-import does not upgrade commits imported by an older scn. Before 0.1.11, signed commits and commits with unusual headers were imported without their raw git object, so [git clients](git-clients.md) cannot fetch them; to serve such a repository over git, import it again into a new Scion repository.
+
 **Tags:** import a git tag into `tags/NAME` to create a Scion tag at the same commit, for example `scn import git ~/src/my-repo --repo mono --git-ref v1.0 --ref tags/v1.0`. The tag is created in one step (tags never move); importing it again is a no-op, and a tag that already points elsewhere is reported instead of moved.
 
 ## What is imported

@@ -233,8 +233,9 @@ pub fn commit_object(
     if git_hash("commit", &body) != sha {
         return Err(Error::Unservable(format!(
             "git commit {} was imported without its raw git object, which git needs to check \
-             it (signed commits and ones with unusual headers do); re-import the repository with \
-             scn 0.1.11 or later, or clone it with scn (Scion commit {id})",
+             it (signed commits and ones with unusual headers do); import the git repository \
+             again into a new Scion repository with scn 0.1.11 or later (this one keeps serving the \
+             old import), or clone it with scn (Scion commit {id})",
             hex::encode(sha)
         )));
     }

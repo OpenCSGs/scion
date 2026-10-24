@@ -152,13 +152,13 @@ In each case, the gateway checks that the object's SHA is the commit's git SHA, 
 
 ## 7. Errors a git user sees
 
-They go to the client as `ERR` packets, or `ng` lines for pushes, and git prints them as `remote: …`:
+A fetch is planned, and its commits built, before the server answers, so that an error goes to the client as an `ERR` packet in place of the answer: git prints just `fatal: remote error: …`. An error found later, while the pack is being sent, comes on side band 3 as `remote: …`, followed by git's own complaint about the cut-off pack. Pushes report errors as `ng` lines.
 
 | Case | Message |
 |---|---|
 | no access | HTTP 401 with `WWW-Authenticate: Basic`, so git asks for credentials; 403 when the token cannot read the repository |
 | not a fast-forward | `ng refs/heads/main non-fast-forward` (git's own hint follows) |
-| a commit that cannot be served (§3) | `commit C1… was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| a commit that cannot be served (§3) | `git commit 3f2a… was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn (Scion commit C1…)` |
 | a gitlink or an unsupported mode in a push | `path vendor/lib is a submodule; Scion repositories cannot hold submodules` |
 | a pre-land check refused | the check's message |
 

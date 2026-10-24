@@ -232,8 +232,10 @@ pub fn commit_object(
     };
     if git_hash("commit", &body) != sha {
         return Err(Error::Unservable(format!(
-            "commit {id} was imported from git without its raw object and cannot be rebuilt; \
-             re-import it or use scn"
+            "git commit {} was imported without its raw git object, which git needs to check \
+             it (signed commits and ones with unusual headers do); re-import the repository with \
+             scn 0.1.11 or later, or clone it with scn (Scion commit {id})",
+            hex::encode(sha)
         )));
     }
     Ok(body)
@@ -287,7 +289,7 @@ mod tests {
         assert_eq!(commit_object(c.id(), &c, sha, &[1; 20], &[[2; 20]]), Ok(plain));
         // A signed commit's SHA covers its signature, which the fields do not keep.
         let e = commit_object(c.id(), &c, [9; 20], &[1; 20], &[[2; 20]]);
-        assert!(matches!(e, Err(Error::Unservable(m)) if m.contains("without its raw object")));
+        assert!(matches!(e, Err(Error::Unservable(m)) if m.contains("without its raw git object")));
     }
 
     #[test]

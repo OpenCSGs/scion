@@ -73,7 +73,7 @@ git clone http://git:$SCION_TOKEN@scion.example.com:7080/agentlab/app
 | `refs/heads/*` 和 `refs/tags/*` 以外的 ref（如 `refs/notes/*`） | 该 ref 的推送被拒绝 |
 | `blob:none` 和 `blob:limit` 以外的部分克隆过滤条件（`tree:0`、`sparse:…`） | 拒绝并给出提示 |
 | `git fetch --deepen` 和 `--shallow-exclude` | 拒绝并给出提示；`--depth`、`--shallow-since` 和 `--unshallow` 可用 |
-| 含子模块的提交，或 0.1.11 之前导入的签名提交 | 拉取失败，提示 `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| 含子模块的提交，或 0.1.11 之前导入的签名提交 | 拉取失败，提示 `fatal: remote error: git commit … was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn` |
 | 历史中包含被 [redact](redaction.zh-CN.md) 的文件 | 拉取失败：文件的 SHA 覆盖的内容已不允许任何人读取 |
 | SSH URL | 请使用 HTTP(S) |
 

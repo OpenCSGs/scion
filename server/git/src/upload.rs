@@ -21,6 +21,9 @@ pub const TAG_PREFIX: &str = "tags/";
 const GIVE_UP_HAVES: usize = 256;
 /// How many file contents are read at once while writing a pack.
 const READ_AHEAD: usize = 16;
+/// How many bytes of compressed commits a fetch builds before it answers: enough for every
+/// commit of most repositories, at a few hundred bytes each.
+pub const COMMIT_BUFFER: usize = 16 << 20;
 
 /// The git name of a Scion ref.
 pub fn git_ref_name(name: &str) -> String {
@@ -895,29 +898,77 @@ impl Deltas {
     }
 }
 
-/// Writes the plan as a pack. Trees and files go oldest first, so that a delta's base usually
-/// comes before it. Returns early, with no error, when the client goes away.
-pub async fn write_pack(
-    meta: &dyn MetaStore,
-    blobs: &dyn BlobStore,
-    repo: &str,
-    plan: &Plan,
-    out: &Out,
-    opts: PackOptions,
-) -> Result<()> {
-    let total = plan.len();
-    if !out.progress(&format!("Counting objects: {total}, done.\n")).await {
-        return Ok(());
-    }
-    let (mut w, head) = PackWriter::new(u32::try_from(total).map_err(|_| Error::Internal("too many objects".into()))?);
-    if !out.data(head).await {
-        return Ok(());
-    }
+/// A pack whose commits are built, up to a budget, before anything is
+/// sent: a commit git cannot be given then fails the fetch with a plain error, not a broken pack.
+pub struct Started<'a> {
+    plan: Plan,
+    objects: Objects<'a>,
+    writer: PackWriter,
+    head: Bytes,
+    commits: Vec<Bytes>,
+}
+
+/// Starts the pack for this plan: builds its first commits, `budget` bytes of them.
+pub async fn start<'a>(
+    meta: &'a dyn MetaStore,
+    blobs: &'a dyn BlobStore,
+    repo: &'a str,
+    plan: Plan,
+    budget: usize,
+) -> Result<Started<'a>> {
+    let total = u32::try_from(plan.len()).map_err(|_| Error::Internal("too many objects".into()))?;
+    let (mut writer, head) = PackWriter::new(total);
     let mut objects = Objects::new(meta, blobs, repo);
     let ids: Vec<ObjectId> = plan.commits.iter().map(|c| c.id).collect();
     let roots: Vec<ObjectId> = plan.commits.iter().map(|c| c.root_tree).collect();
     objects.prefetch(&ids, &roots).await?;
+    let mut commits = Vec::new();
+    let mut size = 0;
     for c in &plan.commits {
+        if size >= budget {
+            break;
+        }
+        let entry = writer.object(Kind::Commit, &objects.commit(c).await?);
+        size += entry.len();
+        commits.push(entry);
+    }
+    Ok(Started {
+        plan,
+        objects,
+        writer,
+        head,
+        commits,
+    })
+}
+
+/// Writes a started pack. Trees and files go oldest first, so that a delta's base usually
+/// comes before it. Returns early, with no error, when the client goes away.
+pub async fn write_pack(started: Started<'_>, out: &Out, opts: PackOptions) -> Result<()> {
+    let Started {
+        plan,
+        mut objects,
+        writer: mut w,
+        head,
+        commits,
+    } = started;
+    let (meta, blobs, repo) = (objects.meta, objects.blobs, objects.repo);
+    let plan = &plan;
+    if !out
+        .progress(&format!("Counting objects: {}, done.\n", plan.len()))
+        .await
+    {
+        return Ok(());
+    }
+    if !out.data(head).await {
+        return Ok(());
+    }
+    let built = commits.len();
+    for entry in commits {
+        if !out.data(entry).await {
+            return Ok(());
+        }
+    }
+    for c in &plan.commits[built..] {
         let body = objects.commit(c).await?;
         if !out.data(w.object(Kind::Commit, &body)).await {
             return Ok(());

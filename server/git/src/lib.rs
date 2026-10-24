@@ -405,7 +405,9 @@ impl Gateway {
 }
 
 /// Answers a fetch request into `tx`. An error before the pack starts goes to the client as an
-/// `ERR` packet; once the pack has started, on side band 3 (without side bands the pack just ends).
+/// `ERR` packet, in place of the acknowledgments, so that git prints just that; once the pack has
+/// started, on side band 3 (without side bands the pack just ends). The plan and the commits are
+/// built before answering, as that is where most errors come from.
 async fn fetch(
     meta: &dyn MetaStore,
     blobs: &dyn BlobStore,
@@ -417,28 +419,31 @@ async fn fetch(
     if req.wants.is_empty() {
         return;
     }
-    let selection = match negotiate(meta, blobs, repo, req, v2).await {
-        Ok((head, found)) => {
-            if tx.send(head.freeze()).await.is_err() {
-                return;
-            }
-            match found {
-                Some(f) => f,
-                None => return,
-            }
+    let started = match negotiate(meta, blobs, repo, req, v2).await {
+        Ok((head, None)) => {
+            let _ = tx.send(head.freeze()).await;
+            return;
         }
+        Ok((head, Some(sel))) => start_pack(meta, blobs, repo, &sel).await.map(|s| (head, s)),
+        Err(e) => Err(e),
+    };
+    let (head, started) = match started {
+        Ok(s) => s,
         Err(e) => {
             tracing::warn!(%repo, error = %e, "git fetch failed");
             let _ = tx.send(err_pkt(&e)).await;
             return;
         }
     };
+    if tx.send(head.freeze()).await.is_err() {
+        return;
+    }
     let out = Out::new(tx.clone(), req.side_band, !req.no_progress);
     let opts = upload::PackOptions {
         thin: req.thin_pack,
         ofs: req.ofs_delta,
     };
-    match send_pack(meta, blobs, repo, &selection, opts, &out).await {
+    match upload::write_pack(started, &out, opts).await {
         Ok(()) => out.flush().await,
         Err(e) => {
             tracing::warn!(%repo, error = %e, "git fetch failed");
@@ -554,17 +559,16 @@ async fn negotiate(
     ))
 }
 
-async fn send_pack(
-    meta: &dyn MetaStore,
-    blobs: &dyn BlobStore,
-    repo: &str,
+/// Plans the pack of a selection and builds its first commits.
+async fn start_pack<'a>(
+    meta: &'a dyn MetaStore,
+    blobs: &'a dyn BlobStore,
+    repo: &'a str,
     sel: &Selection,
-    opts: upload::PackOptions,
-    out: &Out,
-) -> Result<()> {
+) -> Result<upload::Started<'a>> {
     let plan = upload::plan(meta, blobs, repo, &sel.wants, &sel.haves, &sel.cut, sel.filter).await?;
     upload::check_redactions(meta, repo, &plan.files).await?;
-    upload::write_pack(meta, blobs, repo, &plan, out, opts).await
+    upload::start(meta, blobs, repo, plan, upload::COMMIT_BUFFER).await
 }
 
 /// The token in `Authorization`: the password of Basic credentials, or a Bearer token.
@@ -888,6 +892,85 @@ mod tests {
         )
         .await;
         assert!(String::from_utf8_lossy(&got).contains("not our ref"), "{got:?}");
+    }
+
+    #[tokio::test]
+    async fn reports_unservable_commits_before_the_pack() {
+        use scion_object::{Changeset, Signature};
+        let (g, stub) = pushing().await;
+        let sig = Signature {
+            name: "A".into(),
+            email: "a@x".into(),
+            time_ms: 1_700_000_000_000,
+            tz_offset_minutes: 0,
+        };
+        // An imported commit whose git SHA its fields do not rebuild, as a signed one without
+        // its raw object
+        let ext = [("git.sha1".to_string(), vec![0xee; 20])].into_iter().collect();
+        let cs = Changeset::new(vec![], sig.clone(), sig, "signed\n", [4; 16], vec![], ext).expect("cs");
+        let rec = stub.writer.create("r", &cs).await.expect("create");
+        g.meta
+            .cas_ref("r", "main", scion_store::RefExpect::Absent, rec.id)
+            .await
+            .expect("ref");
+        let want = "want eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee side-band-64k";
+        let mut v0 = BytesMut::new();
+        pkt::put_line(&mut v0, want);
+        v0.extend_from_slice(pkt::FLUSH);
+        pkt::put_line(&mut v0, "done");
+        let mut v2 = BytesMut::new();
+        pkt::put_line(&mut v2, "command=fetch");
+        v2.extend_from_slice(pkt::DELIM);
+        pkt::put_line(&mut v2, "want eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+        pkt::put_line(&mut v2, "done");
+        v2.extend_from_slice(pkt::FLUSH);
+        for (v2, body) in [(false, v0), (true, v2)] {
+            let body: &'static [u8] = Box::leak(body.to_vec().into_boxed_slice());
+            let (_, got) = call(&g, Method::POST, "/r/git-upload-pack", v2, body).await;
+            // Just the error, with no acknowledgments before it
+            let got = String::from_utf8_lossy(&got).into_owned();
+            assert!(got[4..].starts_with("ERR git commit eeee"), "{got}");
+            assert!(
+                got.contains("without its raw git object") && got.contains("scn 0.1.11"),
+                "{got}"
+            );
+        }
+        // A commit past the budget fails once the pack has started: on side band 3
+        let sel = Selection {
+            wants: upload::resolve_wants(g.meta.as_ref(), g.blobs.as_ref(), "r", &[[0xee; 20]])
+                .await
+                .expect("wants"),
+            haves: vec![],
+            cut: Default::default(),
+            filter: upload::Filter::None,
+        };
+        let plan = upload::plan(
+            g.meta.as_ref(),
+            g.blobs.as_ref(),
+            "r",
+            &sel.wants,
+            &[],
+            &sel.cut,
+            sel.filter,
+        )
+        .await
+        .expect("plan");
+        let started = upload::start(g.meta.as_ref(), g.blobs.as_ref(), "r", plan, 0)
+            .await
+            .expect("start");
+        let (tx, mut rx) = mpsc::channel(16);
+        let out = Out::new(tx, true, false);
+        let e = upload::write_pack(started, &out, upload::PackOptions::default())
+            .await
+            .expect_err("unservable");
+        assert!(e.to_string().contains("without its raw git object"));
+        drop(out);
+        let mut sent = Vec::new();
+        while let Some(b) = rx.recv().await {
+            sent.extend_from_slice(&b);
+        }
+        // Only the pack header went out
+        assert_eq!(&sent[4..9], b"\x01PACK", "{sent:?}");
     }
 
     /// Writes through the store directly and records ref updates.

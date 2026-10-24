@@ -152,13 +152,13 @@ git clone http://scion.example.com:7080/agentlab/app
 
 ## 7. git 用户会看到的错误
 
-错误以 `ERR` 包（推送时为 `ng` 行）发给客户端，git 显示为 `remote: …`：
+拉取时先做规划、生成提交对象，再给客户端应答。因此出错时服务端用一个 `ERR` 包代替应答，git 只显示一行 `fatal: remote error: …`。如果错误在发送 pack 的过程中才出现，则通过 side band 3 发出，git 显示为 `remote: …`，后面还会跟着 git 自己对 pack 中断的报错。推送的错误以 `ng` 行返回：
 
 | 情况 | 提示 |
 |---|---|
 | 没有权限 | HTTP 401 并带 `WWW-Authenticate: Basic`，git 会提示输入凭据；token 无权读取仓库时为 403 |
 | 不是快进 | `ng refs/heads/main non-fast-forward`（后面跟着 git 自己的提示） |
-| 无法提供的提交（§3） | `commit C1… was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| 无法提供的提交（§3） | `git commit 3f2a… was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn (Scion commit C1…)` |
 | 推送中有 gitlink 或不支持的模式 | `path vendor/lib is a submodule; Scion repositories cannot hold submodules` |
 | 合入前检查拒绝 | 检查返回的说明 |
 

@@ -73,7 +73,7 @@ Every commit has one git SHA, the one `GetGitShas` and the SDK's `git_shas` repo
 | Refs outside `refs/heads/*` and `refs/tags/*` (`refs/notes/*` and so on) | The push is refused for that ref |
 | Partial clones with filters other than `blob:none` and `blob:limit` (`tree:0`, `sparse:…`) | Refused with a message |
 | `git fetch --deepen` and `--shallow-exclude` | Refused with a message; `--depth`, `--shallow-since` and `--unshallow` work |
-| Commits with submodules, or signed commits imported before 0.1.11 | The fetch fails with `commit … was imported from git without its raw object and cannot be rebuilt; re-import it or use scn` |
+| Commits with submodules, or signed commits imported before 0.1.11 | The fetch fails with `fatal: remote error: git commit … was imported without its raw git object, …; re-import the repository with scn 0.1.11 or later, or clone it with scn` |
 | History containing a [redacted](redaction.md) file | The fetch fails: the file's SHA covers content nobody may read any more |
 | SSH URLs | Use HTTP(S) |
 
